@@ -1218,6 +1218,31 @@ def test_configs_needs_the_ssh_key_not_the_api_password(monkeypatch, collector):
     assert collector.configs(_device(), Credential()) == {}
 
 
+def test_the_ssh_client_authenticates_with_the_key_not_the_api_password(monkeypatch, collector):
+    """The credential's password is the hostd password; it is not an SSH login."""
+    import paramiko
+
+    calls: list[dict] = []
+
+    class FakeClient:
+        def set_missing_host_key_policy(self, policy):
+            pass
+
+        def connect(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(paramiko, "SSHClient", FakeClient)
+    cred = Credential(username="root", password="s3cret", ssh_key_path="/home/infra/.ssh/esxi")
+
+    collector._ssh_client(_device(), cred)
+
+    (kwargs,) = calls
+    assert kwargs["key_filename"] == "/home/infra/.ssh/esxi"
+    assert "password" not in kwargs
+    assert kwargs["passphrase"] == "s3cret"  # only ever to unlock the key
+    assert kwargs["look_for_keys"] is False and kwargs["allow_agent"] is False
+
+
 def test_configs_takes_at_most_one_bundle_an_hour(monkeypatch, collector):
     clients: list[FakeSSH] = []
 

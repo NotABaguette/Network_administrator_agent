@@ -35,6 +35,11 @@ path for it (see `docs/architecture.md`).
 Everything returned by `collect()` is parsed structure — rows, not raw text.
 `pyVim`/`pyVmomi` and `paramiko` are imported lazily so the package imports
 without them.
+
+`interval_seconds` is 300, but the scheduler currently runs every collector at
+the shortest interval of all of them, so a host with many VMs is walked more
+often than that until the scheduler grows one job per collector kind. The
+backup keeps its own hourly throttle rather than relying on that.
 """
 
 from __future__ import annotations
@@ -996,6 +1001,12 @@ class EsxiCollector(Collector):
 
     # -- host config backup (SSH) -----------------------------------------
     def _ssh_client(self, device: SeedDevice, cred: Credential) -> Any:
+        """An SSH client authenticated by the credential's key.
+
+        The key is the identity: the credential's password is the hostd API
+        password and is only ever offered as the key's passphrase, never as an
+        SSH login password, so it is not replayed at a shell prompt.
+        """
         import paramiko
 
         client = paramiko.SSHClient()
@@ -1004,14 +1015,13 @@ class EsxiCollector(Collector):
             "hostname": device.mgmt_ip,
             "port": 22,  # device.port is the API port, SSH is always 22 on ESXi
             "username": cred.username,
+            "key_filename": cred.ssh_key_path,
             "timeout": 20,
             "allow_agent": False,
             "look_for_keys": False,
         }
-        if cred.ssh_key_path:
-            kwargs["key_filename"] = cred.ssh_key_path
         if cred.password:
-            kwargs["password"] = cred.password.get_secret_value()
+            kwargs["passphrase"] = cred.password.get_secret_value()
         client.connect(**kwargs)
         return client
 
