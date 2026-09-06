@@ -16,8 +16,8 @@ log = logging.getLogger(__name__)
 
 
 def _load_collectors() -> None:
-    # Import side effects register collectors. Phase 1 adds esxi and ilo.
-    from infra_agent.collectors import cisco, fortigate  # noqa: F401
+    # Import side effects register collectors.
+    from infra_agent.collectors import cisco, esxi, fortigate, ilo  # noqa: F401
 
 
 def _context():

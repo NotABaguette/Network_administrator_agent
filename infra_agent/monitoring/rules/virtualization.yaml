@@ -1,0 +1,75 @@
+# Standalone ESXi hosts and their VMs, from the esxi collector's gauges.
+# There is no vCenter and no DRS: nothing moves on its own, so a VM that is
+# down stays down until somebody acts.
+groups:
+  - name: infra-virtualization
+    rules:
+      - alert: DatastoreLowSpace
+        expr: infra_esxi_datastore_free_bytes / (infra_esxi_datastore_capacity_bytes > 0) < 0.15
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Datastore {{ $labels.datastore }} on {{ $labels.device }} is below 15% free"
+          description: "Snapshots and thin disks grow silently. Tier 0 snapshot-before-change is refused below the free-space threshold."
+
+      - alert: DatastoreCriticallyLow
+        expr: infra_esxi_datastore_free_bytes / (infra_esxi_datastore_capacity_bytes > 0) < 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Datastore {{ $labels.datastore }} on {{ $labels.device }} is below 5% free"
+          description: "A full datastore stuns every VM on it. Free space before anything else."
+
+      - alert: VirtualMachineDown
+        expr: infra_esxi_vm_power_state == 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "VM {{ $labels.vm }} on {{ $labels.device }} is not powered on"
+          description: "Check the host event log in the snapshot first: a human power-off blocks the auto:restart Tier 0 action."
+
+      - alert: EsxiHostCpuSaturated
+        expr: infra_esxi_host_cpu_usage_ratio > 0.9
+        for: 20m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.device }} has been above 90% CPU for 20 minutes"
+
+      - alert: EsxiHostMemorySaturated
+        expr: infra_esxi_host_memory_usage_ratio > 0.92
+        for: 20m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.device }} has been above 92% memory for 20 minutes"
+          description: "With no vCenter there is nowhere to move a VM to; ballooning and swap come next."
+
+      - alert: EsxiHostRebooted
+        expr: infra_esxi_host_uptime_seconds < 900
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.device }} rebooted less than 15 minutes ago"
+          description: "Correlate with approved ChangePlans; an unexplained host reboot is an incident."
+
+      - alert: EsxiUplinkDown
+        expr: infra_esxi_pnic_link_up == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Uplink {{ $labels.pnic }} on {{ $labels.device }} has no link"
+          description: "Check the switch port it lands on; if the vSwitch has one uplink left this is the last one."
+
+      - alert: VmSnapshotTooOld
+        expr: infra_esxi_vm_snapshot_age_seconds > 3 * 24 * 3600
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "VM {{ $labels.vm }} on {{ $labels.device }} has a snapshot older than three days"
+          description: "Old delta disks fill datastores and make consolidation slow and risky. Snapshots taken for a change are removed after the post-check."
+
+      - alert: VmSnapshotChainLong
+        expr: infra_esxi_vm_snapshot_count > 3
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "VM {{ $labels.vm }} on {{ $labels.device }} carries {{ $value }} snapshots"
