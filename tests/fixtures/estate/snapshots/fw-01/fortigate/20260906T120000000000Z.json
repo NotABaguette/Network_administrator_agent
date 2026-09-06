@@ -1,0 +1,281 @@
+{
+ "device": "fw-01",
+ "collector": "fortigate",
+ "taken_at": "2026-09-06T12:00:00+00:00",
+ "data": {
+  "system": {
+   "hostname": "fw-01",
+   "version": "v7.4.4",
+   "serial": "FGT60FTK00000001"
+  },
+  "interfaces": [
+   {
+    "name": "wan1",
+    "type": "physical",
+    "vdom": "root",
+    "ip": "203.0.113.2 255.255.255.252",
+    "vlanid": 0,
+    "interface": null,
+    "alias": "isp-primary",
+    "role": "wan",
+    "status": "up",
+    "allowaccess": "ping",
+    "macaddr": "00:09:0f:09:00:0a",
+    "lldp_reception": "enable",
+    "lldp_transmission": "enable"
+   },
+   {
+    "name": "wan2",
+    "type": "physical",
+    "vdom": "root",
+    "ip": "0.0.0.0 0.0.0.0",
+    "vlanid": 0,
+    "interface": null,
+    "alias": "isp-backup",
+    "role": "wan",
+    "status": "down",
+    "allowaccess": "",
+    "macaddr": "00:09:0f:09:00:0b",
+    "lldp_reception": "enable",
+    "lldp_transmission": "enable"
+   },
+   {
+    "name": "internal",
+    "type": "physical",
+    "vdom": "root",
+    "ip": "0.0.0.0 0.0.0.0",
+    "vlanid": 0,
+    "interface": null,
+    "alias": "core-trunk",
+    "role": "lan",
+    "status": "up",
+    "allowaccess": "",
+    "macaddr": "00:09:0f:09:00:01",
+    "lldp_reception": "enable",
+    "lldp_transmission": "enable"
+   },
+   {
+    "name": "internal.10",
+    "type": "vlan",
+    "vdom": "root",
+    "ip": "10.10.10.1 255.255.255.0",
+    "vlanid": 10,
+    "interface": "internal",
+    "alias": "mgmt",
+    "role": "lan",
+    "status": "up",
+    "allowaccess": "ping https ssh",
+    "macaddr": "00:09:0f:09:00:01"
+   },
+   {
+    "name": "internal.20",
+    "type": "vlan",
+    "vdom": "root",
+    "ip": "10.20.0.1 255.255.255.0",
+    "vlanid": 20,
+    "interface": "internal",
+    "alias": "servers",
+    "role": "lan",
+    "status": "up",
+    "allowaccess": "ping",
+    "macaddr": "00:09:0f:09:00:01"
+   },
+   {
+    "name": "internal.30",
+    "type": "vlan",
+    "vdom": "root",
+    "ip": "10.30.0.1 255.255.255.0",
+    "vlanid": 30,
+    "interface": "internal",
+    "alias": "dmz",
+    "role": "dmz",
+    "status": "up",
+    "allowaccess": "",
+    "macaddr": "00:09:0f:09:00:01"
+   }
+  ],
+  "interface_stats": {},
+  "zones": [
+   {
+    "name": "lan",
+    "interfaces": [
+     "internal.10",
+     "internal.20"
+    ]
+   }
+  ],
+  "addresses": [
+   {
+    "name": "net-servers",
+    "type": "ipmask",
+    "subnet": "10.20.0.0 255.255.255.0",
+    "fqdn": null,
+    "start_ip": null,
+    "end_ip": null,
+    "interface": "internal.20"
+   },
+   {
+    "name": "net-mgmt",
+    "type": "ipmask",
+    "subnet": "10.10.10.0 255.255.255.0",
+    "fqdn": null,
+    "start_ip": null,
+    "end_ip": null,
+    "interface": "internal.10"
+   },
+   {
+    "name": "host-web-01",
+    "type": "ipmask",
+    "subnet": "10.20.0.11 255.255.255.255",
+    "fqdn": null,
+    "start_ip": null,
+    "end_ip": null,
+    "interface": "internal.20"
+   }
+  ],
+  "addrgrps": [
+   {
+    "name": "grp-internal",
+    "members": [
+     "net-servers",
+     "net-mgmt"
+    ]
+   }
+  ],
+  "services": [
+   {
+    "name": "HTTPS",
+    "tcp": "443",
+    "udp": null,
+    "protocol": 6
+   }
+  ],
+  "policies": [
+   {
+    "id": 1,
+    "name": "internal-to-internet",
+    "status": "enable",
+    "action": "accept",
+    "srcintf": [
+     "internal.20"
+    ],
+    "dstintf": [
+     "wan1"
+    ],
+    "srcaddr": [
+     "net-servers"
+    ],
+    "dstaddr": [
+     "all"
+    ],
+    "service": [
+     "ALL"
+    ],
+    "schedule": "always",
+    "nat": "enable",
+    "logtraffic": "all",
+    "utm": [
+     "ips-sensor"
+    ],
+    "comments": "servers egress"
+   },
+   {
+    "id": 2,
+    "name": "publish-web-01",
+    "status": "enable",
+    "action": "accept",
+    "srcintf": [
+     "wan1"
+    ],
+    "dstintf": [
+     "internal.20"
+    ],
+    "srcaddr": [
+     "all"
+    ],
+    "dstaddr": [
+     "host-web-01"
+    ],
+    "service": [
+     "HTTPS"
+    ],
+    "schedule": "always",
+    "nat": "disable",
+    "logtraffic": "all",
+    "utm": [],
+    "comments": "inbound https"
+   }
+  ],
+  "vips": [],
+  "static_routes": [
+   {
+    "seq": 1,
+    "dst": "0.0.0.0 0.0.0.0",
+    "gateway": "203.0.113.1",
+    "device": "wan1",
+    "distance": 10,
+    "priority": 0,
+    "status": "enable"
+   }
+  ],
+  "routing_table": [],
+  "sdwan": {
+   "status": "enable",
+   "members": [
+    {
+     "seq-num": 1,
+     "interface": "wan1",
+     "gateway": "203.0.113.1"
+    },
+    {
+     "seq-num": 2,
+     "interface": "wan2",
+     "gateway": "198.51.100.1"
+    }
+   ]
+  },
+  "sdwan_health": {},
+  "ipsec": [],
+  "dhcp_leases": [
+   {
+    "ip": "10.20.0.12",
+    "mac": "00:50:56:aa:00:03",
+    "hostname": "app-01",
+    "interface": "internal.20",
+    "expire": 3600
+   }
+  ],
+  "arp": [
+   {
+    "ip": "10.20.0.11",
+    "mac": "00:50:56:aa:00:02",
+    "interface": "internal.20"
+   },
+   {
+    "ip": "10.10.10.50",
+    "mac": "00:50:56:aa:00:01",
+    "interface": "internal.10"
+   }
+  ],
+  "ha": [],
+  "lldp": [
+   {
+    "interface": "internal",
+    "neighbors": [
+     {
+      "chassis_id": "00:1a:2b:3c:4d:5e",
+      "system_name": "sw-core-01",
+      "port_id": "GigabitEthernet1/0/23",
+      "port_description": "fw-01 internal",
+      "system_description": "Cisco IOS Software, C3750E"
+     }
+    ]
+   }
+  ],
+  "resources": {},
+  "firmware": {
+   "current": "v7.4.4"
+  },
+  "errors": {}
+ }
+}

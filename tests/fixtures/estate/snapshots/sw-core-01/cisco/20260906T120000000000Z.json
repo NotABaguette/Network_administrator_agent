@@ -1,0 +1,250 @@
+{
+ "device": "sw-core-01",
+ "collector": "cisco",
+ "taken_at": "2026-09-06T12:00:00+00:00",
+ "data": {
+  "version": [
+   {
+    "hostname": "sw-core-01",
+    "version": "15.2(7)E5",
+    "hardware": [
+     "WS-C3750X-24T"
+    ],
+    "serial": [
+     "FDO1234X0AB"
+    ]
+   }
+  ],
+  "vlans": [
+   {
+    "vlan_id": "10",
+    "vlan_name": "mgmt",
+    "status": "active",
+    "interfaces": [
+     "Gi1/0/10"
+    ]
+   },
+   {
+    "vlan_id": "20",
+    "vlan_name": "servers",
+    "status": "active",
+    "interfaces": [
+     "Gi1/0/5"
+    ]
+   },
+   {
+    "vlan_id": "30",
+    "vlan_name": "dmz",
+    "status": "active",
+    "interfaces": []
+   }
+  ],
+  "interfaces_status": [
+   {
+    "port": "Gi1/0/1",
+    "name": "esx-01 vmnic0",
+    "status": "connected",
+    "vlan": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "1000BaseTX"
+   },
+   {
+    "port": "Gi1/0/3",
+    "name": "esx-02 vmnic0",
+    "status": "connected",
+    "vlan": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "1000BaseTX"
+   },
+   {
+    "port": "Gi1/0/5",
+    "name": "lab server",
+    "status": "connected",
+    "vlan": "20",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "1000BaseTX"
+   },
+   {
+    "port": "Gi1/0/10",
+    "name": "esx-01 iLO",
+    "status": "connected",
+    "vlan": "10",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "1000BaseTX"
+   },
+   {
+    "port": "Gi1/0/23",
+    "name": "fw-01 internal",
+    "status": "connected",
+    "vlan": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "1000BaseTX"
+   },
+   {
+    "port": "Gi1/0/24",
+    "name": "sw-acc-01 uplink",
+    "status": "connected",
+    "vlan": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "1000BaseTX"
+   }
+  ],
+  "trunks": [
+   {
+    "port": "Gi1/0/1",
+    "mode": "on",
+    "encapsulation": "802.1q",
+    "status": "trunking",
+    "native_vlan": "1",
+    "vlans_allowed": "10,20",
+    "vlans_allowed_active": "10,20"
+   },
+   {
+    "port": "Gi1/0/3",
+    "mode": "on",
+    "encapsulation": "802.1q",
+    "status": "trunking",
+    "native_vlan": "1",
+    "vlans_allowed": "10,20",
+    "vlans_allowed_active": "10,20"
+   },
+   {
+    "port": "Gi1/0/23",
+    "mode": "on",
+    "encapsulation": "802.1q",
+    "status": "trunking",
+    "native_vlan": "1",
+    "vlans_allowed": "10,20,30",
+    "vlans_allowed_active": "10,20,30"
+   },
+   {
+    "port": "Gi1/0/24",
+    "mode": "on",
+    "encapsulation": "802.1q",
+    "status": "trunking",
+    "native_vlan": "1",
+    "vlans_allowed": "10,20,30",
+    "vlans_allowed_active": "10,20,30"
+   }
+  ],
+  "interfaces": [
+   {
+    "interface": "Vlan10",
+    "ip_address": "10.10.10.2/24",
+    "link_status": "up",
+    "protocol_status": "up",
+    "description": "management SVI"
+   }
+  ],
+  "ip_int_brief": [
+   {
+    "interface": "Vlan10",
+    "ip_address": "10.10.10.2",
+    "status": "up",
+    "proto": "up"
+   },
+   {
+    "interface": "GigabitEthernet1/0/1",
+    "ip_address": "unassigned",
+    "status": "up",
+    "proto": "up"
+   }
+  ],
+  "cdp": [
+   {
+    "local_port": "GigabitEthernet1/0/1",
+    "destination_host": "esx-01.lab.local",
+    "remote_port": "vmnic0",
+    "management_ip": "10.10.10.21",
+    "platform": "VMware ESX",
+    "capabilities": "Host"
+   },
+   {
+    "local_port": "GigabitEthernet1/0/3",
+    "destination_host": "esx-02.lab.local",
+    "remote_port": "vmnic0",
+    "management_ip": "10.10.10.22",
+    "platform": "VMware ESX",
+    "capabilities": "Host"
+   },
+   {
+    "local_port": "GigabitEthernet1/0/24",
+    "destination_host": "sw-acc-01",
+    "remote_port": "GigabitEthernet1/0/24",
+    "management_ip": "10.10.10.12",
+    "platform": "cisco WS-C2960X-24TS-L",
+    "capabilities": "Switch IGMP"
+   }
+  ],
+  "lldp": [
+   {
+    "local_interface": "Gi1/0/23",
+    "neighbor": "fw-01",
+    "neighbor_interface": "internal",
+    "management_ip": "10.10.10.1",
+    "capabilities": "BR",
+    "system_description": "FortiGate-60F"
+   },
+   {
+    "local_interface": "Gi1/0/10",
+    "neighbor": "esx-01-ilo",
+    "neighbor_interface": "iLO-Port-1",
+    "management_ip": "10.10.10.121",
+    "capabilities": "S",
+    "system_description": "HPE iLO5"
+   }
+  ],
+  "mac_table": [
+   {
+    "destination_address": "0050.56aa.0001",
+    "type": "DYNAMIC",
+    "vlan": "10",
+    "destination_port": [
+     "Gi1/0/1"
+    ]
+   },
+   {
+    "destination_address": "0050.56aa.0002",
+    "type": "DYNAMIC",
+    "vlan": "20",
+    "destination_port": [
+     "Gi1/0/1"
+    ]
+   },
+   {
+    "destination_address": "0050.56aa.0003",
+    "type": "DYNAMIC",
+    "vlan": "20",
+    "destination_port": [
+     "Gi1/0/3"
+    ]
+   }
+  ],
+  "arp": [
+   {
+    "protocol": "Internet",
+    "address": "10.10.10.50",
+    "age": "12",
+    "mac": "0050.56aa.0001",
+    "type": "ARPA",
+    "interface": "Vlan10"
+   },
+   {
+    "protocol": "Internet",
+    "address": "10.10.10.1",
+    "age": "3",
+    "mac": "0009.0f09.0001",
+    "type": "ARPA",
+    "interface": "Vlan10"
+   }
+  ],
+  "etherchannel": [],
+  "errors": {}
+ }
+}

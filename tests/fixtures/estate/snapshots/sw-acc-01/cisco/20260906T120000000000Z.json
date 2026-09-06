@@ -1,0 +1,107 @@
+{
+ "device": "sw-acc-01",
+ "collector": "cisco",
+ "taken_at": "2026-09-06T12:00:00+00:00",
+ "data": {
+  "version": [
+   {
+    "hostname": "sw-acc-01",
+    "version": "15.0(2)SE11",
+    "hardware": [
+     "WS-C2960X-24TS-L"
+    ],
+    "serial": [
+     "FOC2101Y0CD"
+    ]
+   }
+  ],
+  "vlans": [
+   {
+    "vlan_id": "10",
+    "vlan_name": "mgmt",
+    "status": "active",
+    "interfaces": []
+   },
+   {
+    "vlan_id": "20",
+    "vlan_name": "servers",
+    "status": "active",
+    "interfaces": []
+   }
+  ],
+  "interfaces_status": [
+   {
+    "port": "Gi1/0/1",
+    "name": "esx-01 vmnic1",
+    "status": "connected",
+    "vlan": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "1000BaseTX"
+   },
+   {
+    "port": "Gi1/0/24",
+    "name": "sw-core-01 uplink",
+    "status": "connected",
+    "vlan": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "1000BaseTX"
+   }
+  ],
+  "trunks": [
+   {
+    "port": "Gi1/0/1",
+    "mode": "on",
+    "encapsulation": "802.1q",
+    "status": "trunking",
+    "native_vlan": "1",
+    "vlans_allowed": "10,20",
+    "vlans_allowed_active": "10,20"
+   },
+   {
+    "port": "Gi1/0/24",
+    "mode": "on",
+    "encapsulation": "802.1q",
+    "status": "trunking",
+    "native_vlan": "1",
+    "vlans_allowed": "10,20",
+    "vlans_allowed_active": "10,20"
+   }
+  ],
+  "interfaces": [],
+  "ip_int_brief": [],
+  "cdp": [
+   {
+    "local_port": "GigabitEthernet1/0/1",
+    "destination_host": "esx-01.lab.local",
+    "remote_port": "vmnic1",
+    "management_ip": "10.10.10.21",
+    "platform": "VMware ESX",
+    "capabilities": "Host"
+   },
+   {
+    "local_port": "GigabitEthernet1/0/24",
+    "destination_host": "sw-core-01",
+    "remote_port": "GigabitEthernet1/0/24",
+    "management_ip": "10.10.10.11",
+    "platform": "cisco WS-C3750X-24T",
+    "capabilities": "Switch IGMP"
+   }
+  ],
+  "lldp": [],
+  "mac_table": [
+   {
+    "destination_address": "0050.56aa.0001",
+    "type": "DYNAMIC",
+    "vlan": "10",
+    "destination_port": [
+     "Gi1/0/1"
+    ]
+   }
+  ],
+  "arp": [],
+  "etherchannel": [],
+  "errors": {}
+ }
+}

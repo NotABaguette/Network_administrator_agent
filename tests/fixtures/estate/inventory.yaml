@@ -1,0 +1,39 @@
+# Synthetic estate used by tests/test_correlate.py: two switches, one firewall,
+# two ESXi hosts with four VMs, and the iLO behind each host.
+devices:
+- name: fw-01
+  kind: fortigate
+  mgmt_ip: 10.10.10.1
+  credential_ref: fw-01
+  tags: [edge]
+- name: sw-core-01
+  kind: cisco_ios
+  mgmt_ip: 10.10.10.11
+  credential_ref: sw-core-01
+  tags: [core]
+- name: sw-acc-01
+  kind: cisco_ios
+  mgmt_ip: 10.10.10.12
+  credential_ref: sw-acc-01
+  legacy_ssh: true
+  tags: [access]
+- name: esx-01
+  kind: esxi
+  mgmt_ip: 10.10.10.21
+  credential_ref: esx-01
+  license: free
+- name: esx-02
+  kind: esxi
+  mgmt_ip: 10.10.10.22
+  credential_ref: esx-02
+  license: free
+- name: esx-01-ilo
+  kind: ilo
+  mgmt_ip: 10.10.10.121
+  credential_ref: esx-01-ilo
+  tags: [host:esx-01]
+- name: esx-02-ilo
+  kind: ilo
+  mgmt_ip: 10.10.10.122
+  credential_ref: esx-02-ilo
+  tags: [host:esx-02]

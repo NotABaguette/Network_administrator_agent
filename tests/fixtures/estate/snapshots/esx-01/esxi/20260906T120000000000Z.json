@@ -1,0 +1,146 @@
+{
+ "device": "esx-01",
+ "collector": "esxi",
+ "taken_at": "2026-09-06T12:00:00+00:00",
+ "data": {
+  "host": {
+   "name": "esx-01.lab.local",
+   "version": "8.0.2",
+   "build": "22380479",
+   "license": "free",
+   "model": "ProLiant DL360 Gen9"
+  },
+  "pnics": [
+   {
+    "name": "vmnic0",
+    "mac": "9c:dc:71:00:00:01",
+    "link_up": true,
+    "speed_mb": 1000,
+    "cdp": {
+     "device_id": "sw-core-01",
+     "port_id": "GigabitEthernet1/0/1",
+     "address": "10.10.10.11",
+     "platform": "cisco WS-C3750X-24T"
+    }
+   },
+   {
+    "name": "vmnic1",
+    "mac": "9c:dc:71:00:00:02",
+    "link_up": true,
+    "speed_mb": 1000,
+    "cdp": {
+     "device_id": "sw-acc-01",
+     "port_id": "GigabitEthernet1/0/1",
+     "address": "10.10.10.12",
+     "platform": "cisco WS-C2960X-24TS-L"
+    }
+   }
+  ],
+  "vswitches": [
+   {
+    "name": "vSwitch0",
+    "uplinks": [
+     "vmnic0",
+     "vmnic1"
+    ],
+    "mtu": 1500
+   }
+  ],
+  "portgroups": [
+   {
+    "name": "Management",
+    "vswitch": "vSwitch0",
+    "vlan": 10
+   },
+   {
+    "name": "Servers",
+    "vswitch": "vSwitch0",
+    "vlan": 20
+   }
+  ],
+  "vmknics": [
+   {
+    "name": "vmk0",
+    "portgroup": "Management",
+    "ip": "10.10.10.21",
+    "netmask": "255.255.255.0",
+    "mac": "9c:dc:71:00:00:01",
+    "services": [
+     "management"
+    ]
+   }
+  ],
+  "datastores": [
+   {
+    "name": "ds-esx01-local",
+    "type": "VMFS",
+    "capacity_gb": 900,
+    "free_gb": 420,
+    "accessible": true,
+    "extents": [
+     {
+      "disk_name": "naa.600508b1001c000000000000000000a1",
+      "partition": 1
+     }
+    ]
+   }
+  ],
+  "vms": [
+   {
+    "name": "mgmt-01",
+    "power_state": "poweredOn",
+    "uuid": "4213a1b0-0001",
+    "guest_os": "Ubuntu Linux (64-bit)",
+    "tags": [
+     "role:platform",
+     "auto:restart"
+    ],
+    "vnics": [
+     {
+      "label": "Network adapter 1",
+      "mac": "00:50:56:aa:00:01",
+      "portgroup": "Management",
+      "connected": true,
+      "ips": [
+       "10.10.10.50"
+      ]
+     }
+    ],
+    "disks": [
+     {
+      "label": "Hard disk 1",
+      "vmdk": "[ds-esx01-local] mgmt-01/mgmt-01.vmdk",
+      "datastore": "ds-esx01-local",
+      "size_gb": 120
+     }
+    ]
+   },
+   {
+    "name": "web-01",
+    "power_state": "poweredOn",
+    "uuid": "4213a1b0-0002",
+    "guest_os": "Debian GNU/Linux 12 (64-bit)",
+    "tags": [],
+    "guest_ips": [
+     "10.20.0.11"
+    ],
+    "vnics": [
+     {
+      "label": "Network adapter 1",
+      "mac": "00:50:56:aa:00:02",
+      "portgroup": "Servers",
+      "connected": true
+     }
+    ],
+    "disks": [
+     {
+      "label": "Hard disk 1",
+      "vmdk": "[ds-esx01-local] web-01/web-01.vmdk",
+      "size_gb": 60
+     }
+    ]
+   }
+  ],
+  "errors": {}
+ }
+}
