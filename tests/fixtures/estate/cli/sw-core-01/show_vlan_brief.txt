@@ -1,0 +1,8 @@
+VLAN Name                             Status    Ports
+---- -------------------------------- --------- -------------------------------
+1    default                          active    Gi1/0/2, Gi1/0/4, Gi1/0/6
+10   mgmt                             active    Gi1/0/10
+20   servers                          active    Gi1/0/5
+30   dmz                              active
+1002 fddi-default                     act/unsup
+1003 token-ring-default               act/unsup

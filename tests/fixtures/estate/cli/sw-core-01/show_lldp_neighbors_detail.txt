@@ -1,0 +1,65 @@
+------------------------------------------------
+Local Intf: Gi1/0/10
+Chassis id: 00:25:b5:aa:00:11
+Port id: iLO-Port-1
+Port Description: iLO Dedicated Network Port
+System Name: esx-01-ilo
+
+System Description:
+HPE Integrated Lights-Out 5 2.98
+
+Time remaining: 101 seconds
+System Capabilities: S
+Enabled Capabilities: S
+Management Addresses:
+    IP: 10.10.10.121
+Auto Negotiation - supported, enabled
+Physical media capabilities:
+    1000baseT(FD)
+Media Attachment Unit type: 30
+Vlan ID: 10
+
+------------------------------------------------
+Local Intf: Gi1/0/22
+Chassis id: 00:09:0f:09:00:01
+Port id: internal4
+Port Description: internal4
+System Name: fw-01
+
+System Description:
+FortiGate-60F v7.4.4,build2662,240613 (GA.F)
+
+Time remaining: 94 seconds
+System Capabilities: B,R
+Enabled Capabilities: B,R
+Management Addresses:
+    IP: 10.10.10.1
+Auto Negotiation - supported, enabled
+Physical media capabilities:
+    1000baseT(FD)
+Media Attachment Unit type: 30
+Vlan ID: - not advertised
+
+------------------------------------------------
+Local Intf: Gi1/0/23
+Chassis id: 00:09:0f:09:00:01
+Port id: internal3
+Port Description: internal3
+System Name: fw-01
+
+System Description:
+FortiGate-60F v7.4.4,build2662,240613 (GA.F)
+
+Time remaining: 96 seconds
+System Capabilities: B,R
+Enabled Capabilities: B,R
+Management Addresses:
+    IP: 10.10.10.1
+Auto Negotiation - supported, enabled
+Physical media capabilities:
+    1000baseT(FD)
+Media Attachment Unit type: 30
+Vlan ID: - not advertised
+
+
+Total entries displayed: 3

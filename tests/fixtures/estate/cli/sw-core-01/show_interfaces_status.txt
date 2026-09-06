@@ -1,0 +1,9 @@
+Port      Name               Status       Vlan       Duplex  Speed Type
+Gi1/0/1   esx-01 vmnic0      connected    trunk      a-full a-1000 10/100/1000BaseTX
+Gi1/0/2   spare              notconnect   1            auto   auto 10/100/1000BaseTX
+Gi1/0/3   esx-02 vmnic0      connected    trunk      a-full a-1000 10/100/1000BaseTX
+Gi1/0/5   lab server         connected    20         a-full a-1000 10/100/1000BaseTX
+Gi1/0/10  esx-01 iLO         connected    10         a-full  a-100 10/100/1000BaseTX
+Gi1/0/22  fw-01 internal4    connected    trunk      a-full a-1000 10/100/1000BaseTX
+Gi1/0/23  fw-01 internal3    connected    trunk      a-full a-1000 10/100/1000BaseTX
+Gi1/0/24  sw-acc-01 uplink   connected    trunk      a-full a-1000 10/100/1000BaseTX

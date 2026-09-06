@@ -41,7 +41,7 @@
    },
    {
     "name": "internal",
-    "type": "physical",
+    "type": "hard-switch",
     "vdom": "root",
     "ip": "0.0.0.0 0.0.0.0",
     "vlanid": 0,
@@ -51,6 +51,81 @@
     "status": "up",
     "allowaccess": "",
     "macaddr": "00:09:0f:09:00:01",
+    "lldp_reception": "enable",
+    "lldp_transmission": "enable"
+   },
+   {
+    "name": "internal1",
+    "type": "physical",
+    "vdom": "root",
+    "ip": "0.0.0.0 0.0.0.0",
+    "vlanid": 0,
+    "interface": null,
+    "alias": "spare",
+    "role": "lan",
+    "status": "down",
+    "allowaccess": "",
+    "macaddr": "00:09:0f:09:00:02",
+    "lldp_reception": "enable",
+    "lldp_transmission": "enable"
+   },
+   {
+    "name": "internal2",
+    "type": "physical",
+    "vdom": "root",
+    "ip": "0.0.0.0 0.0.0.0",
+    "vlanid": 0,
+    "interface": null,
+    "alias": "spare",
+    "role": "lan",
+    "status": "down",
+    "allowaccess": "",
+    "macaddr": "00:09:0f:09:00:03",
+    "lldp_reception": "enable",
+    "lldp_transmission": "enable"
+   },
+   {
+    "name": "internal3",
+    "type": "physical",
+    "vdom": "root",
+    "ip": "0.0.0.0 0.0.0.0",
+    "vlanid": 0,
+    "interface": null,
+    "alias": "sw-core-01 Gi1/0/23",
+    "role": "lan",
+    "status": "up",
+    "allowaccess": "",
+    "macaddr": "00:09:0f:09:00:04",
+    "lldp_reception": "enable",
+    "lldp_transmission": "enable"
+   },
+   {
+    "name": "internal4",
+    "type": "physical",
+    "vdom": "root",
+    "ip": "0.0.0.0 0.0.0.0",
+    "vlanid": 0,
+    "interface": null,
+    "alias": "sw-core-01 Gi1/0/22",
+    "role": "lan",
+    "status": "up",
+    "allowaccess": "",
+    "macaddr": "00:09:0f:09:00:05",
+    "lldp_reception": "enable",
+    "lldp_transmission": "enable"
+   },
+   {
+    "name": "internal5",
+    "type": "physical",
+    "vdom": "root",
+    "ip": "0.0.0.0 0.0.0.0",
+    "vlanid": 0,
+    "interface": null,
+    "alias": "shared storage nas",
+    "role": "lan",
+    "status": "down",
+    "allowaccess": "",
+    "macaddr": "00:09:0f:09:00:06",
     "lldp_reception": "enable",
     "lldp_transmission": "enable"
    },
@@ -260,14 +335,28 @@
   "ha": [],
   "lldp": [
    {
-    "interface": "internal",
+    "interface": "internal3",
     "neighbors": [
      {
-      "chassis_id": "00:1a:2b:3c:4d:5e",
+      "chassis_id": "00:1a:2b:3c:4d:00",
       "system_name": "sw-core-01",
       "port_id": "GigabitEthernet1/0/23",
-      "port_description": "fw-01 internal",
-      "system_description": "Cisco IOS Software, C3750E"
+      "port_description": "fw-01 internal3",
+      "system_description": "Cisco IOS Software, C3750E Software, Version 15.2(4)E10",
+      "management_ip": "10.10.10.11"
+     }
+    ]
+   },
+   {
+    "interface": "internal4",
+    "neighbors": [
+     {
+      "chassis_id": "00:1a:2b:3c:4d:00",
+      "system_name": "sw-core-01",
+      "port_id": "GigabitEthernet1/0/22",
+      "port_description": "fw-01 internal4",
+      "system_description": "Cisco IOS Software, C3750E Software, Version 15.2(4)E10",
+      "management_ip": "10.10.10.11"
      }
     ]
    }

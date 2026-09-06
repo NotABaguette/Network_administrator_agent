@@ -56,6 +56,11 @@
     "name": "Servers",
     "vswitch": "vSwitch0",
     "vlan": 20
+   },
+   {
+    "name": "DMZ",
+    "vswitch": "vSwitch0",
+    "vlan": 30
    }
   ],
   "vmknics": [
@@ -64,7 +69,7 @@
     "portgroup": "Management",
     "ip": "10.10.10.21",
     "netmask": "255.255.255.0",
-    "mac": "9c:dc:71:00:00:01",
+    "mac": "00:50:56:6a:00:01",
     "services": [
      "management"
     ]

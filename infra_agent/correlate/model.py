@@ -13,6 +13,8 @@ redaction gateway.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -68,6 +70,7 @@ class EdgeKind(StrEnum):
     wan_uplink = "wan_uplink"  # interface -> wan_link
     manages = "manages"  # iLO device -> host device
     subinterface_of = "subinterface_of"  # VLAN subinterface -> parent interface
+    switch_member_of = "switch_member_of"  # member port -> FortiGate hardware switch
 
 
 # --- node identifiers ------------------------------------------------------
@@ -135,6 +138,28 @@ def node_kind_of(node_id: str) -> str:
 
 def iso(when: datetime) -> str:
     return when.astimezone(UTC).isoformat()
+
+
+def atomic_write(path: Path, text: str) -> Path:
+    """Replace `path` in one step.
+
+    The MCP server and the CLI read `graph.json`, `findings.json` and the
+    rendered docs while `infra graph build` rewrites them; a plain write lets a
+    reader see a half-written file and every `topology.*` call fails until the
+    next build.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+    )
+    try:
+        with tmp as handle:
+            handle.write(text)
+        os.replace(tmp.name, path)
+    except BaseException:
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
+    return path
 
 
 # --- evidence --------------------------------------------------------------
@@ -408,9 +433,7 @@ class TopologyGraph:
         return cls(g, built_at=datetime.fromisoformat(built_at) if built_at else None)
 
     def save(self, path: Path) -> Path:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=1))
-        return path
+        return atomic_write(path, json.dumps(self.to_dict(), indent=1))
 
     @classmethod
     def load(cls, path: Path) -> TopologyGraph:

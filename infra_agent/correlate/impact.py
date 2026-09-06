@@ -14,6 +14,7 @@ The result feeds two consumers:
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict, deque
 from typing import Any, Literal
 
@@ -26,7 +27,9 @@ from infra_agent.correlate.parsing import expand_vlan_list
 Effect = Literal["connectivity", "redundancy"]
 
 # Groups whose members back each other up; anything else is a hard dependency.
-REDUNDANT_GROUPS = frozenset({"vnic", "uplink", "trunk", "gateway", "member", "l1"})
+REDUNDANT_GROUPS = frozenset(
+    {"vnic", "uplink", "trunk", "gateway", "member", "l1", "switch_member"}
+)
 
 # Redundancy loss is reported at the VLAN itself, never fanned out to every
 # portgroup, vNIC and VM that happens to sit on it.
@@ -51,7 +54,16 @@ RAID_TOLERANCE: dict[str, int] = {
     "raid1adm": 2,
 }
 
-WAN_HINTS = ("wan", "internet", "ipsec", "vpn", "tunnel", "sdwan", "ha", "stp", "uplink-isp")
+# Last-resort hints, matched as whole tokens (with an optional index, so `wan1`
+# counts and `Hallway`, `chassis`, `shared` and `channel` do not). Structured
+# facts are consulted first; a description is never more than a hint.
+WAN_HINTS = re.compile(
+    r"\b(wan|internet|isp|ipsec|vpn|tunnel|sdwan|sd-wan|ha|stp|hsrp|vrrp)\d*\b",
+    re.IGNORECASE,
+)
+
+# FortiOS interface types that are a VPN tunnel by construction.
+TUNNEL_TYPES = frozenset({"tunnel", "vpn", "ipsec"})
 
 
 class AffectedObject(BaseModel):
@@ -171,6 +183,15 @@ class DependencyIndex:
             member_node = f"interface:{data.get('device')}:{member}"
             if member_node in g:
                 self._add(node, "member", member_node)
+        # A FortiGate hardware switch is only as reachable as its wired members.
+        switch_members = [m for m, _e in g.in_edges(node, EdgeKind.switch_member_of)]
+        wired = [
+            m
+            for m in switch_members
+            if any(True for _p, _e in g.out_edges(m, EdgeKind.l1_neighbor))
+        ]
+        for member in wired or switch_members:
+            self._add(node, "switch_member", member)
         if data.get("pnic") or data.get("uplink"):
             for peer, _e in g.out_edges(node, EdgeKind.l1_neighbor):
                 self._add(node, "l1", peer)
@@ -205,11 +226,20 @@ def _is_trunk_or_uplink(graph: TopologyGraph, node: str) -> bool:
         or data.get("uplink")
         or data.get("svi")
         or data.get("portchannel")
+        or data.get("hardware_switch")
         or str(data.get("label", "")).lower().find("port-channel") >= 0
     )
 
 
 def _is_wan_ha_vpn_stp(graph: TopologyGraph, node: str) -> bool:
+    """WAN, SD-WAN, HA, VPN or STP relevance — from facts where there are any.
+
+    A port description is free text an engineer typed; matching `ha` inside
+    `chassis` or `Hallway` would force a maintenance window and a confirmation
+    phrase on an ordinary access port, which is how owners learn to rubber-stamp
+    Tier 2. Structured evidence decides first and text is matched as whole
+    tokens.
+    """
     kind = node_kind_of(node)
     if kind == NodeKind.wan_link:
         return True
@@ -218,10 +248,17 @@ def _is_wan_ha_vpn_stp(graph: TopologyGraph, node: str) -> bool:
     data = graph.node(node)
     if data.get("is_wan") or str(data.get("role", "")).lower() == "wan":
         return True
-    haystack = " ".join(
-        str(data.get(key, "")).lower() for key in ("label", "alias", "fw_type", "description")
-    )
-    return any(hint in haystack for hint in WAN_HINTS)
+    if str(data.get("fw_type", "")).lower() in TUNNEL_TYPES:
+        return True
+    # `ha_member` is only set when the box reports HA peers (or a collector
+    # returns the heartbeat interfaces): a clustered firewall does not make
+    # every one of its ports an HA change, only its heartbeat links.
+    if data.get("sdwan_member") or data.get("ha_member"):
+        return True
+    if data.get("stp_significant"):  # a root, alternate or backup port
+        return True
+    haystack = " ".join(str(data.get(key, "")) for key in ("label", "alias", "description"))
+    return bool(WAN_HINTS.search(haystack))
 
 
 def _feeds_ilo_or_mgmt_vlan(graph: TopologyGraph, node: str) -> bool:
@@ -363,3 +400,46 @@ def _affected(graph: TopologyGraph, node: str, effect: Effect, reason: str) -> A
 def impact_summary(object_id: str, graph: TopologyGraph) -> ImpactSummary:
     """Just the `ImpactSummary` the tier engine needs for `compute_tier`."""
     return impact_analyze(object_id, graph).summary
+
+
+#: The change a reader most likely means for each kind of object, so an
+#: illustrative tier is not computed from a switch-port action for a datastore.
+DEFAULT_ACTIONS: dict[str, str] = {
+    NodeKind.vm: "vm.resize",
+    NodeKind.vnic: "vm.resize",
+    NodeKind.datastore: "storage.rebuild",
+    NodeKind.logical_drive: "storage.rebuild",
+    NodeKind.physical_drive: "storage.rebuild",
+    NodeKind.vlan: "vlan.remove",
+    NodeKind.fw_policy: "fortigate.policy",
+    NodeKind.wan_link: "fortigate.wan",
+    NodeKind.portgroup: "esxi.host_setting",
+    NodeKind.vswitch: "esxi.host_setting",
+    NodeKind.prefix: "fortigate.static_route",
+    NodeKind.ip: "fortigate.address",
+}
+
+
+def default_action(graph: TopologyGraph, object_id: str) -> str:
+    """The change action `infra graph impact` computes its example tier from."""
+    node = graph.resolve(object_id) or object_id
+    if node not in graph:
+        return "switch.access_port_config"
+    data = graph.node(node)
+    kind = str(data.get("kind", node_kind_of(node)))
+    if kind == NodeKind.device:
+        return "esxi.host_setting" if data.get("role") == "host" else "firmware.update"
+    if kind == NodeKind.interface:
+        device = data.get("device")
+        device_node = f"device:{device}" if device else None
+        role = graph.node(device_node).get("role") if device_node in graph else None
+        if role == "firewall":
+            return "fortigate.wan" if _is_wan_ha_vpn_stp(graph, node) else "fortigate.policy"
+        if role == "host":
+            return "esxi.host_setting"
+        return (
+            "switch.trunk_port_config"
+            if _is_trunk_or_uplink(graph, node)
+            else "switch.access_port_config"
+        )
+    return DEFAULT_ACTIONS.get(kind, "switch.access_port_config")

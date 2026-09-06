@@ -116,24 +116,36 @@ def graph_render(
 
 
 @graph_app.command("impact")
-def graph_impact(object_id: str) -> None:
+def graph_impact(
+    object_id: str,
+    action: str | None = typer.Option(
+        None, help="change action to compute the tier for (default: per object kind)"
+    ),
+) -> None:
     """What breaks if this object dies, and which tier escalations it triggers."""
     from infra_agent.change.tiers import compute_tier
     from infra_agent.correlate import service
-    from infra_agent.correlate.impact import impact_analyze
+    from infra_agent.correlate.impact import default_action, impact_analyze
 
-    report = impact_analyze(object_id, service.load_graph())
+    graph = service.load_graph()
+    report = impact_analyze(object_id, graph)
     if not report.found:
         console.print(f"[red]unknown object[/]: {object_id}")
         raise typer.Exit(code=1)
+    age = service.freshness(graph)
+    if age["stale"]:
+        console.print(
+            f"[yellow]the graph was built at {age['built_at']}[/]; run `infra graph build`"
+        )
     console.print(f"[bold]{report.label}[/] ({report.kind})")
     console.print_json(data=report.summary.model_dump(mode="json"))
     for line in report.describe():
         console.print(f"  - {line}")
     if not report.affected:
         console.print("  - nothing else depends on it")
-    tier, reasons = compute_tier("switch.access_port_config", report.summary)
-    console.print(f"a routine change here would compute as tier [bold]{tier.name}[/]")
+    action = action or default_action(graph, report.object_id)
+    tier, reasons = compute_tier(action, report.summary)
+    console.print(f"a [bold]{action}[/] change here would compute as tier [bold]{tier.name}[/]")
     for reason in reasons:
         console.print(f"  · {reason}")
 

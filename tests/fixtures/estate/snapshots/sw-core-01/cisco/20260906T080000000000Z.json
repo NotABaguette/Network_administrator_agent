@@ -3,19 +3,614 @@
  "collector": "cisco",
  "taken_at": "2026-09-06T08:00:00+00:00",
  "data": {
-  "version": [
+  "cdp": [
    {
-    "hostname": "sw-core-01",
-    "version": "15.2(7)E5",
-    "hardware": [
-     "WS-C3750X-24T"
-    ],
-    "serial": [
-     "FDO1234X0AB"
+    "neighbor_name": "esx-01.lab.local",
+    "mgmt_address": "10.10.10.21",
+    "platform": "VMware ESX",
+    "neighbor_interface": "vmnic0",
+    "local_interface": "GigabitEthernet1/0/1",
+    "neighbor_description": "VMware ESXi 8.0.2 releasebuild-24585383",
+    "capabilities": "Host"
+   },
+   {
+    "neighbor_name": "esx-02.lab.local",
+    "mgmt_address": "10.10.10.22",
+    "platform": "VMware ESX",
+    "neighbor_interface": "vmnic0",
+    "local_interface": "GigabitEthernet1/0/3",
+    "neighbor_description": "VMware ESXi 8.0.2 releasebuild-24585383",
+    "capabilities": "Host"
+   },
+   {
+    "neighbor_name": "sw-acc-01",
+    "mgmt_address": "10.10.10.12",
+    "platform": "cisco WS-C2960X-24TS-L",
+    "neighbor_interface": "GigabitEthernet1/0/24",
+    "local_interface": "GigabitEthernet1/0/24",
+    "neighbor_description": "Cisco IOS Software, C2960X Software (C2960X-UNIVERSALK9-M), Version 15.2(7)E5",
+    "capabilities": "Switch IGMP"
+   }
+  ],
+  "etherchannel": [],
+  "interfaces": [
+   {
+    "interface": "Vlan10",
+    "link_status": "up",
+    "protocol_status": "up",
+    "hardware_type": "EtherSVI",
+    "mac_address": "001a.2b3c.4d00",
+    "bia": "001a.2b3c.4d00",
+    "description": "management SVI",
+    "ip_address": "10.10.10.2",
+    "prefix_length": "24",
+    "mtu": "1500",
+    "duplex": "",
+    "speed": "",
+    "media_type": "",
+    "bandwidth": "1000000 Kbit",
+    "delay": "10 usec",
+    "encapsulation": "ARPA",
+    "last_input": "00:00:01",
+    "last_output": "00:00:05",
+    "last_output_hang": "never",
+    "queue_strategy": "fifo",
+    "input_rate": "12000",
+    "output_rate": "9000",
+    "input_pps": "14",
+    "output_pps": "11",
+    "input_packets": "1244501",
+    "output_packets": "1201455",
+    "runts": "0",
+    "giants": "0",
+    "input_errors": "0",
+    "crc": "0",
+    "frame": "0",
+    "overrun": "0",
+    "abort": "",
+    "output_errors": "",
+    "vlan_id": "",
+    "vlan_id_inner": "",
+    "vlan_id_outer": "",
+    "queue_size": "0",
+    "queue_max": "375",
+    "queue_drops": "0",
+    "queue_flushes": "0",
+    "queue_output_drops": "0"
+   },
+   {
+    "interface": "GigabitEthernet1/0/1",
+    "link_status": "up",
+    "protocol_status": "up (connected)",
+    "hardware_type": "Gigabit Ethernet",
+    "mac_address": "001a.2b3c.4d01",
+    "bia": "001a.2b3c.4d01",
+    "description": "esx-01 vmnic0",
+    "ip_address": "",
+    "prefix_length": "",
+    "mtu": "1500",
+    "duplex": "Full-duplex",
+    "speed": "1000Mb/s",
+    "media_type": "10/100/1000BaseTX",
+    "bandwidth": "1000000 Kbit",
+    "delay": "10 usec",
+    "encapsulation": "ARPA",
+    "last_input": "00:00:00",
+    "last_output": "00:00:00",
+    "last_output_hang": "never",
+    "queue_strategy": "fifo",
+    "input_rate": "3000",
+    "output_rate": "4000",
+    "input_pps": "5",
+    "output_pps": "6",
+    "input_packets": "9812345",
+    "output_packets": "8812345",
+    "runts": "0",
+    "giants": "0",
+    "input_errors": "0",
+    "crc": "0",
+    "frame": "0",
+    "overrun": "0",
+    "abort": "",
+    "output_errors": "0",
+    "vlan_id": "",
+    "vlan_id_inner": "",
+    "vlan_id_outer": "",
+    "queue_size": "0",
+    "queue_max": "75",
+    "queue_drops": "0",
+    "queue_flushes": "0",
+    "queue_output_drops": "0"
+   }
+  ],
+  "interfaces_status": [
+   {
+    "port": "Gi1/0/1",
+    "name": "esx-01 vmnic0",
+    "status": "connected",
+    "vlan_id": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "10/100/1000BaseTX",
+    "fc_mode": ""
+   },
+   {
+    "port": "Gi1/0/2",
+    "name": "spare",
+    "status": "notconnect",
+    "vlan_id": "1",
+    "duplex": "auto",
+    "speed": "auto",
+    "type": "10/100/1000BaseTX",
+    "fc_mode": ""
+   },
+   {
+    "port": "Gi1/0/3",
+    "name": "esx-02 vmnic0",
+    "status": "connected",
+    "vlan_id": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "10/100/1000BaseTX",
+    "fc_mode": ""
+   },
+   {
+    "port": "Gi1/0/5",
+    "name": "lab server",
+    "status": "connected",
+    "vlan_id": "20",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "10/100/1000BaseTX",
+    "fc_mode": ""
+   },
+   {
+    "port": "Gi1/0/10",
+    "name": "esx-01 iLO",
+    "status": "connected",
+    "vlan_id": "10",
+    "duplex": "a-full",
+    "speed": "a-100",
+    "type": "10/100/1000BaseTX",
+    "fc_mode": ""
+   },
+   {
+    "port": "Gi1/0/22",
+    "name": "fw-01 internal4",
+    "status": "connected",
+    "vlan_id": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "10/100/1000BaseTX",
+    "fc_mode": ""
+   },
+   {
+    "port": "Gi1/0/23",
+    "name": "fw-01 internal3",
+    "status": "connected",
+    "vlan_id": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "10/100/1000BaseTX",
+    "fc_mode": ""
+   },
+   {
+    "port": "Gi1/0/24",
+    "name": "sw-acc-01 uplink",
+    "status": "connected",
+    "vlan_id": "trunk",
+    "duplex": "a-full",
+    "speed": "a-1000",
+    "type": "10/100/1000BaseTX",
+    "fc_mode": ""
+   }
+  ],
+  "trunks": [],
+  "arp": [
+   {
+    "protocol": "Internet",
+    "ip_address": "10.10.10.1",
+    "age": "3",
+    "mac_address": "0009.0f09.0001",
+    "type": "ARPA",
+    "interface": "Vlan10"
+   },
+   {
+    "protocol": "Internet",
+    "ip_address": "10.10.10.2",
+    "age": "-",
+    "mac_address": "001a.2b3c.4d00",
+    "type": "ARPA",
+    "interface": "Vlan10"
+   },
+   {
+    "protocol": "Internet",
+    "ip_address": "10.10.10.21",
+    "age": "17",
+    "mac_address": "0050.566a.0001",
+    "type": "ARPA",
+    "interface": "Vlan10"
+   },
+   {
+    "protocol": "Internet",
+    "ip_address": "10.10.10.50",
+    "age": "12",
+    "mac_address": "0050.56aa.0001",
+    "type": "ARPA",
+    "interface": "Vlan10"
+   }
+  ],
+  "ip_int_brief": [
+   {
+    "interface": "Vlan1",
+    "ip_address": "unassigned",
+    "status": "administratively down",
+    "proto": "down"
+   },
+   {
+    "interface": "Vlan10",
+    "ip_address": "10.10.10.2",
+    "status": "up",
+    "proto": "up"
+   },
+   {
+    "interface": "GigabitEthernet1/0/1",
+    "ip_address": "unassigned",
+    "status": "up",
+    "proto": "up"
+   },
+   {
+    "interface": "GigabitEthernet1/0/23",
+    "ip_address": "unassigned",
+    "status": "up",
+    "proto": "up"
+   }
+  ],
+  "lldp": [
+   {
+    "local_interface": "Gi1/0/10",
+    "chassis_id": "00:25:b5:aa:00:11",
+    "neighbor_port_id": "iLO-Port-1",
+    "neighbor_interface": "iLO Dedicated Network Port",
+    "neighbor_name": "esx-01-ilo",
+    "neighbor_description": "HPE Integrated Lights-Out 5 2.98",
+    "capabilities": "S",
+    "mgmt_address": "10.10.10.121",
+    "vlan_id": "10",
+    "mac_address": "",
+    "serial": "",
+    "manufacturer": "",
+    "hw_revision": "",
+    "fw_revision": "",
+    "sw_revision": "",
+    "platform": "",
+    "power_pair": "",
+    "power_class": "",
+    "power_device_type": "",
+    "power_priority": "",
+    "power_source": "",
+    "power_requested": ""
+   },
+   {
+    "local_interface": "Gi1/0/22",
+    "chassis_id": "00:09:0f:09:00:01",
+    "neighbor_port_id": "internal4",
+    "neighbor_interface": "internal4",
+    "neighbor_name": "fw-01",
+    "neighbor_description": "FortiGate-60F v7.4.4,build2662,240613 (GA.F)",
+    "capabilities": "B,R",
+    "mgmt_address": "10.10.10.1",
+    "vlan_id": "",
+    "mac_address": "",
+    "serial": "",
+    "manufacturer": "",
+    "hw_revision": "",
+    "fw_revision": "",
+    "sw_revision": "",
+    "platform": "",
+    "power_pair": "",
+    "power_class": "",
+    "power_device_type": "",
+    "power_priority": "",
+    "power_source": "",
+    "power_requested": ""
+   },
+   {
+    "local_interface": "Gi1/0/23",
+    "chassis_id": "00:09:0f:09:00:01",
+    "neighbor_port_id": "internal3",
+    "neighbor_interface": "internal3",
+    "neighbor_name": "fw-01",
+    "neighbor_description": "FortiGate-60F v7.4.4,build2662,240613 (GA.F)",
+    "capabilities": "B,R",
+    "mgmt_address": "10.10.10.1",
+    "vlan_id": "",
+    "mac_address": "",
+    "serial": "",
+    "manufacturer": "",
+    "hw_revision": "",
+    "fw_revision": "",
+    "sw_revision": "",
+    "platform": "",
+    "power_pair": "",
+    "power_class": "",
+    "power_device_type": "",
+    "power_priority": "",
+    "power_source": "",
+    "power_requested": ""
+   }
+  ],
+  "mac_table": [
+   {
+    "destination_address": "0100.0ccc.cccc",
+    "type": "STATIC",
+    "vlan_id": "All",
+    "destination_port": [
+     "CPU"
+    ]
+   },
+   {
+    "destination_address": "0009.0f09.0001",
+    "type": "DYNAMIC",
+    "vlan_id": "10",
+    "destination_port": [
+     "Gi1/0/23"
+    ]
+   },
+   {
+    "destination_address": "0050.56aa.0001",
+    "type": "DYNAMIC",
+    "vlan_id": "10",
+    "destination_port": [
+     "Gi1/0/1"
+    ]
+   },
+   {
+    "destination_address": "0050.56aa.0002",
+    "type": "DYNAMIC",
+    "vlan_id": "20",
+    "destination_port": [
+     "Gi1/0/1"
+    ]
+   },
+   {
+    "destination_address": "0050.56aa.0003",
+    "type": "DYNAMIC",
+    "vlan_id": "20",
+    "destination_port": [
+     "Gi1/0/3"
+    ]
+   },
+   {
+    "destination_address": "0050.56aa.0004",
+    "type": "DYNAMIC",
+    "vlan_id": "20",
+    "destination_port": [
+     "Gi1/0/3"
     ]
    }
   ],
+  "stp": [
+   {
+    "vlan_id": "1",
+    "interface": "Gi1/0/22",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "22",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "1",
+    "interface": "Gi1/0/23",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "23",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "1",
+    "interface": "Gi1/0/24",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "24",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "10",
+    "interface": "Gi1/0/1",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "1",
+    "type": "P2p Edge"
+   },
+   {
+    "vlan_id": "10",
+    "interface": "Gi1/0/3",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "3",
+    "type": "P2p Edge"
+   },
+   {
+    "vlan_id": "10",
+    "interface": "Gi1/0/10",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "10",
+    "type": "P2p Edge"
+   },
+   {
+    "vlan_id": "10",
+    "interface": "Gi1/0/22",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "22",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "10",
+    "interface": "Gi1/0/23",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "23",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "10",
+    "interface": "Gi1/0/24",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "24",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "20",
+    "interface": "Gi1/0/1",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "1",
+    "type": "P2p Edge"
+   },
+   {
+    "vlan_id": "20",
+    "interface": "Gi1/0/3",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "3",
+    "type": "P2p Edge"
+   },
+   {
+    "vlan_id": "20",
+    "interface": "Gi1/0/5",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "5",
+    "type": "P2p Edge"
+   },
+   {
+    "vlan_id": "20",
+    "interface": "Gi1/0/22",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "22",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "20",
+    "interface": "Gi1/0/23",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "23",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "20",
+    "interface": "Gi1/0/24",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "24",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "30",
+    "interface": "Gi1/0/22",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "22",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "30",
+    "interface": "Gi1/0/23",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "23",
+    "type": "P2p"
+   },
+   {
+    "vlan_id": "30",
+    "interface": "Gi1/0/24",
+    "role": "Desg",
+    "status": "FWD",
+    "cost": "4",
+    "port_priority": "128",
+    "port_id": "24",
+    "type": "P2p"
+   }
+  ],
+  "version": [
+   {
+    "software_image": "C3750E-UNIVERSALK9-M",
+    "version": "15.2(4)E10",
+    "release": "fc2",
+    "rommon": "Bootstrap",
+    "hostname": "sw-core-01",
+    "uptime": "51 weeks, 2 days, 3 hours, 17 minutes",
+    "uptime_years": "",
+    "uptime_weeks": "51",
+    "uptime_days": "2",
+    "uptime_hours": "3",
+    "uptime_minutes": "17",
+    "reload_reason": "power-on",
+    "running_image": "/c3750e-universalk9-mz.152-4.E10.bin",
+    "hardware": [
+     "WS-C3750X-24T-S"
+    ],
+    "serial": [
+     "FDO1234X0AB"
+    ],
+    "config_register": "0xF",
+    "mac_address": [
+     "00:1A:2B:3C:4D:00"
+    ],
+    "restarted": "12:04:33 UTC Mon Sep 8 2025"
+   }
+  ],
   "vlans": [
+   {
+    "vlan_id": "1",
+    "vlan_name": "default",
+    "status": "active",
+    "interfaces": [
+     "Gi1/0/2",
+     "Gi1/0/4",
+     "Gi1/0/6"
+    ]
+   },
    {
     "vlan_id": "10",
     "vlan_name": "mgmt",
@@ -37,222 +632,20 @@
     "vlan_name": "dmz",
     "status": "active",
     "interfaces": []
+   },
+   {
+    "vlan_id": "1002",
+    "vlan_name": "fddi-default",
+    "status": "act/unsup",
+    "interfaces": []
+   },
+   {
+    "vlan_id": "1003",
+    "vlan_name": "token-ring-default",
+    "status": "act/unsup",
+    "interfaces": []
    }
   ],
-  "interfaces_status": [
-   {
-    "port": "Gi1/0/1",
-    "name": "esx-01 vmnic0",
-    "status": "connected",
-    "vlan": "trunk",
-    "duplex": "a-full",
-    "speed": "a-1000",
-    "type": "1000BaseTX"
-   },
-   {
-    "port": "Gi1/0/3",
-    "name": "esx-02 vmnic0",
-    "status": "connected",
-    "vlan": "trunk",
-    "duplex": "a-full",
-    "speed": "a-1000",
-    "type": "1000BaseTX"
-   },
-   {
-    "port": "Gi1/0/5",
-    "name": "lab server",
-    "status": "connected",
-    "vlan": "20",
-    "duplex": "a-full",
-    "speed": "a-1000",
-    "type": "1000BaseTX"
-   },
-   {
-    "port": "Gi1/0/10",
-    "name": "esx-01 iLO",
-    "status": "connected",
-    "vlan": "10",
-    "duplex": "a-full",
-    "speed": "a-1000",
-    "type": "1000BaseTX"
-   },
-   {
-    "port": "Gi1/0/23",
-    "name": "fw-01 internal",
-    "status": "connected",
-    "vlan": "trunk",
-    "duplex": "a-full",
-    "speed": "a-1000",
-    "type": "1000BaseTX"
-   },
-   {
-    "port": "Gi1/0/24",
-    "name": "sw-acc-01 uplink",
-    "status": "connected",
-    "vlan": "trunk",
-    "duplex": "a-full",
-    "speed": "a-1000",
-    "type": "1000BaseTX"
-   }
-  ],
-  "trunks": [
-   {
-    "port": "Gi1/0/1",
-    "mode": "on",
-    "encapsulation": "802.1q",
-    "status": "trunking",
-    "native_vlan": "1",
-    "vlans_allowed": "10,20",
-    "vlans_allowed_active": "10,20"
-   },
-   {
-    "port": "Gi1/0/3",
-    "mode": "on",
-    "encapsulation": "802.1q",
-    "status": "trunking",
-    "native_vlan": "1",
-    "vlans_allowed": "10,20",
-    "vlans_allowed_active": "10,20"
-   },
-   {
-    "port": "Gi1/0/23",
-    "mode": "on",
-    "encapsulation": "802.1q",
-    "status": "trunking",
-    "native_vlan": "1",
-    "vlans_allowed": "10,20,30",
-    "vlans_allowed_active": "10,20,30"
-   },
-   {
-    "port": "Gi1/0/24",
-    "mode": "on",
-    "encapsulation": "802.1q",
-    "status": "trunking",
-    "native_vlan": "1",
-    "vlans_allowed": "10,20,30",
-    "vlans_allowed_active": "10,20,30"
-   }
-  ],
-  "interfaces": [
-   {
-    "interface": "Vlan10",
-    "ip_address": "10.10.10.2/24",
-    "link_status": "up",
-    "protocol_status": "up",
-    "description": "management SVI"
-   }
-  ],
-  "ip_int_brief": [
-   {
-    "interface": "Vlan10",
-    "ip_address": "10.10.10.2",
-    "status": "up",
-    "proto": "up"
-   },
-   {
-    "interface": "GigabitEthernet1/0/1",
-    "ip_address": "unassigned",
-    "status": "up",
-    "proto": "up"
-   }
-  ],
-  "cdp": [
-   {
-    "local_port": "GigabitEthernet1/0/1",
-    "destination_host": "esx-01.lab.local",
-    "remote_port": "vmnic0",
-    "management_ip": "10.10.10.21",
-    "platform": "VMware ESX",
-    "capabilities": "Host"
-   },
-   {
-    "local_port": "GigabitEthernet1/0/3",
-    "destination_host": "esx-02.lab.local",
-    "remote_port": "vmnic0",
-    "management_ip": "10.10.10.22",
-    "platform": "VMware ESX",
-    "capabilities": "Host"
-   },
-   {
-    "local_port": "GigabitEthernet1/0/24",
-    "destination_host": "sw-acc-01",
-    "remote_port": "GigabitEthernet1/0/24",
-    "management_ip": "10.10.10.12",
-    "platform": "cisco WS-C2960X-24TS-L",
-    "capabilities": "Switch IGMP"
-   }
-  ],
-  "lldp": [
-   {
-    "local_interface": "Gi1/0/23",
-    "neighbor": "fw-01",
-    "neighbor_interface": "internal",
-    "management_ip": "10.10.10.1",
-    "capabilities": "BR",
-    "system_description": "FortiGate-60F"
-   },
-   {
-    "local_interface": "Gi1/0/10",
-    "neighbor": "esx-01-ilo",
-    "neighbor_interface": "iLO-Port-1",
-    "management_ip": "10.10.10.121",
-    "capabilities": "S",
-    "system_description": "HPE iLO5"
-   }
-  ],
-  "mac_table": [
-   {
-    "destination_address": "0050.56aa.0001",
-    "type": "DYNAMIC",
-    "vlan": "10",
-    "destination_port": [
-     "Gi1/0/1"
-    ]
-   },
-   {
-    "destination_address": "0050.56aa.0002",
-    "type": "DYNAMIC",
-    "vlan": "20",
-    "destination_port": [
-     "Gi1/0/1"
-    ]
-   },
-   {
-    "destination_address": "0050.56aa.0003",
-    "type": "DYNAMIC",
-    "vlan": "20",
-    "destination_port": [
-     "Gi1/0/3"
-    ]
-   },
-   {
-    "destination_address": "0050.56aa.0004",
-    "type": "DYNAMIC",
-    "vlan": "20",
-    "destination_port": [
-     "Gi1/0/3"
-    ]
-   }
-  ],
-  "arp": [
-   {
-    "protocol": "Internet",
-    "address": "10.10.10.50",
-    "age": "12",
-    "mac": "0050.56aa.0001",
-    "type": "ARPA",
-    "interface": "Vlan10"
-   },
-   {
-    "protocol": "Internet",
-    "address": "10.10.10.1",
-    "age": "3",
-    "mac": "0009.0f09.0001",
-    "type": "ARPA",
-    "interface": "Vlan10"
-   }
-  ],
-  "etherchannel": [],
   "errors": {}
  }
 }

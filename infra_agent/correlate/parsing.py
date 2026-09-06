@@ -218,3 +218,76 @@ def rows(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, dict):
         return [data]
     return []
+
+
+def is_unparsed(data: Any) -> bool:
+    """True when a section arrived as raw text instead of parsed rows.
+
+    `ntc_templates` ships no template for some commands and none at all for the
+    `cisco_xe` platform, so the collector stores the raw output. Callers use
+    this to raise a `collector_parse_gap` finding instead of silently building
+    an empty graph for the device.
+    """
+    return isinstance(data, str) and bool(data.strip())
+
+
+# --- `show interfaces trunk` ----------------------------------------------
+#
+# ntc-templates has no cisco_ios template for `show interfaces trunk` (verified
+# against 9.2.0), so the collector stores either `[]` or the raw text. The
+# output is four fixed blocks, stable across IOS 12.2/15.x and IOS-XE 16/17:
+#
+#     Port        Mode             Encapsulation  Status        Native vlan
+#     Port        Vlans allowed on trunk
+#     Port        Vlans allowed and active in management domain
+#     Port        Vlans in spanning tree forwarding state and not pruned
+#
+# Long VLAN lists wrap onto an indented continuation line with no port column.
+
+_TRUNK_BLOCKS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("mode", ("mode", "encapsulation", "status")),
+    ("vlans_allowed", ("vlans allowed on trunk",)),
+    ("vlans_allowed_active", ("vlans allowed and active",)),
+    ("vlans_forwarding", ("forwarding state",)),
+)
+_VLAN_LIST = re.compile(r"^[0-9,\-]+$")
+
+
+def parse_trunk_text(text: Any) -> list[dict[str, Any]]:
+    """Raw `show interfaces trunk` output -> one row per trunk port."""
+    if not isinstance(text, str):
+        return []
+    parsed: dict[str, dict[str, Any]] = {}
+    block: str | None = None
+    last_port: str | None = None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            last_port = None
+            continue
+        lowered = stripped.lower()
+        if lowered.startswith("port"):
+            block = next(
+                (name for name, hints in _TRUNK_BLOCKS if all(h in lowered for h in hints)), None
+            )
+            last_port = None
+            continue
+        if block is None:
+            continue
+        if last_port and raw[:1].isspace() and _VLAN_LIST.match(stripped):
+            previous = parsed[last_port].get(block, "")
+            parsed[last_port][block] = f"{previous},{stripped}".strip(",")
+            continue
+        parts = stripped.split()
+        port = normalize_ifname(parts[0])
+        if not port:
+            continue
+        row = parsed.setdefault(port, {"port": port})
+        if block == "mode":
+            for index, key in enumerate(("mode", "encapsulation", "status", "native_vlan"), 1):
+                if len(parts) > index:
+                    row[key] = parts[index]
+        elif len(parts) > 1:
+            row[block] = parts[1]
+        last_port = port
+    return list(parsed.values())

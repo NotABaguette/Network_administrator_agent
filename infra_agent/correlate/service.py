@@ -8,7 +8,8 @@ re-reading every snapshot on every call.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,18 @@ from infra_agent.config import Settings, get_settings
 from infra_agent.correlate.builder import GraphBuilder
 from infra_agent.correlate.checks import Finding, run_checks
 from infra_agent.correlate.mermaid import write_docs
-from infra_agent.correlate.model import TopologyGraph
+from infra_agent.correlate.model import TopologyGraph, atomic_write, iso
 from infra_agent.models.common import SeedInventory
 from infra_agent.store.snapshots import FileSnapshotStore
 
+log = logging.getLogger(__name__)
+
 GRAPH_FILENAME = "graph.json"
 FINDINGS_FILENAME = "findings.json"
+
+#: A graph older than this is served with `stale: true`; the collectors run on
+#: a five-minute cycle, so an hour means nothing has rebuilt it in twelve runs.
+STALE_AFTER_SECONDS = 3600.0
 
 _CACHE: dict[str, tuple[float, TopologyGraph]] = {}
 
@@ -56,8 +63,9 @@ def persist(
     path = graph_path(settings)
     graph.save(path)
     findings = run_checks(graph) if findings is None else findings
-    findings_path(settings).write_text(
-        json.dumps([f.model_dump(mode="json") for f in findings], indent=1)
+    atomic_write(
+        findings_path(settings),
+        json.dumps([f.model_dump(mode="json") for f in findings], indent=1),
     )
     _CACHE.pop(str(path), None)
     return path
@@ -77,7 +85,7 @@ def build_and_persist(
 
 
 def load_graph(settings: Settings | None = None, *, rebuild: bool = True) -> TopologyGraph:
-    """The persisted graph, rebuilt from snapshots when it is missing."""
+    """The persisted graph, rebuilt from snapshots (and kept) when it is missing."""
     settings = settings or get_settings()
     path = graph_path(settings)
     if path.exists():
@@ -90,7 +98,30 @@ def load_graph(settings: Settings | None = None, *, rebuild: bool = True) -> Top
         return graph
     if not rebuild:
         return TopologyGraph()
-    return build_graph(settings)
+    graph = build_graph(settings)
+    try:
+        # Keep it: otherwise every topology.* call walks every snapshot again.
+        persist(graph, settings)
+    except OSError:  # a read-only data dir must not break a read-only tool
+        log.warning("could not persist the rebuilt graph under %s", settings.graph_dir)
+    return graph
+
+
+def freshness(graph: TopologyGraph, now: datetime | None = None) -> dict[str, Any]:
+    """How old the answer is — every tool result carries it.
+
+    Nothing rebuilds the graph on a schedule yet (that hook belongs to the
+    scheduler package), so a caller must be able to see that it is reading a
+    picture from yesterday.
+    """
+    now = now or datetime.now(UTC)
+    built_at = graph.built_at if graph.built_at.tzinfo else graph.built_at.replace(tzinfo=UTC)
+    age = max(0.0, (now - built_at).total_seconds())
+    return {
+        "built_at": iso(built_at),
+        "age_seconds": round(age, 1),
+        "stale": age > STALE_AFTER_SECONDS,
+    }
 
 
 def load_findings(settings: Settings | None = None) -> list[Finding]:
