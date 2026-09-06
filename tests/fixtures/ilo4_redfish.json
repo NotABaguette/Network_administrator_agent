@@ -1,0 +1,961 @@
+{
+  "_comment": "Recorded Redfish responses from an HPE ProLiant DL380 Gen9 with iLO 4 v2.82 (Redfish 1.0.0). Keys are request paths. Serials, MACs, UUIDs and licence keys are made up. Note the iLO4-isms: Oem/Hp; Processors/Memory as summary objects rather than links; collections that carry the same members twice, as Redfish Members and as legacy links.Member with /rest/v1 hrefs; the Smart Array controller linking its drives as Links/PhysicalDrives (and legacy links/PhysicalDrives) whose URL segment is DiskDrives; MacAddress with a lowercase a; CurrentReading instead of ReadingCelsius; IML entries expanded inline under Items; a Current firmware map; and no /redfish/v1/UpdateService/FirmwareInventory at all.",
+  "/redfish/v1/": {
+    "@odata.id": "/redfish/v1/",
+    "@odata.type": "#ServiceRoot.1.0.0.ServiceRoot",
+    "Id": "v1",
+    "Name": "HP RESTful Root Service",
+    "RedfishVersion": "1.0.0",
+    "ServiceVersion": "1.0.0",
+    "UUID": "8dea7372-23f9-565f-9396-2cd07febbe29",
+    "AccountService": {
+      "@odata.id": "/redfish/v1/AccountService/"
+    },
+    "Chassis": {
+      "@odata.id": "/redfish/v1/Chassis/"
+    },
+    "Managers": {
+      "@odata.id": "/redfish/v1/Managers/"
+    },
+    "SessionService": {
+      "@odata.id": "/redfish/v1/SessionService/"
+    },
+    "Systems": {
+      "@odata.id": "/redfish/v1/Systems/"
+    },
+    "Oem": {
+      "Hp": {
+        "Type": "HpRestServiceExt.1.0.0.HpRestServiceExt",
+        "Manager": [
+          {
+            "ManagerType": "iLO 4",
+            "ManagerFirmwareVersion": "2.82",
+            "DefaultLanguage": "en"
+          }
+        ]
+      }
+    }
+  },
+  "/redfish/v1/Systems/1": {
+    "@odata.id": "/redfish/v1/Systems/1/",
+    "@odata.type": "#ComputerSystem.1.0.1.ComputerSystem",
+    "Id": "1",
+    "Name": "Computer System",
+    "AssetTag": "",
+    "BiosVersion": "P89 v2.76 (10/21/2019)",
+    "Description": "Computer System View",
+    "HostName": "esx-01",
+    "IndicatorLED": "Off",
+    "Manufacturer": "HPE",
+    "Model": "ProLiant DL380 Gen9",
+    "SKU": "719064-B21",
+    "SerialNumber": "CZ3421AB01",
+    "SystemType": "Physical",
+    "UUID": "31313131-3131-4331-5A33-343231414230",
+    "PowerState": "On",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "Memory": {
+      "Status": {
+        "HealthRollUp": "OK"
+      },
+      "TotalSystemMemoryGB": 128
+    },
+    "Processors": {
+      "Count": 2,
+      "ProcessorFamily": "Intel(R) Xeon(R) CPU E5-2650 v4 @ 2.20GHz",
+      "Status": {
+        "HealthRollUp": "OK"
+      }
+    },
+    "LogServices": {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/"
+    },
+    "Oem": {
+      "Hp": {
+        "Type": "HpComputerSystemExt.1.1.0.HpComputerSystemExt",
+        "PostState": "FinishedPost",
+        "PowerAutoOn": "PowerOn",
+        "PowerRegulatorMode": "Dynamic",
+        "Bios": {
+          "Backup": {
+            "Date": "05/21/2018",
+            "Family": "P89",
+            "VersionString": "P89 v2.60"
+          },
+          "Current": {
+            "Date": "10/21/2019",
+            "Family": "P89",
+            "VersionString": "P89 v2.76"
+          }
+        },
+        "DeviceDiscoveryComplete": {
+          "AMSDeviceDiscovery": "NoAMS",
+          "SmartArrayDiscovery": "Complete",
+          "vAuxDeviceDiscovery": "DataIncomplete"
+        },
+        "AggregateHealthStatus": {
+          "AgentlessManagementService": "Unavailable",
+          "BiosOrHardwareHealth": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "FanRedundancy": "Redundant",
+          "Fans": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Memory": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Network": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "PowerSupplies": {
+            "PowerSuppliesMismatch": false,
+            "Status": {
+              "Health": "Warning"
+            }
+          },
+          "PowerSupplyRedundancy": "Failed",
+          "Processors": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Storage": {
+            "Status": {
+              "Health": "Warning"
+            }
+          },
+          "Temperatures": {
+            "Status": {
+              "Health": "OK"
+            }
+          }
+        },
+        "Links": {
+          "EthernetInterfaces": {
+            "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/"
+          },
+          "FirmwareInventory": {
+            "@odata.id": "/redfish/v1/Systems/1/FirmwareInventory/"
+          },
+          "Memory": {
+            "@odata.id": "/redfish/v1/Systems/1/Memory/"
+          },
+          "PCIDevices": {
+            "@odata.id": "/redfish/v1/Systems/1/PCIDevices/"
+          },
+          "SmartStorage": {
+            "@odata.id": "/redfish/v1/Systems/1/SmartStorage/"
+          }
+        }
+      }
+    },
+    "links": {
+      "self": {
+        "href": "/redfish/v1/Systems/1/"
+      }
+    }
+  },
+  "/redfish/v1/Managers/1": {
+    "@odata.id": "/redfish/v1/Managers/1/",
+    "@odata.type": "#Manager.1.0.0.Manager",
+    "Id": "1",
+    "Name": "Manager",
+    "Description": "Manager View",
+    "ManagerType": "BMC",
+    "Model": "iLO 4",
+    "FirmwareVersion": "iLO 4 v2.82",
+    "UUID": "c5d5a4b0-1111-5cbb-9d6a-1c98ec1b0000",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "EthernetInterfaces": {
+      "@odata.id": "/redfish/v1/Managers/1/EthernetInterfaces/"
+    },
+    "Oem": {
+      "Hp": {
+        "Type": "HpiLO.1.1.0.HpiLO",
+        "License": {
+          "LicenseKey": "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx",
+          "LicenseString": "iLO Advanced",
+          "LicenseType": "Perpetual"
+        }
+      }
+    }
+  },
+  "/redfish/v1/Chassis/1": {
+    "@odata.id": "/redfish/v1/Chassis/1/",
+    "Id": "1",
+    "Name": "Computer System Chassis",
+    "ChassisType": "RackMount",
+    "Manufacturer": "HPE",
+    "Model": "ProLiant DL380 Gen9",
+    "SKU": "719064-B21",
+    "SerialNumber": "CZ3421AB01",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "Power": {
+      "@odata.id": "/redfish/v1/Chassis/1/Power/"
+    },
+    "Thermal": {
+      "@odata.id": "/redfish/v1/Chassis/1/Thermal/"
+    }
+  },
+  "/redfish/v1/Chassis/1/Thermal": {
+    "@odata.id": "/redfish/v1/Chassis/1/Thermal/",
+    "Id": "Thermal",
+    "Name": "Thermal",
+    "Fans": [
+      {
+        "FanName": "Fan 1",
+        "CurrentReading": 22,
+        "Units": "Percent",
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hp": {
+            "Location": "System",
+            "HotPluggable": true
+          }
+        }
+      },
+      {
+        "FanName": "Fan 2",
+        "CurrentReading": 24,
+        "Units": "Percent",
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hp": {
+            "Location": "System",
+            "HotPluggable": true
+          }
+        }
+      },
+      {
+        "FanName": "Fan 3",
+        "CurrentReading": 0,
+        "Units": "Percent",
+        "Status": {
+          "State": "Absent"
+        },
+        "Oem": {
+          "Hp": {
+            "Location": "System",
+            "HotPluggable": true
+          }
+        }
+      }
+    ],
+    "Temperatures": [
+      {
+        "Name": "01-Inlet Ambient",
+        "Number": 1,
+        "CurrentReading": 21,
+        "PhysicalContext": "Intake",
+        "Units": "Celsius",
+        "UpperThresholdCritical": 42,
+        "UpperThresholdFatal": 46,
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        }
+      },
+      {
+        "Name": "04-P1 DIMM 1-6",
+        "Number": 4,
+        "CurrentReading": 39,
+        "PhysicalContext": "SystemBoard",
+        "Units": "Celsius",
+        "UpperThresholdCritical": 87,
+        "UpperThresholdFatal": 92,
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        }
+      },
+      {
+        "Name": "14-Chipset",
+        "Number": 14,
+        "CurrentReading": 0,
+        "PhysicalContext": "SystemBoard",
+        "Units": "Celsius",
+        "UpperThresholdCritical": null,
+        "UpperThresholdFatal": null,
+        "Status": {
+          "State": "Absent"
+        }
+      }
+    ]
+  },
+  "/redfish/v1/Chassis/1/Power": {
+    "@odata.id": "/redfish/v1/Chassis/1/Power/",
+    "Id": "Power",
+    "Name": "PowerMetrics",
+    "PowerCapacityWatts": 1600,
+    "PowerConsumedWatts": 182,
+    "PowerControl": [
+      {
+        "PowerCapacityWatts": 1600,
+        "PowerConsumedWatts": 182,
+        "PowerMetrics": {
+          "AverageConsumedWatts": 178,
+          "IntervalInMin": 20,
+          "MaxConsumedWatts": 240,
+          "MinConsumedWatts": 170
+        }
+      }
+    ],
+    "PowerSupplies": [
+      {
+        "Name": "HpServerPowerSupply",
+        "Model": "720479-B21",
+        "SerialNumber": "5DCVA0DLL9F001",
+        "FirmwareVersion": "1.00",
+        "PowerSupplyType": "AC",
+        "PowerCapacityWatts": 800,
+        "LastPowerOutputWatts": 92,
+        "LineInputVoltage": 231,
+        "LineInputVoltageType": "ACHighLine",
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hp": {
+            "BayNumber": 1,
+            "HotplugCapable": true
+          }
+        }
+      },
+      {
+        "Name": "HpServerPowerSupply",
+        "Model": "720479-B21",
+        "SerialNumber": "5DCVA0DLL9F002",
+        "FirmwareVersion": "1.00",
+        "PowerSupplyType": "AC",
+        "PowerCapacityWatts": 800,
+        "LastPowerOutputWatts": 0,
+        "LineInputVoltage": 0,
+        "LineInputVoltageType": "Unknown",
+        "Status": {
+          "Health": "Warning",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hp": {
+            "BayNumber": 2,
+            "HotplugCapable": true
+          }
+        }
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/Processors/": {
+    "@odata.id": "/redfish/v1/Systems/1/Processors/",
+    "Name": "Processors Collection",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Processors/1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Processors/2/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/Processors/1"
+        },
+        {
+          "href": "/rest/v1/Systems/1/Processors/2"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/Processors"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/Processors/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/Processors/1/",
+    "Id": "1",
+    "Name": "Processors",
+    "Socket": "Proc 1",
+    "Manufacturer": "Intel(R) Corporation",
+    "Model": "Intel(R) Xeon(R) CPU E5-2650 v4 @ 2.20GHz",
+    "MaxSpeedMHz": 2200,
+    "ProcessorArchitecture": "x86",
+    "ProcessorType": "CPU",
+    "TotalCores": 12,
+    "TotalThreads": 24,
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/Processors/2/": {
+    "@odata.id": "/redfish/v1/Systems/1/Processors/2/",
+    "Id": "2",
+    "Name": "Processors",
+    "Socket": "Proc 2",
+    "Manufacturer": "Intel(R) Corporation",
+    "Model": "Intel(R) Xeon(R) CPU E5-2650 v4 @ 2.20GHz",
+    "MaxSpeedMHz": 2200,
+    "ProcessorArchitecture": "x86",
+    "ProcessorType": "CPU",
+    "TotalCores": 12,
+    "TotalThreads": 24,
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/Memory/": {
+    "@odata.id": "/redfish/v1/Systems/1/Memory/",
+    "Name": "Memory DIMM Collection",
+    "Type": "Collection.0.9.5",
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/Memory/proc1dimm1"
+        },
+        {
+          "href": "/rest/v1/Systems/1/Memory/proc1dimm4"
+        },
+        {
+          "href": "/rest/v1/Systems/1/Memory/proc1dimm2"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/Memory"
+      }
+    },
+    "Members@odata.count": 3,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm4/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm2/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/Memory/proc1dimm1/": {
+    "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm1/",
+    "Id": "proc1dimm1",
+    "Name": "proc1dimm1",
+    "DIMMStatus": "GoodInUse",
+    "DIMMType": "DDR4",
+    "DIMMTechnology": "Synchronous",
+    "SizeMB": 16384,
+    "MaximumFrequencyMHz": 2400,
+    "Manufacturer": "HP          ",
+    "PartNumber": "809208-091      ",
+    "Rank": 2,
+    "SocketLocator": "PROC 1 DIMM 1",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/Memory/proc1dimm4/": {
+    "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm4/",
+    "Id": "proc1dimm4",
+    "Name": "proc1dimm4",
+    "DIMMStatus": "GoodInUse",
+    "DIMMType": "DDR4",
+    "DIMMTechnology": "Synchronous",
+    "SizeMB": 16384,
+    "MaximumFrequencyMHz": 2400,
+    "Manufacturer": "HP          ",
+    "PartNumber": "809208-091      ",
+    "Rank": 2,
+    "SocketLocator": "PROC 1 DIMM 4"
+  },
+  "/redfish/v1/Systems/1/Memory/proc1dimm2/": {
+    "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm2/",
+    "Id": "proc1dimm2",
+    "Name": "proc1dimm2",
+    "DIMMStatus": "NotPresent",
+    "SizeMB": 0,
+    "SocketLocator": "PROC 1 DIMM 2"
+  },
+  "/redfish/v1/Systems/1/EthernetInterfaces/": {
+    "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/",
+    "Name": "Ethernet Interface Collection",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/2/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/EthernetInterfaces/1"
+        },
+        {
+          "href": "/rest/v1/Systems/1/EthernetInterfaces/2"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/EthernetInterfaces"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/EthernetInterfaces/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/1/",
+    "Id": "1",
+    "Name": "Port 1",
+    "Autosense": true,
+    "FullDuplex": true,
+    "MacAddress": "38:63:BB:3F:5A:10",
+    "SpeedMbps": 1000,
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "Oem": {
+      "Hp": {
+        "BadReceives": 0,
+        "GoodTransmits": 152344
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/EthernetInterfaces/2/": {
+    "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/2/",
+    "Id": "2",
+    "Name": "Port 2",
+    "Autosense": true,
+    "FullDuplex": false,
+    "MacAddress": "38:63:BB:3F:5A:11",
+    "SpeedMbps": 0,
+    "Status": {
+      "Health": "OK",
+      "State": "Disabled"
+    },
+    "Oem": {
+      "Hp": {
+        "BadReceives": 0,
+        "GoodTransmits": 0
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/FirmwareInventory/": {
+    "@odata.id": "/redfish/v1/Systems/1/FirmwareInventory/",
+    "Id": "FirmwareInventory",
+    "Name": "FirmwareInventory",
+    "Type": "HpServerFirmwareInventory.1.0.0",
+    "Current": {
+      "SystemBMC": [
+        {
+          "Location": "System Board",
+          "Name": "iLO",
+          "VersionString": "2.82 Dec 07 2023"
+        }
+      ],
+      "SystemRomActive": [
+        {
+          "Location": "System Board",
+          "Name": "System ROM",
+          "VersionString": "P89 v2.76 (10/21/2019)"
+        }
+      ],
+      "PowerManagementController": [
+        {
+          "Location": "System Board",
+          "Name": "Power Management Controller Firmware",
+          "VersionString": "4.4"
+        }
+      ],
+      "SmartArray": [
+        {
+          "Location": "Slot 0",
+          "Name": "Smart Array P440ar Controller",
+          "VersionString": "6.30"
+        }
+      ],
+      "IntelligentProvisioning": [
+        {
+          "Location": "System Board",
+          "Name": "Intelligent Provisioning",
+          "VersionString": "3.30.213"
+        }
+      ]
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/",
+    "Id": "SmartStorage",
+    "Name": "HP Smart Storage",
+    "Status": {
+      "Health": "Warning"
+    },
+    "Links": {
+      "ArrayControllers": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+      },
+      "HostBusAdapters": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/HostBusAdapters/"
+      }
+    },
+    "links": {
+      "ArrayControllers": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers"
+      },
+      "HostBusAdapters": {
+        "href": "/rest/v1/Systems/1/SmartStorage/HostBusAdapters"
+      },
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/",
+    "Name": "HpSmartStorageArrayControllers",
+    "Members@odata.count": 1,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/",
+    "Id": "0",
+    "Name": "HpSmartStorageArrayController",
+    "Model": "Smart Array P440ar",
+    "SerialNumber": "PDNLH0BRH8V601",
+    "Location": "Slot 0",
+    "CacheMemorySizeMiB": 2048,
+    "EncryptionEnabled": false,
+    "FirmwareVersion": {
+      "Current": {
+        "VersionString": "6.30"
+      }
+    },
+    "Status": {
+      "Health": "Warning",
+      "State": "Enabled"
+    },
+    "Links": {
+      "LogicalDrives": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/"
+      },
+      "PhysicalDrives": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/"
+      },
+      "StorageEnclosures": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/StorageEnclosures/"
+      },
+      "UnconfiguredDrives": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/UnconfiguredDrives/"
+      }
+    },
+    "links": {
+      "LogicalDrives": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives"
+      },
+      "PhysicalDrives": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives"
+      },
+      "StorageEnclosures": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/StorageEnclosures"
+      },
+      "UnconfiguredDrives": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/UnconfiguredDrives"
+      },
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/",
+    "Name": "HpSmartStorageLogicalDrives",
+    "Members@odata.count": 1,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/",
+    "Id": "1",
+    "Name": "HpSmartStorageLogicalDrive",
+    "CapacityMiB": 1144609,
+    "LogicalDriveName": "01",
+    "LogicalDriveNumber": 1,
+    "MediaType": "HDD",
+    "Raid": "1",
+    "StripeSizeBytes": 262144,
+    "VolumeUniqueIdentifier": "600508B1001C1E1F2A3B4C5D6E7F8090",
+    "Status": {
+      "Health": "Warning",
+      "State": "Enabled"
+    },
+    "Links": {
+      "DataDrives": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives/"
+      }
+    },
+    "links": {
+      "DataDrives": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives"
+      },
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives/",
+    "Name": "HpSmartStorageDiskDrives",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0"
+        },
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/",
+    "Name": "HpSmartStorageDiskDrives",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0"
+        },
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/",
+    "Id": "0",
+    "Name": "HpSmartStorageDiskDrive",
+    "CapacityMiB": 1144641,
+    "InterfaceType": "SAS",
+    "MediaType": "HDD",
+    "Location": "1I:1:1",
+    "Model": "EG1200JEHMC     ",
+    "SerialNumber": "KZG8AB0001      ",
+    "RotationalSpeedRpm": 10000,
+    "PowerOnHours": 41235,
+    "FirmwareVersion": {
+      "Current": {
+        "VersionString": "HPD4"
+      }
+    },
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/",
+    "Id": "1",
+    "Name": "HpSmartStorageDiskDrive",
+    "CapacityMiB": 1144641,
+    "InterfaceType": "SAS",
+    "MediaType": "HDD",
+    "Location": "1I:1:2",
+    "Model": "EG1200JEHMC     ",
+    "SerialNumber": "KZG8AB0002      ",
+    "RotationalSpeedRpm": 10000,
+    "PowerOnHours": 41230,
+    "FirmwareVersion": {
+      "Current": {
+        "VersionString": "HPD4"
+      }
+    },
+    "Status": {
+      "Health": "Warning",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/LogServices/": {
+    "@odata.id": "/redfish/v1/Systems/1/LogServices/",
+    "Name": "Log Service Collection",
+    "Members@odata.count": 1,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/LogServices/IML/": {
+    "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/",
+    "Id": "IML",
+    "Name": "Integrated Management Log",
+    "OverWritePolicy": "WrapsWhenFull",
+    "Entries": {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/"
+    }
+  },
+  "/redfish/v1/Systems/1/LogServices/IML/Entries/": {
+    "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/",
+    "Name": "Log Entry Collection",
+    "Total": 3,
+    "Items": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/1/",
+        "Id": "1",
+        "Created": "2026-07-14T08:02:11Z",
+        "EntryType": "Oem",
+        "Message": "IML Cleared (iLO 4 user: admin)",
+        "Severity": "OK",
+        "Oem": {
+          "Hp": {
+            "Categories": [
+              "Maintenance"
+            ],
+            "Class": 33,
+            "Code": 1,
+            "Count": 1,
+            "EvtNumber": 1,
+            "Repaired": false,
+            "Updated": "2026-07-14T08:02:11Z"
+          }
+        }
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/7/",
+        "Id": "7",
+        "Created": "2026-08-19T22:41:03Z",
+        "EntryType": "Oem",
+        "Message": "Power Supply Failure (Power Supply 2)",
+        "Severity": "Warning",
+        "Oem": {
+          "Hp": {
+            "Categories": [
+              "Power"
+            ],
+            "Class": 4,
+            "Code": 2,
+            "Count": 1,
+            "EvtNumber": 7,
+            "RecommendedAction": "Check the power supply and its input feed.",
+            "Repaired": false,
+            "Updated": "2026-08-19T22:41:03Z"
+          }
+        }
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/9/",
+        "Id": "9",
+        "Created": "2026-09-01T03:22:47Z",
+        "EntryType": "Oem",
+        "Message": "Smart Array Controller - Physical drive status change detected: Port 1I Box 1 Bay 2 (Predictive failure)",
+        "Severity": "Critical",
+        "Oem": {
+          "Hp": {
+            "Categories": [
+              "Storage"
+            ],
+            "Class": 3,
+            "Code": 2,
+            "Count": 1,
+            "EvtNumber": 9,
+            "RecommendedAction": "Replace the drive during a maintenance window.",
+            "Repaired": false,
+            "Updated": "2026-09-01T03:22:47Z"
+          }
+        }
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/LogServices/IML/Entries/1"
+        },
+        {
+          "href": "/rest/v1/Systems/1/LogServices/IML/Entries/7"
+        },
+        {
+          "href": "/rest/v1/Systems/1/LogServices/IML/Entries/9"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/LogServices/IML/Entries"
+      }
+    }
+  }
+}

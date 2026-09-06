@@ -1,0 +1,89 @@
+# Bare-metal health, from the iLO collector's Redfish gauges.
+# Health gauges are 1 = OK, 0.5 = warning / degraded / non-redundant,
+# 0 = critical / failed, so `< 1` means "not healthy" and a subsystem the
+# device does not report has no series at all and never fires.
+groups:
+  - name: infra-hardware
+    rules:
+      - alert: ServerHealthDegraded
+        expr: infra_ilo_health_rollup < 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.device }}: {{ $labels.subsystem }} health is degraded"
+          description: "iLO aggregate health for {{ $labels.subsystem }} left OK. Check the IML before touching hardware."
+
+      - alert: ServerHealthCritical
+        expr: infra_ilo_health_rollup == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.device }}: {{ $labels.subsystem }} health is critical"
+
+      - alert: PhysicalDriveDegraded
+        expr: infra_ilo_drive_health < 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Drive {{ $labels.drive }} on {{ $labels.device }} is not healthy"
+          description: "Smart Array {{ $labels.controller }}. Replacing a drive rebuilds an array: Tier 2, maintenance window, OOB box healthy."
+
+      - alert: LogicalDriveDegraded
+        expr: infra_ilo_logical_drive_health < 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Logical drive {{ $labels.drive }} on {{ $labels.device }} is not healthy"
+          description: "Every datastore backed by this volume is at risk; run impact analysis before any change."
+
+      - alert: StorageControllerDegraded
+        expr: infra_ilo_controller_health < 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Storage controller {{ $labels.controller }} on {{ $labels.device }} is not healthy"
+
+      - alert: PowerSupplyFailed
+        expr: infra_ilo_psu_health < 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Power supply {{ $labels.psu }} on {{ $labels.device }} is not healthy"
+          description: "The host has lost power redundancy; do not schedule anything that touches this host until it is back."
+
+      - alert: FanFailed
+        expr: infra_ilo_fan_health < 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Fan {{ $labels.fan }} on {{ $labels.device }} is not healthy"
+
+      - alert: FanRunningFlatOut
+        expr: infra_ilo_fan_percent > 90
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Fan {{ $labels.fan }} on {{ $labels.device }} has been above 90% for 15 minutes"
+          description: "Usually a thermal or airflow problem rather than a fan problem."
+
+      - alert: TemperatureCritical
+        expr: infra_ilo_temperature_celsius >= on(device, sensor) (infra_ilo_temperature_critical_celsius > 0)
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.sensor }} on {{ $labels.device }} is at or above its critical threshold ({{ $value }} C)"
+
+      - alert: TemperatureHigh
+        expr: infra_ilo_temperature_celsius >= on(device, sensor) (0.9 * (infra_ilo_temperature_critical_celsius > 0))
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.sensor }} on {{ $labels.device }} is within 10% of its critical threshold ({{ $value }} C)"
+
+      - alert: ServerFaultLogged
+        expr: infra_ilo_active_faults > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.device }} has {{ $value }} unrepaired IML entries"
+          description: "Read the IML rows in the latest ilo snapshot; mark them repaired in iLO once handled."

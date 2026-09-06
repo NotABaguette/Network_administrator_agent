@@ -1,0 +1,945 @@
+{
+  "_comment": "Recorded Redfish responses from an HPE ProLiant DL360 Gen10 with iLO 5 v2.78 (Redfish 1.6.0). Keys are request paths. Serials, MACs and UUIDs are made up. iLO5 shapes: Oem/Hpe, ProcessorSummary/MemorySummary, CapacityMiB on DIMMs, Reading/ReadingUnits on fans, an UpdateService/FirmwareInventory collection, the Smart Array controller linking its drives as Links/PhysicalDrives with a DiskDrives URL segment, and the standard Systems/1/Storage tree alongside SmartStorage.",
+  "/redfish/v1/": {
+    "@odata.id": "/redfish/v1/",
+    "@odata.type": "#ServiceRoot.v1_5_0.ServiceRoot",
+    "Id": "RootService",
+    "Name": "HPE RESTful Root Service",
+    "RedfishVersion": "1.6.0",
+    "UUID": "b0f1e8a2-4a0a-5c3c-9d0e-2b7a6d0c1e33",
+    "AccountService": {
+      "@odata.id": "/redfish/v1/AccountService/"
+    },
+    "Chassis": {
+      "@odata.id": "/redfish/v1/Chassis/"
+    },
+    "Managers": {
+      "@odata.id": "/redfish/v1/Managers/"
+    },
+    "SessionService": {
+      "@odata.id": "/redfish/v1/SessionService/"
+    },
+    "Systems": {
+      "@odata.id": "/redfish/v1/Systems/"
+    },
+    "UpdateService": {
+      "@odata.id": "/redfish/v1/UpdateService/"
+    },
+    "Oem": {
+      "Hpe": {
+        "@odata.type": "#HpeiLOServiceExt.v2_3_0.HpeiLOServiceExt",
+        "Manager": [
+          {
+            "ManagerType": "iLO 5",
+            "ManagerFirmwareVersion": "2.78",
+            "DefaultLanguage": "en"
+          }
+        ]
+      }
+    }
+  },
+  "/redfish/v1/Systems/1": {
+    "@odata.id": "/redfish/v1/Systems/1",
+    "@odata.type": "#ComputerSystem.v1_10_0.ComputerSystem",
+    "Id": "1",
+    "Name": "Computer System",
+    "AssetTag": "rack12-u14",
+    "BiosVersion": "U32 v2.68 (07/14/2024)",
+    "HostName": "esx-02",
+    "IndicatorLED": "Off",
+    "Manufacturer": "HPE",
+    "Model": "ProLiant DL360 Gen10",
+    "SKU": "867959-B21",
+    "SerialNumber": "CZ2951CD02",
+    "SystemType": "Physical",
+    "UUID": "36383637-3935-5A43-3239-353143443032",
+    "PowerState": "On",
+    "Status": {
+      "Health": "OK",
+      "HealthRollup": "OK",
+      "State": "Enabled"
+    },
+    "EthernetInterfaces": {
+      "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/"
+    },
+    "LogServices": {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/"
+    },
+    "Memory": {
+      "@odata.id": "/redfish/v1/Systems/1/Memory/"
+    },
+    "MemorySummary": {
+      "Status": {
+        "HealthRollup": "OK"
+      },
+      "TotalSystemMemoryGiB": 192,
+      "TotalSystemPersistentMemoryGiB": 0
+    },
+    "Processors": {
+      "@odata.id": "/redfish/v1/Systems/1/Processors/"
+    },
+    "ProcessorSummary": {
+      "Count": 2,
+      "Model": "Intel(R) Xeon(R) Gold 5218 CPU @ 2.30GHz",
+      "Status": {
+        "HealthRollup": "OK"
+      }
+    },
+    "Storage": {
+      "@odata.id": "/redfish/v1/Systems/1/Storage/"
+    },
+    "Oem": {
+      "Hpe": {
+        "@odata.type": "#HpeComputerSystemExt.v2_11_0.HpeComputerSystemExt",
+        "PostState": "FinishedPost",
+        "PowerAutoOn": "RemainOff",
+        "PowerRegulatorMode": "Dynamic",
+        "Bios": {
+          "Backup": {
+            "Date": "03/09/2023",
+            "Family": "U32",
+            "VersionString": "U32 v2.62"
+          },
+          "Current": {
+            "Date": "07/14/2024",
+            "Family": "U32",
+            "VersionString": "U32 v2.68"
+          }
+        },
+        "AggregateHealthStatus": {
+          "AgentlessManagementService": "Ready",
+          "BiosOrHardwareHealth": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "FanRedundancy": "Redundant",
+          "Fans": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Memory": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Network": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "PowerSupplies": {
+            "PowerSuppliesMismatch": false,
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "PowerSupplyRedundancy": "Redundant",
+          "Processors": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "SmartStorageBattery": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Storage": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Temperatures": {
+            "Status": {
+              "Health": "OK"
+            }
+          }
+        },
+        "Links": {
+          "PCIDevices": {
+            "@odata.id": "/redfish/v1/Systems/1/PCIDevices/"
+          },
+          "SmartStorage": {
+            "@odata.id": "/redfish/v1/Systems/1/SmartStorage/"
+          },
+          "SmartStorageConfig": {
+            "@odata.id": "/redfish/v1/systems/1/smartstorageconfig/"
+          }
+        }
+      }
+    }
+  },
+  "/redfish/v1/Managers/1": {
+    "@odata.id": "/redfish/v1/Managers/1",
+    "@odata.type": "#Manager.v1_5_1.Manager",
+    "Id": "1",
+    "Name": "Manager",
+    "ManagerType": "BMC",
+    "Model": "iLO 5",
+    "FirmwareVersion": "iLO 5 v2.78",
+    "UUID": "9a2b1c00-2222-5f11-8a44-1c98ec1b1111",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "EthernetInterfaces": {
+      "@odata.id": "/redfish/v1/Managers/1/EthernetInterfaces/"
+    },
+    "Oem": {
+      "Hpe": {
+        "@odata.type": "#HpeiLO.v2_7_0.HpeiLO",
+        "License": {
+          "LicenseKey": "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx",
+          "LicenseString": "iLO Advanced",
+          "LicenseType": "Perpetual"
+        }
+      }
+    }
+  },
+  "/redfish/v1/Chassis/1": {
+    "@odata.id": "/redfish/v1/Chassis/1",
+    "Id": "1",
+    "Name": "Computer System Chassis",
+    "ChassisType": "RackMount",
+    "Manufacturer": "HPE",
+    "Model": "ProLiant DL360 Gen10",
+    "SKU": "867959-B21",
+    "SerialNumber": "CZ2951CD02",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "Power": {
+      "@odata.id": "/redfish/v1/Chassis/1/Power"
+    },
+    "Thermal": {
+      "@odata.id": "/redfish/v1/Chassis/1/Thermal"
+    }
+  },
+  "/redfish/v1/Chassis/1/Thermal": {
+    "@odata.id": "/redfish/v1/Chassis/1/Thermal",
+    "@odata.type": "#Thermal.v1_5_0.Thermal",
+    "Id": "Thermal",
+    "Name": "Thermal",
+    "Fans": [
+      {
+        "MemberId": "0",
+        "Name": "Fan 1",
+        "Reading": 18,
+        "ReadingUnits": "Percent",
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hpe": {
+            "Location": "System",
+            "HotPluggable": true,
+            "Redundant": true
+          }
+        }
+      },
+      {
+        "MemberId": "1",
+        "Name": "Fan 2",
+        "Reading": 18,
+        "ReadingUnits": "Percent",
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hpe": {
+            "Location": "System",
+            "HotPluggable": true,
+            "Redundant": true
+          }
+        }
+      },
+      {
+        "MemberId": "2",
+        "Name": "Fan 3",
+        "Reading": 96,
+        "ReadingUnits": "Percent",
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hpe": {
+            "Location": "System",
+            "HotPluggable": true,
+            "Redundant": true
+          }
+        }
+      }
+    ],
+    "Temperatures": [
+      {
+        "MemberId": "0",
+        "Name": "01-Inlet Ambient",
+        "PhysicalContext": "Intake",
+        "ReadingCelsius": 23,
+        "SensorNumber": 1,
+        "UpperThresholdCritical": 42,
+        "UpperThresholdFatal": 47,
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hpe": {
+            "LocationXmm": 15,
+            "LocationYmm": 0
+          }
+        }
+      },
+      {
+        "MemberId": "5",
+        "Name": "06-P1 DIMM 7-12",
+        "PhysicalContext": "SystemBoard",
+        "ReadingCelsius": 82,
+        "SensorNumber": 6,
+        "UpperThresholdCritical": 89,
+        "UpperThresholdFatal": 94,
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        }
+      },
+      {
+        "MemberId": "9",
+        "Name": "12-HD Max",
+        "PhysicalContext": "SystemBoard",
+        "ReadingCelsius": 0,
+        "SensorNumber": 12,
+        "UpperThresholdCritical": 60,
+        "UpperThresholdFatal": null,
+        "Status": {
+          "State": "Absent"
+        }
+      }
+    ]
+  },
+  "/redfish/v1/Chassis/1/Power": {
+    "@odata.id": "/redfish/v1/Chassis/1/Power",
+    "@odata.type": "#Power.v1_3_0.Power",
+    "Id": "Power",
+    "Name": "PowerMetrics",
+    "PowerControl": [
+      {
+        "MemberId": "0",
+        "PowerCapacityWatts": 1000,
+        "PowerConsumedWatts": 214,
+        "PowerMetrics": {
+          "AverageConsumedWatts": 209,
+          "IntervalInMin": 20,
+          "MaxConsumedWatts": 302,
+          "MinConsumedWatts": 198
+        }
+      }
+    ],
+    "PowerSupplies": [
+      {
+        "MemberId": "0",
+        "Name": "HpeServerPowerSupply",
+        "Model": "865414-B21",
+        "SerialNumber": "5WBXK0GLLB1001",
+        "FirmwareVersion": "1.00",
+        "PowerSupplyType": "AC",
+        "PowerCapacityWatts": 500,
+        "LastPowerOutputWatts": 108,
+        "LineInputVoltage": 233,
+        "LineInputVoltageType": "ACHighLine",
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hpe": {
+            "BayNumber": 1,
+            "HotplugCapable": true
+          }
+        }
+      },
+      {
+        "MemberId": "1",
+        "Name": "HpeServerPowerSupply",
+        "Model": "865414-B21",
+        "SerialNumber": "5WBXK0GLLB1002",
+        "FirmwareVersion": "1.00",
+        "PowerSupplyType": "AC",
+        "PowerCapacityWatts": 500,
+        "LastPowerOutputWatts": 106,
+        "LineInputVoltage": 232,
+        "LineInputVoltageType": "ACHighLine",
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hpe": {
+            "BayNumber": 2,
+            "HotplugCapable": true
+          }
+        }
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/Processors/": {
+    "@odata.id": "/redfish/v1/Systems/1/Processors/",
+    "Name": "Processors Collection",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Processors/1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Processors/2/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/Processors/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/Processors/1/",
+    "Id": "1",
+    "Name": "Processors",
+    "Socket": "Proc 1",
+    "Manufacturer": "Intel(R) Corporation",
+    "Model": "Intel(R) Xeon(R) Gold 5218 CPU @ 2.30GHz",
+    "MaxSpeedMHz": 2300,
+    "ProcessorArchitecture": "x86",
+    "ProcessorType": "CPU",
+    "TotalCores": 16,
+    "TotalThreads": 32,
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/Processors/2/": {
+    "@odata.id": "/redfish/v1/Systems/1/Processors/2/",
+    "Id": "2",
+    "Name": "Processors",
+    "Socket": "Proc 2",
+    "Manufacturer": "Intel(R) Corporation",
+    "Model": "Intel(R) Xeon(R) Gold 5218 CPU @ 2.30GHz",
+    "MaxSpeedMHz": 2300,
+    "ProcessorArchitecture": "x86",
+    "ProcessorType": "CPU",
+    "TotalCores": 16,
+    "TotalThreads": 32,
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/Memory/": {
+    "@odata.id": "/redfish/v1/Systems/1/Memory/",
+    "Name": "Memory Collection",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm3/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/Memory/proc1dimm1/": {
+    "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm1/",
+    "Id": "proc1dimm1",
+    "Name": "proc1dimm1",
+    "BaseModuleType": "RDIMM",
+    "CapacityMiB": 32768,
+    "DeviceLocator": "PROC 1 DIMM 1",
+    "Manufacturer": "HPE",
+    "MemoryDeviceType": "DDR4",
+    "OperatingSpeedMhz": 2933,
+    "PartNumber": "P00924-B21  ",
+    "RankCount": 2,
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/Memory/proc1dimm3/": {
+    "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm3/",
+    "Id": "proc1dimm3",
+    "Name": "proc1dimm3",
+    "CapacityMiB": 0,
+    "DeviceLocator": "PROC 1 DIMM 3",
+    "Status": {
+      "State": "Absent"
+    }
+  },
+  "/redfish/v1/Systems/1/EthernetInterfaces/": {
+    "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/",
+    "Name": "Ethernet Interface Collection",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/2/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/EthernetInterfaces/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/1/",
+    "Id": "1",
+    "Name": "Embedded LOM 1 Port 1",
+    "FullDuplex": true,
+    "MACAddress": "48:DF:37:1A:2B:01",
+    "PermanentMACAddress": "48:DF:37:1A:2B:01",
+    "SpeedMbps": 10000,
+    "LinkStatus": "LinkUp",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "IPv4Addresses": []
+  },
+  "/redfish/v1/Systems/1/EthernetInterfaces/2/": {
+    "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/2/",
+    "Id": "2",
+    "Name": "Embedded LOM 1 Port 2",
+    "FullDuplex": false,
+    "MACAddress": "48:DF:37:1A:2B:02",
+    "PermanentMACAddress": "48:DF:37:1A:2B:02",
+    "SpeedMbps": 0,
+    "LinkStatus": "LinkDown",
+    "Status": {
+      "Health": "OK",
+      "State": "Disabled"
+    },
+    "IPv4Addresses": []
+  },
+  "/redfish/v1/UpdateService/FirmwareInventory/": {
+    "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/",
+    "Name": "Firmware Inventory Collection",
+    "Members@odata.count": 3,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/2/"
+      },
+      {
+        "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/4/"
+      }
+    ]
+  },
+  "/redfish/v1/UpdateService/FirmwareInventory/1/": {
+    "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/1/",
+    "Id": "1",
+    "Name": "System ROM",
+    "Version": "U32 v2.68 (07/14/2024)",
+    "Updateable": true,
+    "Oem": {
+      "Hpe": {
+        "DeviceClass": "bb965990-c8d3-5d6a-b41a-8a4a1f0e1e00",
+        "DeviceContext": "System Board"
+      }
+    }
+  },
+  "/redfish/v1/UpdateService/FirmwareInventory/2/": {
+    "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/2/",
+    "Id": "2",
+    "Name": "iLO 5",
+    "Version": "2.78 Jan 30 2024",
+    "Updateable": true,
+    "Oem": {
+      "Hpe": {
+        "DeviceClass": "c0bcf2b9-1d0a-5a5e-9b8f-3b7d1a0e0100",
+        "DeviceContext": "System Board"
+      }
+    }
+  },
+  "/redfish/v1/UpdateService/FirmwareInventory/4/": {
+    "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/4/",
+    "Id": "4",
+    "Name": "HPE Smart Array P408i-a SR Gen10",
+    "Version": "3.53",
+    "Updateable": true,
+    "Oem": {
+      "Hpe": {
+        "DeviceClass": "0b2ce1e7-2ba4-5f01-8f6a-9c1c1d0b1a00",
+        "DeviceContext": "Slot=0"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/",
+    "Id": "SmartStorage",
+    "Name": "HpeSmartStorage",
+    "Status": {
+      "Health": "OK"
+    },
+    "Links": {
+      "ArrayControllers": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+      },
+      "HostBusAdapters": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/HostBusAdapters/"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/",
+    "Name": "HpeSmartStorageArrayControllers",
+    "Members@odata.count": 1,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/",
+    "Id": "0",
+    "Name": "HpeSmartStorageArrayController",
+    "Model": "HPE Smart Array P408i-a SR Gen10",
+    "SerialNumber": "PEYHC0DRHAB101",
+    "Location": "Slot 0",
+    "CacheMemorySizeMiB": 2048,
+    "EncryptionEnabled": false,
+    "FirmwareVersion": {
+      "Current": {
+        "VersionString": "3.53"
+      }
+    },
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "Links": {
+      "LogicalDrives": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/"
+      },
+      "PhysicalDrives": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/"
+      },
+      "StorageEnclosures": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/StorageEnclosures/"
+      },
+      "UnconfiguredDrives": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/UnconfiguredDrives/"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/",
+    "Name": "HpeSmartStorageLogicalDrives",
+    "Members@odata.count": 1,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/",
+    "Id": "1",
+    "Name": "HpeSmartStorageLogicalDrive",
+    "CapacityMiB": 763097,
+    "LogicalDriveName": "01",
+    "LogicalDriveNumber": 1,
+    "MediaType": "SSD",
+    "Raid": "1",
+    "StripeSizeBytes": 262144,
+    "VolumeUniqueIdentifier": "600508B1001C9A8B7C6D5E4F30201000",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "Links": {
+      "DataDrives": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives/"
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives/",
+    "Name": "HpeSmartStorageDiskDrives",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/",
+    "Name": "HpeSmartStorageDiskDrives",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/",
+    "Id": "0",
+    "Name": "HpeSmartStorageDiskDrive",
+    "CapacityMiB": 763097,
+    "InterfaceType": "SAS",
+    "MediaType": "SSD",
+    "Location": "1I:1:1",
+    "Model": "MM0800JEFPB",
+    "SerialNumber": "0QV3AB0001",
+    "RotationalSpeedRpm": null,
+    "PowerOnHours": 20114,
+    "SSDEnduranceUtilizationPercentage": 2,
+    "FirmwareVersion": {
+      "Current": {
+        "VersionString": "HPD2"
+      }
+    },
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/",
+    "Id": "1",
+    "Name": "HpeSmartStorageDiskDrive",
+    "CapacityMiB": 763097,
+    "InterfaceType": "SAS",
+    "MediaType": "SSD",
+    "Location": "1I:1:2",
+    "Model": "MM0800JEFPB",
+    "SerialNumber": "0QV3AB0002",
+    "RotationalSpeedRpm": null,
+    "PowerOnHours": 20114,
+    "SSDEnduranceUtilizationPercentage": 3,
+    "FirmwareVersion": {
+      "Current": {
+        "VersionString": "HPD2"
+      }
+    },
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/Storage/": {
+    "@odata.id": "/redfish/v1/Systems/1/Storage/",
+    "Name": "Storage Collection",
+    "Members@odata.count": 1,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/Storage/DE00A000/": {
+    "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/",
+    "Id": "DE00A000",
+    "Name": "HPE Smart Array P408i-a SR Gen10",
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "StorageControllers": [
+      {
+        "MemberId": "0",
+        "Name": "HPE Smart Array P408i-a SR Gen10",
+        "Manufacturer": "HPE",
+        "Model": "HPE Smart Array P408i-a SR Gen10",
+        "SerialNumber": "PEYHC0DRHAB101",
+        "FirmwareVersion": "3.53",
+        "SpeedGbps": 12,
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        }
+      }
+    ],
+    "Drives": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Drives/0/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Drives/1/"
+      }
+    ],
+    "Volumes": {
+      "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Volumes/"
+    }
+  },
+  "/redfish/v1/Systems/1/Storage/DE00A000/Drives/0/": {
+    "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Drives/0/",
+    "Id": "0",
+    "Name": "HPE MM0800JEFPB",
+    "CapacityBytes": 800166076416,
+    "MediaType": "SSD",
+    "Protocol": "SAS",
+    "Model": "MM0800JEFPB",
+    "SerialNumber": "0QV3AB0001",
+    "Revision": "HPD2",
+    "RotationSpeedRPM": null,
+    "FailurePredicted": false,
+    "PredictedMediaLifeLeftPercent": 98,
+    "PhysicalLocation": {
+      "PartLocation": {
+        "ServiceLabel": "Port:1I Box:1 Bay:1"
+      }
+    },
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/Storage/DE00A000/Drives/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Drives/1/",
+    "Id": "1",
+    "Name": "HPE MM0800JEFPB",
+    "CapacityBytes": 800166076416,
+    "MediaType": "SSD",
+    "Protocol": "SAS",
+    "Model": "MM0800JEFPB",
+    "SerialNumber": "0QV3AB0002",
+    "Revision": "HPD2",
+    "RotationSpeedRPM": null,
+    "FailurePredicted": false,
+    "PredictedMediaLifeLeftPercent": 97,
+    "PhysicalLocation": {
+      "PartLocation": {
+        "ServiceLabel": "Port:1I Box:1 Bay:2"
+      }
+    },
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
+  },
+  "/redfish/v1/Systems/1/Storage/DE00A000/Volumes/": {
+    "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Volumes/",
+    "Name": "Volume Collection",
+    "Members@odata.count": 1,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Volumes/1/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/Storage/DE00A000/Volumes/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Volumes/1/",
+    "Id": "1",
+    "Name": "01",
+    "CapacityBytes": 800166076416,
+    "RAIDType": "RAID1",
+    "OptimumIOSizeBytes": 262144,
+    "Identifiers": [
+      {
+        "DurableName": "600508B1001C9A8B7C6D5E4F30201000",
+        "DurableNameFormat": "NAA"
+      }
+    ],
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "Links": {
+      "Drives": [
+        {
+          "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Drives/0/"
+        },
+        {
+          "@odata.id": "/redfish/v1/Systems/1/Storage/DE00A000/Drives/1/"
+        }
+      ]
+    }
+  },
+  "/redfish/v1/Systems/1/LogServices/": {
+    "@odata.id": "/redfish/v1/Systems/1/LogServices/",
+    "Name": "Log Service Collection",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/LogServices/DiagnosticLog/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/LogServices/IML/": {
+    "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/",
+    "Id": "IML",
+    "Name": "Integrated Management Log",
+    "OverWritePolicy": "WrapsWhenFull",
+    "Entries": {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/"
+    }
+  },
+  "/redfish/v1/Systems/1/LogServices/IML/Entries/": {
+    "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/",
+    "Name": "Log Entry Collection",
+    "Members@odata.count": 2,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/2/"
+      }
+    ]
+  },
+  "/redfish/v1/Systems/1/LogServices/IML/Entries/1/": {
+    "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/1/",
+    "Id": "1",
+    "Created": "2026-05-02T11:31:09Z",
+    "Updated": "2026-05-02T11:31:09Z",
+    "EntryType": "Oem",
+    "Message": "IML Cleared (iLO 5 user: infra-ro)",
+    "Severity": "OK",
+    "Oem": {
+      "Hpe": {
+        "Categories": [
+          "Maintenance"
+        ],
+        "Class": 33,
+        "Code": 1,
+        "Count": 1,
+        "EventNumber": 1,
+        "Repaired": false
+      }
+    }
+  },
+  "/redfish/v1/Systems/1/LogServices/IML/Entries/2/": {
+    "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/2/",
+    "Id": "2",
+    "Created": "2026-06-11T04:07:52Z",
+    "Updated": "2026-06-12T09:15:00Z",
+    "EntryType": "Oem",
+    "Message": "Uncorrectable Memory Error (Processor 1, DIMM 3)",
+    "Severity": "Critical",
+    "Oem": {
+      "Hpe": {
+        "Categories": [
+          "Memory"
+        ],
+        "Class": 14,
+        "Code": 5,
+        "Count": 1,
+        "EventNumber": 2,
+        "RecommendedAction": "Replace the DIMM.",
+        "Repaired": true
+      }
+    }
+  }
+}
