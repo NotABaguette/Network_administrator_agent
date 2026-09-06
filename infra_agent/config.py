@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     max_tool_calls_per_run: int = 40
     max_output_tokens_per_run: int = 64000
 
+    # Telegram owner channel (token and owner id live in secrets, not here)
+    telegram_quiet_start: int | None = Field(
+        default=None, ge=0, le=23, description="Local hour at which quiet hours begin"
+    )
+    telegram_quiet_end: int | None = Field(
+        default=None, ge=0, le=23, description="Local hour at which quiet hours end"
+    )
+
     # Metrics
     metrics_port: int = 9101
 

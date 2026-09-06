@@ -20,12 +20,14 @@ mcp_app = typer.Typer(help="MCP server for Claude Code / Desktop")
 netbox_app = typer.Typer(help="NetBox source of truth: bootstrap and sync")
 baseline_app = typer.Typer(help="The accepted baseline that drift is measured against")
 graph_app = typer.Typer(help="Topology graph: build, render, impact analysis")
+bot_app = typer.Typer(help="Telegram bot: owner channel and approvals")
 app.add_typer(change_app, name="change")
 app.add_typer(agent_app, name="agent")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(netbox_app, name="netbox")
 app.add_typer(baseline_app, name="baseline")
 app.add_typer(graph_app, name="graph")
+app.add_typer(bot_app, name="bot")
 
 
 @app.callback()
@@ -306,6 +308,42 @@ def agent_run() -> None:
     from infra_agent.agent.service import run
 
     run()
+
+
+def _agent_callbacks() -> tuple[object | None, object | None]:
+    """`/ask` and `/digest` entry points, when the agent package exposes them.
+
+    The bot's approval tokens live in memory, so an Approve button only works
+    in the process that minted it: the full deployment hosts the bot inside the
+    agent service (`telegram_bot.start_polling`). This standalone runner is for
+    a bot-only box; it picks up the agent callbacks if they happen to be
+    importable and otherwise says so instead of silently answering
+    "not attached".
+    """
+    try:
+        from infra_agent.agent import service
+    except Exception:  # pragma: no cover - the agent package is optional here
+        return None, None
+    return getattr(service, "ask", None), getattr(service, "digest", None)
+
+
+@bot_app.command("run")
+def bot_run(
+    metrics_port: int = typer.Option(9103, help="port for infra_frozen and client metrics"),
+) -> None:
+    """Start the Telegram owner channel (long polling; approvals are human-only)."""
+    from infra_agent.agent.telegram_bot import run_bot
+    from infra_agent.tools.change_tools import store
+
+    ask, digest = _agent_callbacks()
+    console.print("starting the telegram bot (long polling); Ctrl-C to stop")
+    if ask is None or digest is None:
+        console.print(
+            "[yellow]note[/]: no agent callbacks found, so /ask and /digest are inert, and "
+            "Approve buttons only appear for plans this process itself proposed. "
+            "Run the bot inside the agent service for the full owner channel."
+        )
+    run_bot(store(), ask=ask, digest=digest, metrics_port=metrics_port)
 
 
 @mcp_app.command("serve")
