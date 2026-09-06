@@ -93,10 +93,11 @@ class IpPseudonymizer:
 
         return self._ipv4.sub(sub, text)
 
+    _token = re.compile(r"PUBIP_\d+")
+
     def unmask(self, text: str) -> str:
-        for token, ip in self.reverse.items():
-            text = text.replace(token, ip)
-        return text
+        # Whole-token replacement so PUBIP_1 never corrupts PUBIP_10.
+        return self._token.sub(lambda m: self.reverse.get(m.group(0), m.group(0)), text)
 
 
 class RawConfigError(ValueError):
@@ -139,6 +140,7 @@ class RedactionGateway:
         return obj
 
     def unmask(self, text: str) -> str:
+        """Reverse public-IP pseudonyms for the owner's channel only, never for the model."""
         return self.ips.unmask(text)
 
     # -- raw config guard ---------------------------------------------------
@@ -153,7 +155,13 @@ class RedactionGateway:
                 raise RawConfigError("raw device configuration must not leave the network")
 
     # -- commands -----------------------------------------------------------
+    _shell_meta = re.compile(r"[;&|`$<>(){}\\\n\r\x00-\x1f]")
+
     def is_command_allowed(self, platform: str, command: str) -> bool:
+        # Newlines, pipes and shell metacharacters never belong in a read-only show
+        # command on any platform; refuse before the allowlist gets a chance to match.
+        if self._shell_meta.search(command):
+            return False
         cmd = " ".join(command.strip().split())
         policy = self._command_policies.get(platform)
         if policy is None:

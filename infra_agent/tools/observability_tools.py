@@ -210,7 +210,7 @@ class CiscoShowTransport:
             raise RuntimeError(f"{command!r} failed on {device.name}")
         from infra_agent.collectors.cisco import parse
 
-        platform = "cisco_xe" if device.kind.value == "cisco_iosxe" else "cisco_ios"
+        platform = "cisco_ios"  # IOS-XE parses under the cisco_ios templates too
         return parse(platform, command, response.result)
 
 

@@ -31,6 +31,8 @@ Done once, by hand or via the exact commands `infra onboard accounts` prints.
 - [ ] CDP mode `both` on every standard vSwitch (`esxcli network vswitch standard set -c both -v vSwitchN`).
 - [ ] Syslog target set (`esxcli system syslog config set --loghost=udp://mgmt-01:514`).
 - [ ] License type recorded per host (free vs licensed) in the seed inventory.
+- [ ] For host-config backups: SSH enabled on the host (TSM-SSH service) and mgmt-01's public key in `/etc/ssh/keys-root/authorized_keys` (or the backup user's). The ESXi collector only opens SSH when the credential has `ssh_key_path`; without it the backup step is skipped and the run stays green.
+- [ ] SSH host keys of every ESXi host and switch collected into a known_hosts file and exported as `INFRA_SSH_KNOWN_HOSTS` for the collectors and `device.show`; without it host keys are accepted on first use.
 
 ### HPE iLO
 - [ ] Read-only iLO user `infra-ro` (Login privilege only) for Redfish.

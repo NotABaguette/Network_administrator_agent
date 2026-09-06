@@ -119,3 +119,38 @@ def test_egress_writes_audit(gateway: RedactionGateway):
 )
 def test_command_allowlist(gateway: RedactionGateway, platform, command, allowed):
     assert gateway.is_command_allowed(platform, command) is allowed
+
+
+def test_telegram_token_inside_url_is_stripped(gateway: RedactionGateway):
+    url = "POST https://api.telegram.org/bot123456789:AAHfz9-XyZ_abcdefghijklmnopqrstuvwxyz012/sendMessage"
+    out = gateway.redact_text(url)
+    assert "AAHfz9" not in out and "123456789:" not in out
+
+
+def test_unmask_does_not_corrupt_two_digit_tokens(gateway: RedactionGateway):
+    text = " ".join(f"8.8.8.{i}" for i in range(1, 13))
+    masked = gateway.redact_text(text)
+    assert "PUBIP_12" in masked
+    assert gateway.unmask(masked) == text
+
+
+@pytest.mark.parametrize(
+    "platform,command,allowed",
+    [
+        ("esxi", "esxcli network vswitch standard list", True),
+        ("esxi", "esxcli network nic get -n vmnic0", True),
+        ("esxi", "esxcli storage core device list", True),
+        ("esxi", "esxcli system version get", True),
+        ("esxi", "esxcli network vswitch standard set -c both -v vSwitch0", False),
+        ("esxi", "esxcli network vswitch standard list; rm -rf /", False),
+        ("esxi", "esxcli system version get && reboot", False),
+        ("cisco", "show version\nconfigure terminal", False),
+        ("cisco", "show version\rreload", False),
+        ("fortigate", "get system status | grep Version", False),
+        ("ilo", "GET /redfish/v1/Systems/1?$expand=.", False),
+    ],
+)
+def test_shell_metacharacters_and_write_verbs_are_refused(
+    gateway: RedactionGateway, platform, command, allowed
+):
+    assert gateway.is_command_allowed(platform, command) is allowed

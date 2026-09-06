@@ -61,7 +61,7 @@ rules:
     pattern: 'sk-ant-[A-Za-z0-9_\-]{20,}'
     replacement: '<REDACTED-API-KEY>'
   - name: telegram-bot-token
-    pattern: '\b\d{8,11}:[A-Za-z0-9_\-]{30,}\b'
+    pattern: '\d{8,11}:[A-Za-z0-9_\-]{30,}'
     replacement: '<REDACTED-TOKEN>'
   - name: bearer-token
     pattern: '(?i)\b(bearer\s+)[A-Za-z0-9._\-+/=]{16,}'
@@ -102,7 +102,8 @@ commands:
       - '^config'
   esxi:
     allow:
-      - '^esxcli (network|storage|hardware|system (version|hostname|uuid|time|boot|maintenanceMode get|module list)|vm process list|software vib list)\b'
+      # read-only esxcli: namespace path ending in a read verb, optional flags only
+      - '^esxcli (?:network|storage|hardware|software|vm|system) (?:[\w-]+ )*(?:list|get|stats)(?: -{1,2}[\w-]+(?: [\w./:-]+)?)*$'
       - '^vim-cmd (vmsvc/getallvms|vmsvc/get\.\w+ \d+|hostsvc/(hostsummary|net/info|datastore/listsummary|hostconfig))$'
     deny:
       - 'esxcli system (account|permission|secpolicy|settings advanced set|syslog config set|shutdown|maintenanceMode set)'

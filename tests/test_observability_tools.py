@@ -138,9 +138,9 @@ BYPASSES = [
 
 @pytest.mark.parametrize(("device", "command"), BYPASSES)
 def test_a_command_the_allowlist_regexes_let_through_is_still_refused(wired, device, command):
-    assert wired.gateway.is_command_allowed(INVENTORY.get(device).platform, command), (
-        "this case is only interesting while the raw allowlist still admits it"
-    )
+    # Defence in depth: the gateway now refuses these itself (metacharacters, write
+    # verbs), and device.show must refuse them independently of the gateway too.
+    assert not wired.gateway.is_command_allowed(INVENTORY.get(device).platform, command)
 
     result = obs.show(device=device, command=command)
 

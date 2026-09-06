@@ -98,4 +98,5 @@ class CiscoIOSCollector(_CiscoBase):
 class CiscoIOSXECollector(_CiscoBase):
     kind = DeviceKind.cisco_iosxe
     name = "cisco"
-    ntc_platform = "cisco_xe"
+    # ntc-templates has no cisco_xe template set; IOS-XE show output parses under cisco_ios.
+    ntc_platform = "cisco_ios"
