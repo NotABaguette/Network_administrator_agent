@@ -18,10 +18,32 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from infra_agent.config import Settings, get_settings
 
-EnsureStatus = Literal["created", "updated", "unchanged", "would-create", "would-update"]
+EnsureStatus = Literal["created", "updated", "unchanged", "would-create", "would-update", "error"]
 
 # Fields compared case-insensitively (NetBox normalises MAC address casing).
 _CASE_INSENSITIVE = {"mac_address", "primary_mac_address", "slug"}
+
+# NetBox's default read timeout. pynetbox builds a bare `requests.Session` and never
+# passes `timeout=`, so without this a black-holed NetBox hangs a tool call for the
+# whole OS TCP timeout, once per request.
+DEFAULT_TIMEOUT = 10.0
+
+
+class _Omit:
+    """Marks a lookup key that must not be written back in the create payload."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "OMIT"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+OMIT = _Omit()
+
+
+class NetBoxWriteError(RuntimeError):
+    """NetBox rejected a write (HTTP 400). Mirrors `pynetbox.RequestError`."""
 
 
 @dataclass
@@ -43,7 +65,7 @@ class EnsureResult:
 
     @property
     def changed(self) -> bool:
-        return self.status != "unchanged"
+        return self.status not in ("unchanged", "error")
 
 
 @runtime_checkable
@@ -138,13 +160,19 @@ class NetBoxBase:
         `key` is a query filter and may use natural keys (`device="sw-core-01"`).
         `create` carries the write form of those same fields (`device=17`) and
         overrides them in the creation payload, because NetBox queries by name but
-        writes by id. Running this twice with the same arguments never writes the
-        second time, which is what makes `bootstrap` idempotent.
+        writes by id; `OMIT` drops a key that is queryable but not writable (NetBox
+        filters MAC addresses by `interface_id` but stores `assigned_object_id`).
+        Running this twice with the same arguments never writes the second time,
+        which is what makes `bootstrap` idempotent.
         """
         defaults = defaults or {}
         existing = self.get(endpoint, **key)
         if existing is None:
-            payload = {**key, **(create or {}), **defaults}
+            payload = {
+                name: value
+                for name, value in {**key, **(create or {}), **defaults}.items()
+                if not isinstance(value, _Omit)
+            }
             if self.dry_run:
                 preview = {"id": self._next_preview_id(), **payload}
                 return EnsureResult(endpoint, preview, "would-create", sorted(payload))
@@ -169,11 +197,20 @@ class NetBoxBase:
 class NetBoxClient(NetBoxBase):
     """`pynetbox` wrapper. The import happens on first use, never at module import."""
 
-    def __init__(self, url: str, token: str, *, dry_run: bool = False, threading: bool = False):
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        *,
+        dry_run: bool = False,
+        threading: bool = False,
+        timeout: float = DEFAULT_TIMEOUT,
+    ):
         self.url = url.rstrip("/")
         self._token = token
         self.dry_run = dry_run
         self.threading = threading
+        self.timeout = timeout
         self._api: Any = None
 
     def __repr__(self) -> str:
@@ -195,8 +232,35 @@ class NetBoxClient(NetBoxBase):
         if self._api is None:
             import pynetbox  # lazy: optional dependency
 
-            self._api = pynetbox.api(self.url, token=self._token, threading=self.threading)
+            api = pynetbox.api(self.url, token=self._token, threading=self.threading)
+            self._apply_timeout(api)
+            self._api = api
         return self._api
+
+    def _apply_timeout(self, api: Any) -> None:
+        """Give every NetBox request a deadline.
+
+        pynetbox never passes `timeout=`, so a NetBox whose SYNs are dropped would
+        block an LLM-callable read for the OS TCP timeout on each of the dozen-odd
+        requests a drift report makes.
+        """
+        try:
+            import requests
+        except ImportError:  # pragma: no cover - requests is a core dependency
+            return
+        timeout = self.timeout
+
+        class _TimeoutSession(requests.Session):
+            def request(self, *args: Any, **kwargs: Any) -> Any:
+                kwargs.setdefault("timeout", timeout)
+                return super().request(*args, **kwargs)
+
+        session = _TimeoutSession()
+        existing = getattr(api, "http_session", None)
+        if existing is not None:
+            session.headers.update(existing.headers)
+            session.verify = existing.verify
+        api.http_session = session
 
     def endpoint(self, name: str) -> Any:
         app, _, resource = name.partition(".")

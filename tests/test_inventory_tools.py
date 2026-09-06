@@ -8,7 +8,7 @@ from infra_agent.config import get_settings
 from infra_agent.redaction.gateway import RedactionGateway
 from infra_agent.tools import inventory_tools
 from infra_agent.tools.registry import REGISTRY, llm_tools, load_all
-from tests.test_reconcile import esxi_data, write_estate
+from tests.test_reconcile import _DeadNetBox, esxi_data, write_estate
 
 INVENTORY_TOOLS = {
     "inventory.get_device",
@@ -50,8 +50,13 @@ def test_inventory_tools_are_registered_and_readable_by_the_model():
 # --------------------------------------------------------------------------- devices
 def test_list_devices_and_filter_by_kind(estate_env):
     everything = inventory_tools.list_devices()
-    assert everything["count"] == 3
-    assert {d["name"] for d in everything["devices"]} == {"fw-01", "sw-core-01", "esx-01"}
+    assert everything["count"] == 4
+    assert {d["name"] for d in everything["devices"]} == {
+        "fw-01",
+        "sw-core-01",
+        "esx-01",
+        "esx-01-ilo",
+    }
 
     switches = inventory_tools.list_devices(kind="cisco_ios")
     assert [d["name"] for d in switches["devices"]] == ["sw-core-01"]
@@ -82,10 +87,27 @@ def test_get_device_for_a_hypervisor_lists_its_vms(estate_env):
     assert sorted(host["virtual_machines"]) == ["app-01", "mgmt-01"]
 
 
+def test_an_onboarded_ilo_is_still_listed_after_being_folded_into_its_host(estate_env):
+    """`apply_ilo` folds the iLO into esx-01; the seed name must still answer."""
+    ilos = inventory_tools.list_devices(kind="ilo")
+    assert [d["name"] for d in ilos["devices"]] == ["esx-01-ilo"]
+    entry = ilos["devices"][0]
+    assert entry["folded_into"] == "esx-01"
+    assert entry["serial"] == "CZ12345678"
+    assert entry["primary_ip"] == "10.0.0.121"
+
+    resolved = inventory_tools.get_device("esx-01-ilo")
+    assert resolved["found"] is True
+    assert resolved["name"] == "esx-01"
+    assert resolved["resolved_from"] == "esx-01-ilo"
+    assert "iLO of esx-01" in resolved["note"]
+
+
 def test_get_device_is_helpful_when_the_name_is_wrong(estate_env):
     answer = inventory_tools.get_device("sw-core-99")
     assert answer["found"] is False
     assert "sw-core-01" in answer["known_devices"]
+    assert "esx-01-ilo" in answer["known_devices"], "the folded iLO is a name worth suggesting"
 
 
 # --------------------------------------------------------------------------- VMs and VLANs
@@ -232,6 +254,38 @@ def test_drift_tool_reports_against_the_accepted_baseline(estate_env, tmp_path):
     assert item["observed"] == 8.0 and item["intended"] == 4.0
 
     assert inventory_tools.drift_report(device="fw-01")["by_device"] == {}
+
+
+def test_drift_tool_degrades_instead_of_raising_when_netbox_is_down(estate_env, monkeypatch):
+    """A read tool that raises out of the agent loop is worse than a partial answer."""
+    from infra_agent.reconcile import service
+
+    service.accept_baseline(settings=estate_env, accepted_by="owner")
+    monkeypatch.setattr(service, "netbox_client", lambda *a, **k: _DeadNetBox())
+
+    report = inventory_tools.drift_report()
+    assert report["source"] == "baseline"
+    assert any("NetBox is unreachable" in w for w in report["warnings"])
+
+    located = inventory_tools.where_is_mac("0050.5601.aabb")
+    assert located["found"] is True, "the snapshot answer survives NetBox being down"
+    assert located["netbox_interfaces"] == []
+
+
+def test_where_is_mac_enriches_from_netbox(estate_env, monkeypatch):
+    """The MAC is findable in NetBox only because bootstrap stores it as an object."""
+    from infra_agent.reconcile import bootstrap, service
+    from infra_agent.reconcile.fake import FakeNetBox
+
+    client = FakeNetBox()
+    bootstrap(service.observed_estate(estate_env), client)
+    monkeypatch.setattr(service, "netbox_client", lambda *a, **k: client)
+
+    answer = inventory_tools.where_is_mac("aa:bb:cc:00:01:01")
+    assert [i["name"] for i in answer["netbox_interfaces"]] == ["GigabitEthernet1/0/1"]
+
+    vm_nic = inventory_tools.where_is_mac("00:50:56:01:aa:bb")
+    assert any("Network adapter 1" == i["name"] for i in vm_nic["netbox_interfaces"])
 
 
 def test_every_inventory_answer_survives_the_redaction_gateway(estate_env, tmp_path):

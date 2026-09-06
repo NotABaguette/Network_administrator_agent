@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from infra_agent.models.common import DeviceKind
+from infra_agent.reconcile.bootstrap import disk_gb
 from infra_agent.reconcile.model import (
     Cluster,
     Device,
@@ -209,8 +210,10 @@ class _NetBoxReader:
         self.manufacturers = {m["id"]: m.get("name", "") for m in client.all("dcim.manufacturers")}
         self.types = {t["id"]: t for t in client.all("dcim.device_types")}
         self.sites = {s["id"]: s.get("slug", "") for s in client.all("dcim.sites")}
+        self.platforms = {p["id"]: p.get("name", "") for p in client.all("dcim.platforms")}
         self.vlans = {v["id"]: v for v in client.all("ipam.vlans")}
         self.clusters = {c["id"]: c for c in client.all("virtualization.clusters")}
+        self.site_ids = {i for i, slug in self.sites.items() if slug == site}
 
     def _site_slug(self, record: dict[str, Any]) -> str | None:
         value = record.get("site")
@@ -223,6 +226,33 @@ class _NetBoxReader:
     def _in_site(self, record: dict[str, Any]) -> bool:
         slug = self._site_slug(record)
         return slug is None or slug == self.site
+
+    def _in_scope(self, record: dict[str, Any]) -> bool:
+        """Clusters carry a generic scope since NetBox 4.2 instead of a site."""
+        scope_type = str(record.get("scope_type") or "")
+        if isinstance(record.get("scope_type"), dict):
+            scope_type = str(record["scope_type"].get("value") or "")
+        if not scope_type:
+            return self._in_site(record)
+        if not scope_type.endswith("site"):
+            return False
+        return self._fk(record.get("scope_id")) in self.site_ids
+
+    def _platform_name(self, value: Any) -> str | None:
+        if isinstance(value, dict):
+            return str(value.get("name") or "") or None
+        if isinstance(value, int):
+            return self.platforms.get(value) or None
+        return str(value) if value else None
+
+    @staticmethod
+    def _mac(row: dict[str, Any]) -> str | None:
+        """NetBox 4.2+ keeps the MAC in a `dcim.mac_addresses` object; `mac_address`
+        is the read-only mirror of `primary_mac_address`."""
+        primary = row.get("primary_mac_address")
+        if isinstance(primary, dict) and primary.get("mac_address"):
+            return normalize_mac(primary["mac_address"])
+        return normalize_mac(row.get("mac_address"))
 
     def _vid(self, value: Any) -> int | None:
         if isinstance(value, dict):
@@ -257,7 +287,7 @@ class _NetBoxReader:
                     name=row.get("name", ""),
                     device=name,
                     type=row.get("type") or "1000base-t",
-                    mac=normalize_mac(row.get("mac_address") or row.get("primary_mac_address")),
+                    mac=self._mac(row),
                     enabled=bool(row.get("enabled", True)),
                     description=row.get("description") or "",
                     mode=mode if mode in ("access", "tagged", "routed") else None,
@@ -266,6 +296,7 @@ class _NetBoxReader:
                         v for v in (self._vid(t) for t in row.get("tagged_vlans") or []) if v
                     ),
                     mtu=row.get("mtu"),
+                    role="mgmt" if row.get("mgmt_only") else None,
                 )
             )
 
@@ -313,7 +344,7 @@ class _NetBoxReader:
 
         cluster_names: dict[int, str] = {}
         for row in self.clusters.values():
-            if not self._in_site(row):
+            if not self._in_scope(row):
                 continue
             cluster_names[row["id"]] = row.get("name", "")
             estate.clusters.append(
@@ -339,14 +370,13 @@ class _NetBoxReader:
             vm_nics[vm_id].append(
                 VMInterface(
                     name=row.get("name", ""),
-                    mac=normalize_mac(row.get("mac_address")),
+                    mac=self._mac(row),
                     portgroup=row.get("description") or None,
                     vlan=self._vid(row.get("untagged_vlan")),
                     enabled=bool(row.get("enabled", True)),
                 )
             )
         for vm_id, row in vms.items():
-            disk = row.get("disk")
             estate.virtual_machines.append(
                 VirtualMachine(
                     name=row.get("name", ""),
@@ -354,8 +384,9 @@ class _NetBoxReader:
                     status=str(row.get("status") or "active"),
                     vcpus=float(row["vcpus"]) if row.get("vcpus") is not None else None,
                     memory_mb=row.get("memory"),
-                    disk_gb=float(disk) if disk is not None else None,
-                    guest_os=row.get("comments") or None,
+                    # NetBox has stored disk in MB since 4.1; the estate models GB.
+                    disk_gb=disk_gb(row.get("disk")),
+                    guest_os=self._platform_name(row.get("platform")),
                     interfaces=sorted(vm_nics[vm_id], key=lambda i: i.name),
                 )
             )
@@ -492,11 +523,17 @@ class _Comparer:
 
     def _interface_fields(self, device: str, name: str, mine: Interface, theirs: Interface) -> None:
         sensitive = mine.is_sensitive() or theirs.is_sensitive()
+        # NetBox refuses to store a VLAN on an interface with no 802.1Q mode, so a
+        # routed SVI or a vmkernel port has none there by construction: comparing
+        # its VLAN against NetBox would be a permanent false positive.
+        vlans_comparable = bool(project_mode(mine.mode)) and bool(project_mode(theirs.mode))
         for field, severity in _INTERFACE_FIELDS.items():
             projection = _PROJECTIONS.get(field, lambda v: v)
             a, b = projection(getattr(mine, field)), projection(getattr(theirs, field))
             # One side simply not knowing a description or a MAC is not drift.
             if field in ("description", "mac") and (not a or not b):
+                continue
+            if field in ("untagged_vlan", "tagged_vlans") and not vlans_comparable:
                 continue
             if a == b:
                 continue

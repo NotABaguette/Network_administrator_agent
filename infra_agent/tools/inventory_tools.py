@@ -52,6 +52,9 @@ def _interface_view(interface: Any) -> dict[str, Any]:
         "description": interface.description,
         "addresses": interface.addresses,
         "role": interface.role,
+        # `enabled` is the admin state NetBox stores; `link_up` is what the device
+        # currently sees on the wire, so a cable pull is not read as a shutdown.
+        "link_up": interface.link_up,
     }
 
 
@@ -97,6 +100,39 @@ def _device_summary(estate: Estate, device: Any) -> dict[str, Any]:
     }
 
 
+def _ilo_note(ilo: str, host: str) -> str:
+    return (
+        f"{ilo} is the iLO of {host}: its serial, model and out-of-band address are folded "
+        f"into that host, which is the device NetBox holds"
+    )
+
+
+def _folded_ilo(estate: Estate, ilo: str, host_name: str) -> dict[str, Any]:
+    """An onboarded iLO still has to be findable after being folded into its host."""
+    host = estate.device(host_name)
+    interface = host.interface("iLO") if host else None
+    return {
+        "name": ilo,
+        "kind": "ilo",
+        "role": "management",
+        "manufacturer": host.manufacturer if host else "Unknown",
+        "model": host.model if host else "Unknown",
+        "serial": host.serial if host else None,
+        "os_version": None,
+        "primary_ip": bare_ip(interface.addresses[0])
+        if interface and interface.addresses
+        else None,
+        "tags": [],
+        "interface_count": 1 if interface else 0,
+        "vm_count": 0,
+        "last_seen": next(
+            (at for key, at in estate.sources.items() if key.startswith(f"{ilo}/")), None
+        ),
+        "folded_into": host_name,
+        "note": _ilo_note(ilo, host_name),
+    }
+
+
 @tool("inventory")
 def list_devices(kind: str | None = None) -> dict[str, Any]:
     """List onboarded devices, optionally filtered by kind (fortigate, cisco_ios, esxi, ilo)."""
@@ -106,10 +142,14 @@ def list_devices(kind: str | None = None) -> dict[str, Any]:
         for d in estate.devices
         if kind is None or d.kind.value == kind or d.kind.platform == kind
     ]
+    if kind in (None, "ilo"):
+        devices.extend(
+            _folded_ilo(estate, ilo, host) for ilo, host in sorted(estate.ilo_links.items())
+        )
     return {
         "site": estate.site,
         "count": len(devices),
-        "devices": devices,
+        "devices": sorted(devices, key=lambda d: d["name"]),
         "warnings": estate.warnings,
     }
 
@@ -119,11 +159,18 @@ def get_device(name: str) -> dict[str, Any]:
     """Everything known about one device: model, serial, interfaces, VLANs, VMs and its drift."""
     estate = _estate()
     device = estate.device(name)
+    resolved_from: str | None = None
+    if device is None and name in estate.ilo_links:
+        # An onboarded iLO answers as its ESXi host, and says so.
+        resolved_from, name = name, estate.ilo_links[name]
+        device = estate.device(name)
     if device is None:
         return {
             "name": name,
             "found": False,
-            "known_devices": [d.name for d in estate.devices],
+            "known_devices": sorted(
+                [d.name for d in estate.devices] + list(estate.ilo_links),
+            ),
         }
     vlans = sorted(
         {i.untagged_vlan for i in device.interfaces if i.untagged_vlan}
@@ -147,6 +194,9 @@ def get_device(name: str) -> dict[str, Any]:
             "netbox": _netbox_device(name),
         }
     )
+    if resolved_from is not None:
+        view["resolved_from"] = resolved_from
+        view["note"] = _ilo_note(resolved_from, name)
     return view
 
 
@@ -266,9 +316,18 @@ def where_is_mac(mac: str) -> dict[str, Any]:
         for ip in estate.ip_addresses
         if ip.mac == wanted
     ]
+    # NetBox 4.2+ keeps MACs as their own objects; both interface endpoints still
+    # filter on `mac_address` through the related MAC.
     netbox = [
         {"id": row.get("id"), "name": row.get("name"), "device": row.get("device")}
         for row in _netbox_rows("dcim.interfaces", mac_address=wanted)
+    ] + [
+        {
+            "id": row.get("id"),
+            "name": row.get("name"),
+            "virtual_machine": row.get("virtual_machine"),
+        }
+        for row in _netbox_rows("virtualization.interfaces", mac_address=wanted)
     ]
 
     parts: list[str] = []
@@ -377,7 +436,20 @@ def _in_prefix(address: str, prefix: str) -> bool:
 @tool("inventory")
 def drift_report(device: str | None = None) -> dict[str, Any]:
     """Structured drift between observed state and NetBox (or the accepted baseline)."""
-    return service.drift_report(device=device).llm_view()
+    try:
+        return service.drift_report(device=device).llm_view()
+    except Exception as error:  # noqa: BLE001 - a read tool must always return
+        # `service.intended_estate` already degrades to the baseline when NetBox is
+        # down; this is the backstop that keeps any other failure from escaping as
+        # an exception mid-triage.
+        return {
+            "source": "none",
+            "devices": [device] if device else [],
+            "headline": "drift could not be computed",
+            "counts": {},
+            "by_device": {},
+            "warnings": [f"drift report failed ({type(error).__name__}: {str(error)[:160]})"],
+        }
 
 
 @tool("inventory")

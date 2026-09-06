@@ -59,6 +59,9 @@ MANUFACTURERS: dict[DeviceKind, str] = {
 _UP_WORDS = {"up", "connected", "enable", "enabled", "true", "yes", "1", "active", "ok"}
 _MAX_TAGGED_VLANS = 64
 
+# Snapshot keys a Catalyst must contribute for the estate to describe it at all.
+CISCO_REQUIRED_KEYS = ("version", "interfaces", "interfaces_status", "vlans")
+
 
 # --------------------------------------------------------------------------- helpers
 def _rows(data: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
@@ -273,7 +276,24 @@ def _cisco_role(seed: SeedDevice) -> str:
     return "access-switch"
 
 
+def _warn_unparsed(seed: SeedDevice, data: dict[str, Any], builder: _Builder, *keys: str) -> None:
+    """A snapshot value that is still a string never made it through TextFSM.
+
+    `collectors/cisco.py` falls back to the raw `show` text when ntc-templates has
+    no template for the platform (there is none for `cisco_xe`), and `_rows()`
+    drops strings so no raw output can leak into the estate. Silence would turn an
+    IOS-XE switch into an empty device, so say so instead.
+    """
+    for key in keys:
+        if isinstance(data.get(key), str):
+            builder.warn(
+                f"{seed.name}: `{key}` was not parsed by ntc-templates and was ignored; "
+                f"check the collector platform for {seed.kind.value}"
+            )
+
+
 def parse_cisco(seed: SeedDevice, data: dict[str, Any], builder: _Builder) -> Device:
+    _warn_unparsed(seed, data, builder, *CISCO_REQUIRED_KEYS, "mac_table", "switchport", "trunks")
     version = _row(data, "version")
     inventory = _rows(data, "inventory")
     chassis = next((r for r in inventory if "chassis" in _text(_field(r, "name")).lower()), None)
@@ -331,9 +351,14 @@ def parse_cisco(seed: SeedDevice, data: dict[str, Any], builder: _Builder) -> De
         iface.description = _text(_field(row, "description"), iface.description)
         # NetBox's `enabled` is the admin state: "down" is a dark link, only
         # "administratively down" means the port is shut.
-        iface.enabled = "admin" not in _text(_field(row, "link_status", "status")).lower()
+        link = _text(_field(row, "link_status", "status"))
+        iface.enabled = "admin" not in link.lower()
+        iface.link_up = _is_up(link) if link else iface.link_up
         iface.mtu = _int(_field(row, "mtu")) or iface.mtu
-        builder.add_address(iface, to_cidr(_field(row, "ip_address")))
+        # ntc-templates splits the address: IP_ADDRESS carries no mask, PREFIX_LENGTH does.
+        builder.add_address(
+            iface, to_cidr(_field(row, "ip_address"), _field(row, "prefix_length", "netmask"))
+        )
 
     for row in _rows(data, "ip_int_brief"):
         iface = slot(_field(row, "interface"))
@@ -350,7 +375,9 @@ def parse_cisco(seed: SeedDevice, data: dict[str, Any], builder: _Builder) -> De
         status = _text(_field(row, "status")).lower()
         if status:
             iface.enabled = status not in {"disabled", "err-disabled", "inactive"}
-        vlan = _text(_field(row, "vlan")).lower()
+            iface.link_up = status == "connected"
+        # ntc-templates calls this column VLAN_ID; older templates called it VLAN.
+        vlan = _text(_field(row, "vlan_id", "vlan")).lower()
         if vlan.isdigit():
             iface.mode = "access"
             iface.untagged_vlan = int(vlan)
@@ -358,6 +385,25 @@ def parse_cisco(seed: SeedDevice, data: dict[str, Any], builder: _Builder) -> De
             iface.mode = "tagged"
         elif vlan == "routed":
             iface.mode = "routed"
+
+    # Trunk membership: `show interfaces switchport` (ntc-templates has no cisco_ios
+    # template for `show interfaces trunk`, so that command yields nothing usable).
+    for row in _rows(data, "switchport"):
+        iface = slot(_field(row, "interface", "port"))
+        if iface is None:
+            continue
+        admin = _text(_field(row, "admin_mode", "mode")).lower()
+        if "trunk" in admin:
+            iface.mode = "tagged"
+            iface.untagged_vlan = _int(_field(row, "native_vlan")) or iface.untagged_vlan
+            allowed = parse_vlan_list(_field(row, "trunking_vlans"), known_vlans or None)
+            if allowed:
+                iface.tagged_vlans = allowed
+        elif "access" in admin:
+            access_vlan = _int(_field(row, "access_vlan"))
+            if access_vlan is not None:
+                iface.mode = "access"
+                iface.untagged_vlan = access_vlan
 
     for row in _rows(data, "trunks"):
         iface = slot(_field(row, "interface", "port"))
@@ -387,6 +433,12 @@ def parse_cisco(seed: SeedDevice, data: dict[str, Any], builder: _Builder) -> De
                 )
             )
     device.interfaces = [interfaces[name] for name in sorted(interfaces)]
+    if not device.interfaces:
+        builder.warn(
+            f"{seed.name}: no interfaces were parsed from the snapshot; the switch would be "
+            f"created in NetBox as a bare device -- check the collector platform for "
+            f"{seed.kind.value}"
+        )
 
     for row in _rows(data, "mac_table", "mac_address_table"):
         mac = normalize_mac(_field(row, "destination_address", "mac", "mac_address"))
@@ -402,7 +454,7 @@ def parse_cisco(seed: SeedDevice, data: dict[str, Any], builder: _Builder) -> De
                     mac=mac,
                     device=seed.name,
                     port=port_name,
-                    vlan=_int(_field(row, "vlan")),
+                    vlan=_int(_field(row, "vlan_id", "vlan")),
                     kind=_text(_field(row, "type"), "dynamic").lower(),
                     source="cisco-mac-table",
                 )
@@ -641,13 +693,19 @@ def parse_esxi(seed: SeedDevice, data: dict[str, Any], builder: _Builder) -> Dev
         if not name:
             continue
         speed = _int(_field(row, "speed", "link_speed", "speed_mb"))
+        # ESXi reports link state, not an admin state. NetBox's `enabled` means
+        # "administratively up", so a pulled cable must not read as a shut port:
+        # keep the link in `link_up` and leave `enabled` alone unless the host
+        # actually exposes an administrative flag.
+        admin = _field(row, "enabled", "admin_status", "administrative_status")
         device.interfaces.append(
             Interface(
                 name=name,
                 device=seed.name,
                 type="10gbase-x-sfpp" if (speed or 0) >= 10000 else "1000base-t",
                 mac=normalize_mac(_field(row, "mac", "mac_address")),
-                enabled=_is_up(_field(row, "link", "status", "link_up"), True),
+                enabled=_is_up(admin, True),
+                link_up=_is_up(_field(row, "link", "status", "link_up"), True),
                 description=_text(_field(row, "driver", "description")),
                 mode="tagged" if _is_up(_field(row, "uplink"), False) else None,
             )
@@ -750,6 +808,10 @@ def apply_ilo(seed: SeedDevice, data: dict[str, Any], builder: _Builder) -> None
             )
         )
         return
+
+    # Remember the fold so `inventory.list_devices(kind="ilo")` and
+    # `inventory.get_device("<host>-ilo")` can still answer for the onboarded iLO.
+    builder.estate.ilo_links[seed.name] = host.name
 
     if model and host.model in ("", "Unknown", "ProLiant"):
         host.model = model

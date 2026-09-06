@@ -86,6 +86,19 @@ def change_unfreeze() -> None:
     console.print("[green]unfrozen[/]")
 
 
+def _refuse_when_frozen(dry_run: bool) -> None:
+    """INFRA_FROZEN stops all automation, and sync is a scheduled duty in waiting."""
+    from infra_agent.config import get_settings
+
+    if dry_run or not get_settings().frozen:
+        return
+    console.print(
+        "[red]frozen[/]: INFRA_FROZEN is set, so nothing writes. "
+        "Re-run with --dry-run to preview, or unfreeze first."
+    )
+    raise typer.Exit(code=3)
+
+
 def _reconcile_client(dry_run: bool):
     """The configured NetBox, or an in-memory preview when only dry-running."""
     from infra_agent.reconcile import FakeNetBox, netbox_client
@@ -128,6 +141,7 @@ def netbox_bootstrap(
     """Create site, roles, device types, devices, interfaces, VLANs, prefixes, clusters and VMs."""
     from infra_agent.reconcile import bootstrap, observed_estate
 
+    _refuse_when_frozen(dry_run)
     estate = observed_estate(site=site)
     _print_reconcile(bootstrap(estate, _reconcile_client(dry_run)))
 
@@ -141,6 +155,7 @@ def netbox_sync(
     """Refresh NetBox from the newest snapshots (idempotent: unchanged objects are not written)."""
     from infra_agent.reconcile import observed_estate, sync
 
+    _refuse_when_frozen(dry_run)
     estate = observed_estate(site=site)
     _print_reconcile(sync(estate, _reconcile_client(dry_run), devices=list(device) or None))
 

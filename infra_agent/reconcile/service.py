@@ -24,6 +24,11 @@ NO_INTENT = (
     "INFRA_NETBOX_TOKEN and run `infra netbox bootstrap`) first."
 )
 NO_BASELINE = "no baseline accepted yet: run `infra baseline accept` to make drift meaningful"
+NETBOX_DOWN = "NetBox is unreachable ({error}): comparing against the accepted baseline instead"
+NETBOX_DOWN_NO_BASELINE = (
+    "NetBox is unreachable ({error}) and no baseline has been accepted, so there is nothing "
+    "to compare against"
+)
 
 
 def observed_estate(
@@ -71,7 +76,11 @@ def intended_estate(
     client: NetBoxLike | None = None,
     site: str = DEFAULT_SITE,
 ) -> tuple[Estate | None, str, list[str]]:
-    """(estate, source, warnings). NetBox wins; the accepted baseline is the fallback."""
+    """(estate, source, warnings). NetBox wins; the accepted baseline is the fallback.
+
+    A NetBox that is down must not turn a read tool into an exception: it degrades
+    to the accepted baseline, and only says "none" when there is nothing at all.
+    """
     settings = settings or get_settings()
     warnings: list[str] = []
     baseline = baseline_store(settings).current()
@@ -79,10 +88,27 @@ def intended_estate(
         warnings.append(NO_BASELINE)
     client = client if client is not None else netbox_client(settings)
     if client is not None:
-        return intended_from_netbox(client, site), "netbox", warnings
+        try:
+            return intended_from_netbox(client, site), "netbox", warnings
+        except Exception as error:  # noqa: BLE001 - any transport failure degrades
+            detail = f"{type(error).__name__}: {str(error).splitlines()[0][:160]}"
+            if baseline is not None:
+                return baseline.estate, "baseline", [*warnings, NETBOX_DOWN.format(error=detail)]
+            return None, "none", [NETBOX_DOWN_NO_BASELINE.format(error=detail)]
     if baseline is not None:
         return baseline.estate, "baseline", warnings
     return None, "none", [NO_INTENT]
+
+
+def _known(device: str, observed: Estate, intended: Estate | None) -> bool:
+    """Does anything -- a device, a cluster or the site itself -- answer to this name?"""
+    estates = [observed] + ([] if intended is None else [intended])
+    return any(
+        device == estate.site
+        or estate.device(device) is not None
+        or estate.cluster(device) is not None
+        for estate in estates
+    )
 
 
 def drift_report(
@@ -96,6 +122,14 @@ def drift_report(
     settings = settings or get_settings()
     observed = observed if observed is not None else observed_estate(settings, site=site)
     intended, source, warnings = intended_estate(settings, client, site=site)
+    if device and not _known(device, observed, intended):
+        # Filtering to a name nobody has heard of would otherwise report "no drift".
+        warnings = [
+            *warnings,
+            f"{device}: not in the observed estate"
+            + ("" if intended is None else f" or in {source}")
+            + "; nothing was compared, check the device name against the seed inventory",
+        ]
     if intended is None:
         return DriftReport(
             site=observed.site,

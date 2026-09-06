@@ -142,6 +142,18 @@ class Interface(BaseModel):
     addresses: list[str] = Field(default_factory=list)
     parent: str | None = None
     role: str | None = Field(default=None, description="wan|lan|mgmt|uplink|oob")
+    link_up: bool | None = Field(
+        default=None,
+        description=(
+            "Operational link state, kept apart from `enabled` (the admin state NetBox stores) "
+            "so a cable pull never reads as an administrative shutdown."
+        ),
+    )
+
+    @property
+    def mgmt_only(self) -> bool:
+        """NetBox's `mgmt_only`: an out-of-band or management-only port."""
+        return (self.role or "").lower() in {"oob", "mgmt", "management"}
 
     @property
     def key(self) -> str:
@@ -254,6 +266,9 @@ class Estate(BaseModel):
     clusters: list[Cluster] = Field(default_factory=list)
     virtual_machines: list[VirtualMachine] = Field(default_factory=list)
     mac_entries: list[MacEntry] = Field(default_factory=list)
+    ilo_links: dict[str, str] = Field(
+        default_factory=dict, description="iLO seed device name -> the ESXi host it was folded into"
+    )
     sources: dict[str, str] = Field(
         default_factory=dict, description="'device/collector' -> snapshot timestamp"
     )
@@ -288,10 +303,27 @@ class Estate(BaseModel):
         }
 
     def fingerprint(self) -> str:
-        """Stable digest of the estate's content, ignoring collection timestamps."""
+        """Stable digest of the estate's *intended* content.
+
+        Transient observations are excluded on purpose: the MAC table, ARP and DHCP
+        bindings and operational link state churn on every poll, so hashing them would
+        make `Baseline.matches()` false minutes after acceptance and say nothing about
+        whether the estate actually changed.
+        """
         payload = self.model_dump(
-            mode="json", exclude={"generated_at", "sources", "warnings", "origin"}
+            mode="json",
+            exclude={
+                "generated_at": True,
+                "sources": True,
+                "warnings": True,
+                "origin": True,
+                "mac_entries": True,
+                "devices": {"__all__": {"interfaces": {"__all__": {"link_up"}}}},
+            },
         )
+        payload["ip_addresses"] = [
+            ip for ip in payload.get("ip_addresses", []) if ip.get("source") in ASSIGNED_IP_SOURCES
+        ]
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
     def summary(self) -> dict[str, Any]:

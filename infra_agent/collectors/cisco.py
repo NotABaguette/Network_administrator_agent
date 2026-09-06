@@ -19,6 +19,10 @@ SHOW_COMMANDS = {
     "interfaces": "show interfaces",
     "ip_int_brief": "show ip interface brief",
     "vlans": "show vlan brief",
+    # ntc-templates has no cisco_ios template for `show interfaces trunk`, so trunk
+    # VLAN membership comes from `show interfaces switchport` (already on the
+    # read-only allowlist as `interfaces .* switchport`).
+    "switchport": "show interfaces switchport",
     "trunks": "show interfaces trunk",
     "cdp": "show cdp neighbors detail",
     "lldp": "show lldp neighbors detail",
