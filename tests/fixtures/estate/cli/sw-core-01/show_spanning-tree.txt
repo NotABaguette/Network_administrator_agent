@@ -1,0 +1,80 @@
+VLAN0001
+  Spanning tree enabled protocol rstp
+  Root ID    Priority    32769
+             Address     001a.2b3c.4d00
+             This bridge is the root
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+
+  Bridge ID  Priority    32769  (priority 32768 sys-id-ext 1)
+             Address     001a.2b3c.4d00
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+             Aging Time  300 sec
+
+Interface           Role Sts Cost      Prio.Nbr Type
+------------------- ---- --- --------- -------- --------------------------------
+Gi1/0/22            Desg FWD 4         128.22   P2p
+Gi1/0/23            Desg FWD 4         128.23   P2p
+Gi1/0/24            Desg FWD 4         128.24   P2p
+
+
+VLAN0010
+  Spanning tree enabled protocol rstp
+  Root ID    Priority    24586
+             Address     001a.2b3c.4d00
+             This bridge is the root
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+
+  Bridge ID  Priority    24586  (priority 24576 sys-id-ext 10)
+             Address     001a.2b3c.4d00
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+             Aging Time  300 sec
+
+Interface           Role Sts Cost      Prio.Nbr Type
+------------------- ---- --- --------- -------- --------------------------------
+Gi1/0/1             Desg FWD 4         128.1    P2p Edge
+Gi1/0/3             Desg FWD 4         128.3    P2p Edge
+Gi1/0/10            Desg FWD 4         128.10   P2p Edge
+Gi1/0/22            Desg FWD 4         128.22   P2p
+Gi1/0/23            Desg FWD 4         128.23   P2p
+Gi1/0/24            Desg FWD 4         128.24   P2p
+
+
+VLAN0020
+  Spanning tree enabled protocol rstp
+  Root ID    Priority    24596
+             Address     001a.2b3c.4d00
+             This bridge is the root
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+
+  Bridge ID  Priority    24596  (priority 24576 sys-id-ext 20)
+             Address     001a.2b3c.4d00
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+             Aging Time  300 sec
+
+Interface           Role Sts Cost      Prio.Nbr Type
+------------------- ---- --- --------- -------- --------------------------------
+Gi1/0/1             Desg FWD 4         128.1    P2p Edge
+Gi1/0/3             Desg FWD 4         128.3    P2p Edge
+Gi1/0/5             Desg FWD 4         128.5    P2p Edge
+Gi1/0/22            Desg FWD 4         128.22   P2p
+Gi1/0/23            Desg FWD 4         128.23   P2p
+Gi1/0/24            Desg FWD 4         128.24   P2p
+
+
+VLAN0030
+  Spanning tree enabled protocol rstp
+  Root ID    Priority    24606
+             Address     001a.2b3c.4d00
+             This bridge is the root
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+
+  Bridge ID  Priority    24606  (priority 24576 sys-id-ext 30)
+             Address     001a.2b3c.4d00
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+             Aging Time  300 sec
+
+Interface           Role Sts Cost      Prio.Nbr Type
+------------------- ---- --- --------- -------- --------------------------------
+Gi1/0/22            Desg FWD 4         128.22   P2p
+Gi1/0/23            Desg FWD 4         128.23   P2p
+Gi1/0/24            Desg FWD 4         128.24   P2p

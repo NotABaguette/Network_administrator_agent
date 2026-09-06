@@ -1,0 +1,47 @@
+{
+ "device": "esx-01-ilo",
+ "collector": "ilo",
+ "taken_at": "2026-09-06T12:00:00+00:00",
+ "data": {
+  "system": {
+   "model": "ProLiant DL360 Gen9",
+   "serial": "CZ3401ABCD",
+   "host": "esx-01",
+   "bios": "P89 v2.76",
+   "ilo_firmware": "2.82",
+   "ilo_generation": "iLO4"
+  },
+  "logical_drives": [
+   {
+    "id": "1",
+    "raid": "Raid1",
+    "capacity_gb": 900,
+    "status": "OK",
+    "volume_unique_identifier": "600508B1001C000000000000000000A1",
+    "physical_drives": [
+     "1I:1:1",
+     "1I:1:2"
+    ]
+   }
+  ],
+  "physical_drives": [
+   {
+    "location": "1I:1:1",
+    "model": "EG0900JFCKB",
+    "serial": "S0M0AAAA",
+    "capacity_gb": 900,
+    "status": "OK",
+    "media_type": "HDD"
+   },
+   {
+    "location": "1I:1:2",
+    "model": "EG0900JFCKB",
+    "serial": "S0M0BBBB",
+    "capacity_gb": 900,
+    "status": "OK",
+    "media_type": "HDD"
+   }
+  ],
+  "errors": {}
+ }
+}

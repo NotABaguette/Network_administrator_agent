@@ -1,0 +1,23 @@
+------------------------------------------------
+Local Intf: Gi1/0/5
+Chassis id: 3c:22:fb:aa:00:99
+Port id: 3c:22:fb:aa:00:99
+Port Description: eth0
+System Name: ap-hallway-01
+
+System Description:
+Wireless access point
+
+Time remaining: 108 seconds
+System Capabilities: B,W
+Enabled Capabilities: B,W
+Management Addresses:
+    IP: 10.20.0.90
+Auto Negotiation - supported, enabled
+Physical media capabilities:
+    1000baseT(FD)
+Media Attachment Unit type: 30
+Vlan ID: - not advertised
+
+
+Total entries displayed: 1

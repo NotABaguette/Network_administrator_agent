@@ -19,11 +19,13 @@ agent_app = typer.Typer(help="Unattended agent service")
 mcp_app = typer.Typer(help="MCP server for Claude Code / Desktop")
 netbox_app = typer.Typer(help="NetBox source of truth: bootstrap and sync")
 baseline_app = typer.Typer(help="The accepted baseline that drift is measured against")
+graph_app = typer.Typer(help="Topology graph: build, render, impact analysis")
 app.add_typer(change_app, name="change")
 app.add_typer(agent_app, name="agent")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(netbox_app, name="netbox")
 app.add_typer(baseline_app, name="baseline")
+app.add_typer(graph_app, name="graph")
 
 
 @app.callback()
@@ -223,6 +225,80 @@ def drift(
     console.print(table)
     console.print(report.headline())
     raise typer.Exit(code=1)
+
+
+@graph_app.command("build")
+def graph_build() -> None:
+    """Correlate the latest snapshots into the topology graph and persist it."""
+    from infra_agent.correlate import service
+
+    graph, findings, path = service.build_and_persist()
+    console.print_json(data=graph.summary())
+    console.print(f"graph written to [bold]{path}[/]")
+    for finding in findings:
+        colour = {"critical": "red", "warning": "yellow"}.get(finding.severity, "cyan")
+        console.print(f"[{colour}]{finding.severity}[/]: {finding.title}")
+    if not findings:
+        console.print("[green]no consistency findings[/]")
+
+
+@graph_app.command("render")
+def graph_render(
+    diagram: str | None = typer.Option(None, help="print one view instead of writing files"),
+    vlan: int | None = typer.Option(None, help="vlan id for --diagram vlan"),
+) -> None:
+    """Write docs/topology/*.md, or print a single Mermaid diagram."""
+    from infra_agent.correlate import service
+    from infra_agent.correlate.mermaid import render as render_diagram
+
+    if diagram:
+        console.print(render_diagram(service.load_graph(), diagram=diagram, vlan=vlan))
+        return
+    for path in service.render_docs():
+        console.print(f"wrote {path}")
+
+
+@graph_app.command("impact")
+def graph_impact(
+    object_id: str,
+    action: str | None = typer.Option(
+        None, help="change action to compute the tier for (default: per object kind)"
+    ),
+) -> None:
+    """What breaks if this object dies, and which tier escalations it triggers."""
+    from infra_agent.change.tiers import compute_tier
+    from infra_agent.correlate import service
+    from infra_agent.correlate.impact import default_action, impact_analyze
+
+    graph = service.load_graph()
+    report = impact_analyze(object_id, graph)
+    if not report.found:
+        console.print(f"[red]unknown object[/]: {object_id}")
+        raise typer.Exit(code=1)
+    age = service.freshness(graph)
+    if age["stale"]:
+        console.print(
+            f"[yellow]the graph was built at {age['built_at']}[/]; run `infra graph build`"
+        )
+    console.print(f"[bold]{report.label}[/] ({report.kind})")
+    console.print_json(data=report.summary.model_dump(mode="json"))
+    for line in report.describe():
+        console.print(f"  - {line}")
+    if not report.affected:
+        console.print("  - nothing else depends on it")
+    action = action or default_action(graph, report.object_id)
+    tier, reasons = compute_tier(action, report.summary)
+    console.print(f"a [bold]{action}[/] change here would compute as tier [bold]{tier.name}[/]")
+    for reason in reasons:
+        console.print(f"  · {reason}")
+
+
+@graph_app.command("findings")
+def graph_findings() -> None:
+    """Consistency findings from the last graph build."""
+    from infra_agent.correlate import service
+
+    console.print_json(data=[f.model_dump(mode="json") for f in service.load_findings()])
 
 
 @agent_app.command("run")

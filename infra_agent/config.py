@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     loki_url: str = "http://loki:3100"
     alertmanager_url: str = "http://alertmanager:9093"
 
+    # Correlation
+    mgmt_vm_name: str = Field(
+        default="mgmt-01",
+        description="Name or tag of the VM running this platform; everything on its path "
+        "through host, uplinks, switch ports and the firewall escalates to Tier 2",
+    )
+    topology_docs_dir: Path = Path("docs/topology")
+
     # Safety
     frozen: bool = Field(default=False, description="Break-glass: no automation, agent read-only")
     tier0_shadow_mode: bool = Field(
@@ -54,6 +62,10 @@ class Settings(BaseSettings):
     @property
     def snapshot_dir(self) -> Path:
         return self.data_dir / "snapshots"
+
+    @property
+    def graph_dir(self) -> Path:
+        return self.data_dir / "graph"
 
     @property
     def audit_log(self) -> Path:

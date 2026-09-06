@@ -1,0 +1,40 @@
+Cisco IOS Software, C2960X Software (C2960X-UNIVERSALK9-M), Version 15.2(7)E5, RELEASE SOFTWARE (fc2)
+Technical Support: http://www.cisco.com/techsupport
+Copyright (c) 1986-2021 by Cisco Systems, Inc.
+Compiled Tue 16-Feb-21 10:00 by prod_rel_team
+
+ROM: Bootstrap program is C2960X boot loader
+BOOTLDR: C2960X Boot Loader (C2960X-HBOOT-M) Version 15.2(4r)E1, RELEASE SOFTWARE (fc1)
+
+sw-acc-01 uptime is 33 weeks, 4 days, 6 hours, 2 minutes
+System returned to ROM by power-on
+System restarted at 08:11:02 UTC Tue Jan 20 2026
+System image file is "flash:/c2960x-universalk9-mz.152-7.E5.bin"
+Last reload reason: power-on
+
+
+This product contains cryptographic features and is subject to United
+States and local country laws governing import, export, transfer and
+use.
+
+cisco WS-C2960X-24TS-L (APM86XXX) processor (revision D0) with 131072K bytes of memory.
+Processor board ID FOC2244Y0CD
+Last reset from power-on
+1 Virtual Ethernet interface
+26 Gigabit Ethernet interfaces
+The password-recovery mechanism is enabled.
+
+512K bytes of flash-simulated non-volatile configuration memory.
+Base ethernet MAC Address       : 00:1A:2B:3C:5E:00
+Motherboard assembly number     : 73-16000-04
+Power supply part number        : 341-0562-01
+Model number                    : WS-C2960X-24TS-L
+System serial number            : FOC2244Y0CD
+Top Assembly Part Number        : 800-41111-01
+
+Switch Ports Model              SW Version            SW Image
+------ ----- -----              ----------            ----------
+*    1 26    WS-C2960X-24TS-L   15.2(7)E5             C2960X-UNIVERSALK9-M
+
+
+Configuration register is 0xF
