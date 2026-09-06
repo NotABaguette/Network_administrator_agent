@@ -1,0 +1,4 @@
+# SOPS creation rules. `infra onboard init` fills in the age recipient.
+creation_rules:
+  - path_regex: secrets/.*\.enc\.yaml$
+    age: "REPLACE_WITH_AGE_PUBLIC_KEY"

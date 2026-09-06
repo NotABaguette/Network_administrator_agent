@@ -1,0 +1,25 @@
+# secrets: only SOPS-encrypted files are committed
+secrets/*
+!secrets/README.md
+!secrets/*.enc.yaml
+*.agekey
+.env
+deploy/.env
+
+# onboarding output before NetBox exists
+inventory/seed.yaml
+
+# runtime data
+data/
+*.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

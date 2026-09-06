@@ -1,0 +1,25 @@
+auths:
+  cisco_v3:
+    version: 3
+    username: ${SNMPV3_USER}
+    security_level: authPriv
+    auth_protocol: SHA
+    priv_protocol: AES
+    password: ${SNMPV3_AUTH}
+    priv_password: ${SNMPV3_PRIV}
+modules:
+  if_mib:
+    walk: [sysUpTime, interfaces, ifXTable]
+    lookups:
+      - source_indexes: [ifIndex]
+        lookup: ifAlias
+      - source_indexes: [ifIndex]
+        lookup: ifDescr
+      - source_indexes: [ifIndex]
+        lookup: ifName
+  cisco_wlc:
+    walk:
+      - 1.3.6.1.4.1.9.9.109.1.1.1.1.7   # cpmCPUTotal1minRev
+      - 1.3.6.1.4.1.9.9.48.1.1.1.5      # ciscoMemoryPoolUsed
+      - 1.3.6.1.4.1.9.9.48.1.1.1.6      # ciscoMemoryPoolFree
+      - 1.3.6.1.4.1.9.9.13.1.3.1.3      # ciscoEnvMonTemperatureStatusValue

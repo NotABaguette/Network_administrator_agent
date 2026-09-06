@@ -1,0 +1,116 @@
+# Redaction rules applied to EVERY payload that leaves for the Claude API.
+# Order matters: specific rules first, generic catch-alls last.
+mask_public_ips: true
+
+rules:
+  # ---- Cisco IOS / IOS-XE -------------------------------------------------
+  - name: cisco-username-secret
+    pattern: '(?im)^(\s*username\s+\S+.*?\s(?:secret|password)\s+\d?\s*)\S+'
+    replacement: '\1<REDACTED>'
+  - name: cisco-enable-secret
+    pattern: '(?im)^(\s*enable\s+(?:secret|password)(?:\s+level\s+\d+)?\s+\d?\s*)\S+'
+    replacement: '\1<REDACTED>'
+  - name: cisco-snmp-community
+    pattern: '(?im)^(\s*snmp-server\s+community\s+)\S+'
+    replacement: '\1<REDACTED>'
+  - name: cisco-snmp-v3-user
+    pattern: '(?im)^(\s*snmp-server\s+user\s+\S+\s+\S+\s+v3\s+auth\s+\S+\s+)\S+(\s+priv\s+\S+(?:\s+\d+)?\s+)\S+'
+    replacement: '\1<REDACTED>\2<REDACTED>'
+  - name: cisco-type7-key
+    pattern: '(?im)^(\s*(?:key|password|key-string|tacacs-server key|radius-server key|ntp authentication-key\s+\d+\s+md5|crypto isakmp key)\s+\d?\s*)\S+'
+    replacement: '\1<REDACTED>'
+  - name: cisco-radius-tacacs-server-key
+    pattern: '(?im)^(\s*(?:key|pac key|server-private\s+\S+\s+key)\s+\d?\s*)\S+'
+    replacement: '\1<REDACTED>'
+  - name: cisco-archive-log-secret
+    pattern: '(?im)(logged command:.*?\b(?:secret|password|community|key)\s+\d?\s*)\S+'
+    replacement: '\1<REDACTED>'
+  - name: cisco-wpa-psk
+    pattern: '(?im)^(\s*wpa-psk\s+(?:ascii|hex)\s+\d?\s*)\S+'
+    replacement: '\1<REDACTED>'
+
+  # ---- FortiOS ------------------------------------------------------------
+  - name: fortios-enc-blob
+    pattern: '(?i)\bENC\s+[A-Za-z0-9+/=]{16,}'
+    replacement: 'ENC <REDACTED>'
+  - name: fortios-set-secret
+    pattern: '(?im)^(\s*set\s+(?:password|passwd|psksecret|secret|key|api-key|auth-password-l1|priv-password-l1|private-key|certificate|ca|ppk-secret|shared-secret|preshared-key|token)\s+)(?!ENC\b).+$'
+    replacement: '\1<REDACTED>'
+  - name: fortios-config-change-log
+    pattern: '(?i)(cfgattr="?[^"]*?(?:password|psksecret|secret|key)\[)[^\]]*(\])'
+    replacement: '\1<REDACTED>\2'
+
+  # ---- ESXi / Linux -------------------------------------------------------
+  - name: shadow-hash
+    pattern: '\$(?:1|2[aby]?|5|6|9|y|argon2\w*)\$[^\s:]{8,}'
+    replacement: '<REDACTED-HASH>'
+  - name: esxcli-password-arg
+    pattern: '(?i)(--password[=\s]+)\S+'
+    replacement: '\1<REDACTED>'
+
+  # ---- Certificates and keys --------------------------------------------
+  - name: pem-block
+    pattern: '-----BEGIN [A-Z ]*(?:PRIVATE KEY|CERTIFICATE|RSA|EC|DSA|OPENSSH)[A-Z ]*-----[\s\S]*?-----END [A-Z ]*-----'
+    replacement: '<REDACTED-PEM>'
+  - name: ssh-private-key-oneline
+    pattern: '(?i)ssh-(?:rsa|ed25519|dss|ecdsa)[^\n]*?PRIVATE'
+    replacement: '<REDACTED>'
+
+  # ---- API keys and tokens ---------------------------------------------
+  - name: anthropic-key
+    pattern: 'sk-ant-[A-Za-z0-9_\-]{20,}'
+    replacement: '<REDACTED-API-KEY>'
+  - name: telegram-bot-token
+    pattern: '\b\d{8,11}:[A-Za-z0-9_\-]{30,}\b'
+    replacement: '<REDACTED-TOKEN>'
+  - name: bearer-token
+    pattern: '(?i)\b(bearer\s+)[A-Za-z0-9._\-+/=]{16,}'
+    replacement: '\1<REDACTED>'
+  - name: netbox-token
+    pattern: '(?i)(token\s+)[0-9a-f]{40}\b'
+    replacement: '\1<REDACTED>'
+  - name: age-secret-key
+    pattern: 'AGE-SECRET-KEY-1[A-Z0-9]{50,}'
+    replacement: '<REDACTED-AGE-KEY>'
+
+  # ---- Generic catch-alls -----------------------------------------------
+  - name: generic-kv-secret
+    pattern: '(?i)\b((?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token|community|psk)["'']?\s*[:=]\s*["'']?)(?!<REDACTED)[^\s"'',;]{4,}'
+    replacement: '\1<REDACTED>'
+  - name: url-userinfo
+    pattern: '(?i)(://[^/\s:@]+:)[^@\s/]+(@)'
+    replacement: '\1<REDACTED>\2'
+
+# Read-only command allowlists for `device.show`, per platform family.
+# A command must match an allow pattern and no deny pattern.
+commands:
+  cisco:
+    allow:
+      - '^show (version|inventory|interfaces?( status| description| trunk| counters( errors)?)?|ip interface brief|vlan( brief)?|cdp neighbors?( detail)?|lldp neighbors?( detail)?|mac address-table.*|ip arp.*|spanning-tree.*|etherchannel summary|power inline.*|environment.*|logging|clock|ntp (status|associations)|errdisable recovery|interfaces .* switchport|ip route.*|standby brief|processes cpu.*|memory statistics)$'
+    deny:
+      - '^show (running-config|run|startup-config|start|tech-support|tech|archive.*|snmp.*user.*|crypto.*|configuration.*)'
+      - '\|'
+  fortigate:
+    allow:
+      - '^get (system (status|performance status|interface( physical)?|ha status|arp|session status)|router info routing-table all|hardware nic \S+|vpn ipsec tunnel summary|firewall (policy|address|service custom|vip)|system sdwan .*)$'
+      - '^diagnose (sys (top|session list)|hardware sysinfo (memory|cpu)|netlink interface list|ip arp list)$'
+      - '^execute (ping\S* \S+|traceroute \S+)$'
+    deny:
+      - '^show( full-configuration)?'
+      - '^execute (backup|restore|reboot|shutdown|factoryreset|formatlogdisk|revision|update-now|ssh|telnet)'
+      - '^diagnose (debug|sys (kill|flash)|test|sniffer)'
+      - '^config'
+  esxi:
+    allow:
+      - '^esxcli (network|storage|hardware|system (version|hostname|uuid|time|boot|maintenanceMode get|module list)|vm process list|software vib list)\b'
+      - '^vim-cmd (vmsvc/getallvms|vmsvc/get\.\w+ \d+|hostsvc/(hostsummary|net/info|datastore/listsummary|hostconfig))$'
+    deny:
+      - 'esxcli system (account|permission|secpolicy|settings advanced set|syslog config set|shutdown|maintenanceMode set)'
+      - 'vim-cmd (vmsvc/(power|snapshot\.(create|remove|revert)|destroy|reload)|hostsvc/firmware)'
+      - '/etc/shadow|/etc/passwd|keys/|\.pem\b'
+  ilo:
+    allow:
+      - '^GET /redfish/v1/(Systems|Chassis|Managers|UpdateService|TelemetryService)(/.*)?$'
+    deny:
+      - '^(POST|PATCH|PUT|DELETE) '
+      - '/AccountService|/SessionService|/SecurityService'

@@ -1,0 +1,30 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: infra-agent
+  group_by: [alertname, device]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity="critical"]
+      receiver: infra-agent-critical
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  # The agent service triages grouped alerts and forwards to Telegram.
+  - name: infra-agent
+    webhook_configs:
+      - url: http://infra-agent:9102/alerts
+        send_resolved: true
+  - name: infra-agent-critical
+    webhook_configs:
+      - url: http://infra-agent:9102/alerts?critical=1
+        send_resolved: true
+
+inhibit_rules:
+  - source_matchers: [alertname="DeviceUnreachable"]
+    target_matchers: [severity="warning"]
+    equal: [device]

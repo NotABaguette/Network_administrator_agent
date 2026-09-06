@@ -1,0 +1,67 @@
+global:
+  scrape_interval: 60s
+  evaluation_interval: 60s
+
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"] }]
+
+  # The collectors expose everything about FortiGate, ESXi and iLO themselves.
+  - job_name: infra-collectors
+    static_configs: [{ targets: ["infra-collectors:9101"] }]
+
+  - job_name: infra-agent
+    static_configs: [{ targets: ["infra-agent:9102"] }]
+
+  # Catalyst switches via snmp_exporter. Targets come from file_sd, written by
+  # `infra collect` from the seed inventory / NetBox.
+  - job_name: cisco-snmp
+    scrape_interval: 60s
+    metrics_path: /snmp
+    params:
+      module: [if_mib, cisco_wlc]
+      auth: [cisco_v3]
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/cisco.json"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: snmp-exporter:9116
+
+  # WAN and service probes.
+  - job_name: blackbox-icmp
+    metrics_path: /probe
+    params: { module: [icmp] }
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/icmp.json"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  - job_name: blackbox-https
+    metrics_path: /probe
+    params: { module: [https_2xx] }
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/https.json"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

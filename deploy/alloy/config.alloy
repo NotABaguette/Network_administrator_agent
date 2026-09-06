@@ -1,0 +1,40 @@
+// Syslog from FortiGate, Cisco and ESXi into Loki. Promtail is EOL; Alloy
+// ingests RFC3164 and RFC5424 natively.
+loki.source.syslog "devices" {
+  listener {
+    address  = "0.0.0.0:514"
+    protocol = "udp"
+    labels   = { job = "syslog", transport = "udp" }
+    syslog_format = "rfc3164"
+  }
+  listener {
+    address  = "0.0.0.0:514"
+    protocol = "tcp"
+    labels   = { job = "syslog", transport = "tcp" }
+    syslog_format = "rfc3164"
+  }
+  relabel_rules = loki.relabel.devices.rules
+  forward_to    = [loki.write.local.receiver]
+}
+
+loki.relabel "devices" {
+  forward_to = []
+  rule {
+    source_labels = ["__syslog_message_hostname"]
+    target_label  = "device"
+  }
+  rule {
+    source_labels = ["__syslog_connection_ip_address"]
+    target_label  = "source_ip"
+  }
+  rule {
+    source_labels = ["__syslog_message_severity"]
+    target_label  = "severity"
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

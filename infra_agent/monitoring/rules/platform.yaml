@@ -1,0 +1,30 @@
+groups:
+  - name: infra-platform
+    rules:
+      - alert: CollectorStale
+        expr: time() - infra_collector_last_success_timestamp_seconds > 3 * 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Collector {{ $labels.collector }} for {{ $labels.device }} has not succeeded in 15 minutes"
+      - alert: CollectorErrors
+        expr: increase(infra_collector_errors_total[30m]) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "Collector {{ $labels.collector }} for {{ $labels.device }} is failing repeatedly"
+      - alert: UnexpectedConfigChange
+        expr: increase(infra_config_commits_total[15m]) > 0
+        labels: { severity: info }
+        annotations:
+          summary: "Config of {{ $labels.device }} changed; the agent correlates it with approved ChangePlans"
+      - alert: PlatformFrozen
+        expr: infra_frozen == 1
+        for: 24h
+        labels: { severity: info }
+        annotations:
+          summary: "Break-glass freeze has been active for a day"
+      - alert: HeartbeatNotSent
+        expr: time() - infra_heartbeat_last_ok_timestamp_seconds > 900
+        labels: { severity: critical }
+        annotations:
+          summary: "The dead-man heartbeat has not been sent for 15 minutes"
