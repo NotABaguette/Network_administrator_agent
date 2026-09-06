@@ -1,0 +1,51 @@
+# Firmware baseline for the firmware-inventory duty.
+#
+# Maintained by hand: the owner adds a version here only after it has been read
+# about, staged and accepted. Anything running a version that is not listed is
+# reported as drift; anything below `minimum` is reported as out of date.
+# Firmware changes are Tier 2 (docs/risk-tiers.md), so this file never triggers
+# an update by itself - it only decides what the weekly report says.
+
+fortigate:
+  known_good:
+    - "7.4.5"
+    - "7.4.7"
+  minimum: "7.4.5"
+  notes: >-
+    60F on the 7.4 feature branch. Check the FortiOS upgrade path before any
+    jump; an edge firmware change needs a maintenance window and the OOB box.
+
+cisco_ios:
+  known_good:
+    - "15.2(7)E10"
+  minimum: "15.2(7)E9"
+  notes: >-
+    Classic IOS on the 2960/3560/3750 estate. 15.2(7)E is the last supported
+    train for most of these; confirm the flash has room before staging.
+
+cisco_iosxe:
+  known_good:
+    - "16.12.10"
+    - "17.09.05"
+  minimum: "16.12.10"
+  notes: >-
+    IOS-XE on the 3650/3850 estate. Install mode only; bundle mode makes the
+    rollback story worse.
+
+esxi:
+  known_good:
+    - "8.0.3"
+    - "7.0.3"
+  minimum: "7.0.3"
+  notes: >-
+    Standalone hosts, patched individually. Free-licence hosts still take
+    patches through esxcli; check HPE's custom image compatibility first.
+
+ilo:
+  known_good:
+    - "2.82"
+    - "3.09"
+  minimum: "2.82"
+  notes: >-
+    iLO4 is 2.x, iLO5 is 3.x. iLO4 is session-limited and slow; update it
+    outside collector polling windows.
