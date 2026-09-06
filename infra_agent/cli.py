@@ -17,9 +17,11 @@ app.add_typer(onboard_app, name="onboard")
 change_app = typer.Typer(help="ChangePlans (human-only approval lives here)")
 agent_app = typer.Typer(help="Unattended agent service")
 mcp_app = typer.Typer(help="MCP server for Claude Code / Desktop")
+bot_app = typer.Typer(help="Telegram bot: owner channel and approvals")
 app.add_typer(change_app, name="change")
 app.add_typer(agent_app, name="agent")
 app.add_typer(mcp_app, name="mcp")
+app.add_typer(bot_app, name="bot")
 
 
 @app.callback()
@@ -87,6 +89,16 @@ def agent_run() -> None:
     from infra_agent.agent.service import run
 
     run()
+
+
+@bot_app.command("run")
+def bot_run() -> None:
+    """Start the Telegram owner channel (long polling; approvals are human-only)."""
+    from infra_agent.agent.telegram_bot import run_bot
+    from infra_agent.tools.change_tools import store
+
+    console.print("starting the telegram bot (long polling); Ctrl-C to stop")
+    run_bot(store())
 
 
 @mcp_app.command("serve")
