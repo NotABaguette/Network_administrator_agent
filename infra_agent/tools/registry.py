@@ -68,5 +68,12 @@ def human_only_tools() -> list[ToolSpec]:
 
 
 def load_all() -> None:
-    """Import every tool module so the registry is populated."""
-    from infra_agent.tools import change_tools, onboarding_tools  # noqa: F401
+    """Import every `infra_agent.tools.*_tools` module so the registry is populated."""
+    import importlib
+    import pkgutil
+
+    import infra_agent.tools as pkg
+
+    for mod in pkgutil.iter_modules(pkg.__path__):
+        if mod.name.endswith("_tools"):
+            importlib.import_module(f"{pkg.__name__}.{mod.name}")

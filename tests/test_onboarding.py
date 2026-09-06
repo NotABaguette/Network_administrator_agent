@@ -45,7 +45,7 @@ def test_account_templates_are_least_privilege():
     ios = "\n".join(account_commands(DeviceKind.cisco_ios, "infra-ro", "pw", "10.0.0.50"))
     assert "privilege 15" in ios and "archive" in ios and "permit host 10.0.0.50" in ios
     ilo = "\n".join(account_commands(DeviceKind.ilo, "infra-ro", "pw", "10.0.0.50"))
-    assert "\"LoginPriv\": true" in ilo and "\"iLOConfigPriv\": false" in ilo
+    assert '"LoginPriv": true' in ilo and '"iLOConfigPriv": false' in ilo
 
 
 def test_policy_row_flattens_names():
