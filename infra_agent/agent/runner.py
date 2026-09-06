@@ -30,6 +30,19 @@ The Claude call shape is fixed by ``docs/architecture.md``::
 
 The redacted estate summary is appended as a *second* system block so the first
 one stays byte-stable and the ephemeral cache actually hits.
+
+Two SDK contracts are load-bearing here and are covered by tests that use the
+real classes rather than a fake:
+
+* ``client.beta.messages.tool_runner`` partitions its ``tools`` argument with
+  ``isinstance(tool, (BetaFunctionTool, BetaBuiltinFunctionTool))``. Anything
+  else is passed through as a raw tool definition and is never dispatched, so
+  the redacting wrapper has to be a real subclass or none of this module's
+  guarantees hold at runtime.
+* ``messages.parse`` refuses a non-streaming request whose ``max_tokens`` could
+  take longer than ten minutes *unless* the client carries an explicit timeout.
+  With the platform's 64k budget that is every single run, so the client is
+  built with one.
 """
 
 from __future__ import annotations
@@ -39,6 +52,7 @@ import logging
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +75,14 @@ FORBIDDEN_TOOLS = frozenset({"change.approve", "change.execute"})
 #: inside the same call instead of ending the duty with nothing.
 BETAS = ["server-side-fallback-2026-07-01"]
 FALLBACKS = "default"
+
+#: The SDK raises before any request when a non-streaming call could run longer
+#: than ten minutes *and* the client still carries the default timeout
+#: (``_calculate_nonstreaming_timeout``: ``3600 * max_tokens / 128_000 > 600``).
+#: 64k output tokens trip that on every run, so the client declares its own
+#: timeout: 1800s is the SDK's own worst-case estimate for that budget.
+CLIENT_TIMEOUT_SECONDS = 1800.0
+CLIENT_CONNECT_TIMEOUT_SECONDS = 10.0
 
 
 def load_system_prefix(path: Path | None = None) -> str:
@@ -117,6 +139,13 @@ class RedactedTool:
     Implements the SDK's runnable-tool shape (``name`` / ``to_dict`` / ``call``)
     by delegating the schema to a ``beta_tool``-wrapped function and taking over
     the result path.
+
+    This class is only the implementation: what is handed to the SDK is the
+    subclass built by :func:`redacted_tool_class`, which also inherits the SDK's
+    ``BetaBuiltinFunctionTool`` so that ``tool_runner`` recognises it as
+    runnable. A plain class is silently treated as a raw tool definition -
+    serialised into the request as-is and never dispatched - which would leave
+    every tool result unredacted, uncounted and uncapped.
     """
 
     def __init__(
@@ -135,7 +164,9 @@ class RedactedTool:
     def name(self) -> str:
         return str(self._inner.name)
 
-    def to_dict(self) -> dict[str, Any]:
+    # `Any`, not `dict[str, Any]`: the SDK types this as a `BetaToolUnionParam`
+    # TypedDict union, which a plain dict is not assignable to.
+    def to_dict(self) -> Any:
         return dict(self._inner.to_dict())
 
     def call(self, input: Any) -> str:
@@ -166,9 +197,46 @@ class RedactedTool:
         return safe if isinstance(safe, str) else json.dumps(safe, default=str)
 
 
+@lru_cache(maxsize=1)
+def redacted_tool_class() -> type[RedactedTool]:
+    """The SDK-recognised :class:`RedactedTool` subclass, built on first use.
+
+    ``anthropic`` is an optional extra, so the base class cannot be imported at
+    module import time; the subclass is built lazily and cached. Subclassing is
+    what puts the wrapper on the runner's ``runnable_tools`` side of
+    ``isinstance(tool, (BetaFunctionTool, BetaBuiltinFunctionTool))``.
+    """
+    from anthropic.lib.tools import BetaBuiltinFunctionTool
+
+    class SdkRedactedTool(RedactedTool, BetaBuiltinFunctionTool):
+        """`RedactedTool` the SDK's tool runner will actually dispatch to."""
+
+    return SdkRedactedTool
+
+
 def api_tool_name(name: str) -> str:
     """Registry names are dotted; the API only accepts ``[a-zA-Z0-9_-]``."""
     return name.replace(".", "_")
+
+
+def unmask_for_owner(gateway: RedactionGateway, text: str) -> str:
+    """Turn ``PUBIP_n`` pseudonyms back into the real addresses for the owner.
+
+    ``docs/redaction-policy.md`` requires the reversal so the model's output
+    stays usable; only text on its way *to a human* is unmasked, never anything
+    that goes back to the model.
+
+    The replacement runs longest-token-first: a plain pass in insertion order
+    (what ``RedactionGateway.unmask`` does today) rewrites the ``PUBIP_1`` inside
+    ``PUBIP_10``. Once the redaction package folds that ordering into ``unmask``
+    this helper becomes a straight delegation.
+    """
+    reverse = getattr(getattr(gateway, "ips", None), "reverse", None)
+    if not reverse:
+        return text
+    for token in sorted(reverse, key=len, reverse=True):
+        text = text.replace(token, reverse[token])
+    return text
 
 
 def estate_summary(
@@ -271,10 +339,22 @@ class AgentRunner:
     # -- wiring -------------------------------------------------------------
     def client(self) -> Any:
         if self._client is None:
-            from anthropic import Anthropic  # lazy: optional dependency
+            import anthropic  # lazy: optional dependency
 
-            self._client = Anthropic()
+            # The explicit timeout is not a tuning knob: without it the SDK
+            # refuses every non-streaming call this module makes (see the module
+            # docstring), so each run would end as outcome="error".
+            self._client = anthropic.Anthropic(timeout=self.request_timeout())
         return self._client
+
+    def request_timeout(self) -> Any:
+        """The per-request timeout every call in this module carries."""
+        try:
+            import anthropic  # lazy: optional dependency
+
+            return anthropic.Timeout(CLIENT_TIMEOUT_SECONDS, connect=CLIENT_CONNECT_TIMEOUT_SECONDS)
+        except Exception:  # pragma: no cover - only without the optional extra
+            return CLIENT_TIMEOUT_SECONDS
 
     def tool_specs(self) -> list[ToolSpec]:
         if self._tool_specs is not None:
@@ -293,6 +373,7 @@ class AgentRunner:
     def build_tools(self, budget: ToolBudget) -> list[RedactedTool]:
         from anthropic import beta_tool  # lazy: optional dependency
 
+        wrapper = redacted_tool_class()
         wrapped: list[RedactedTool] = []
         for spec in self.tool_specs():
             try:
@@ -302,11 +383,15 @@ class AgentRunner:
             except Exception:  # a tool the SDK cannot describe is dropped, never guessed at
                 log.exception("cannot build a tool schema for %s; skipping it", spec.name)
                 continue
-            wrapped.append(RedactedTool(spec, inner, self.gateway, budget))
+            wrapped.append(wrapper(spec, inner, self.gateway, budget))
         return wrapped
 
-    def system_blocks(self) -> list[dict[str, Any]]:
+    def system_blocks(self, tools: Sequence[RedactedTool] = ()) -> list[dict[str, Any]]:
         summary = (self._summary_provider or self._default_summary)()
+        # The API name is the dotted registry name with underscores, so tell the
+        # model what the tools are actually called rather than leaving it to
+        # guess from prose.
+        summary = {**summary, "tools": sorted(tool.name for tool in tools)}
         return [
             {"type": "text", "text": SYSTEM_PREFIX, "cache_control": {"type": "ephemeral"}},
             {
@@ -337,9 +422,13 @@ class AgentRunner:
                 output_config={"effort": self.settings.llm_effort},
                 betas=BETAS,
                 fallbacks=FALLBACKS,
-                system=self.system_blocks(),
+                system=self.system_blocks(tools),
                 tools=tools,
                 messages=[{"role": "user", "content": content}],
+                # Not a tuning knob: an explicit request timeout is what makes a
+                # non-streaming call with this max_tokens legal at all, and
+                # stating it here covers an injected client too.
+                timeout=self.request_timeout(),
             )
             result = self._consume(runner, budget, kind)
         except Exception as exc:
@@ -389,7 +478,10 @@ class AgentRunner:
             if budget.exhausted or (pending and budget.remaining() < pending):
                 outcome = "tool_call_cap"
                 break
-        text = "\n".join(texts).strip()
+        # From here on the text is owner-facing, so the public-IP pseudonyms go
+        # back to being addresses. The conversation the SDK keeps for the model
+        # is untouched and stays masked.
+        text = unmask_for_owner(self.gateway, "\n".join(texts).strip())
         return AgentRunResult(
             kind=kind,
             outcome=outcome,

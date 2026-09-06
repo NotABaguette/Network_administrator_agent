@@ -141,3 +141,96 @@ def test_the_scheduler_gets_every_duty(settings, monkeypatch):
         "firmware-inventory",
         "heartbeat",
     }
+
+
+# -- the owner's mornings, not UTC's ------------------------------------------
+
+
+def test_the_scheduler_runs_in_the_owners_timezone(monkeypatch):
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_TIMEZONE", raising=False)
+    assert service.scheduler_timezone() == "UTC"
+
+    monkeypatch.setenv("TZ", "Europe/Amsterdam")
+    assert service.scheduler_timezone() == "Europe/Amsterdam"
+
+    monkeypatch.setenv("INFRA_AGENT_TIMEZONE", "Asia/Tehran")
+    assert service.scheduler_timezone() == "Asia/Tehran", "the explicit setting wins"
+
+
+def test_an_unknown_timezone_falls_back_to_utc(monkeypatch):
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setenv("INFRA_AGENT_TIMEZONE", "Middle/Earth")
+
+    assert service.scheduler_timezone() == "UTC"
+
+
+def test_the_scheduler_is_built_with_that_timezone(settings, monkeypatch):
+    monkeypatch.setenv("INFRA_AGENT_TIMEZONE", "Europe/Amsterdam")
+    built: dict[str, Any] = {}
+
+    def factory(**kwargs: Any) -> FakeScheduler:
+        built.update(kwargs)
+        return FakeScheduler()
+
+    monkeypatch.setattr("apscheduler.schedulers.background.BackgroundScheduler", factory)
+    _, duties = service.build_service(settings)
+
+    service.start_scheduler(duties)
+
+    assert built["timezone"] == "Europe/Amsterdam"
+
+
+# -- the drift hook -----------------------------------------------------------
+
+
+def test_no_drift_provider_is_wired_until_the_reconciler_offers_one(settings):
+    assert service.build_drift_provider(settings) is None
+
+    _, duties = service.build_service(settings)
+
+    assert duties.drift()["available"] is False
+    assert "not wired" in duties.drift()["reason"]
+
+
+def test_the_reconciler_is_wired_into_the_digest_as_soon_as_it_exists(settings, monkeypatch):
+    """Phase 2 only has to expose a factory; the digest picks it up from there."""
+    from infra_agent import reconcile
+
+    monkeypatch.setattr(
+        reconcile,
+        "build_drift_provider",
+        lambda s: lambda: {"missing_in_netbox": ["sw-core-01"], "extra": []},
+        raising=False,
+    )
+
+    _, duties = service.build_service(settings)
+
+    assert duties.drift() == {
+        "available": True,
+        "missing_in_netbox": ["sw-core-01"],
+        "extra": [],
+    }
+
+
+def test_a_reconciler_that_raises_does_not_break_the_service(settings, monkeypatch):
+    from infra_agent import reconcile
+
+    def boom(_settings: Settings) -> Any:
+        raise RuntimeError("netbox unreachable")
+
+    monkeypatch.setattr(reconcile, "build_drift_provider", boom, raising=False)
+
+    assert service.build_drift_provider(settings) is None
+
+
+def test_the_freeze_marker_helper_is_the_one_triage_uses(settings):
+    """One implementation, so a freeze cannot be honoured in one path and not the other."""
+    from infra_agent.agent import freeze
+
+    assert service.FREEZE_MARKER == freeze.FREEZE_MARKER
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / freeze.FREEZE_MARKER).touch()
+
+    assert service.apply_freeze_marker(settings) is True
+    assert freeze.refresh_frozen(settings) is True

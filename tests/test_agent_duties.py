@@ -11,7 +11,13 @@ from typing import Any
 
 import pytest
 
-from infra_agent.agent.duties import Duties, extract_version, load_known_good, version_key
+from infra_agent.agent.duties import (
+    COLLECTOR_QUERIES,
+    Duties,
+    extract_version,
+    load_known_good,
+    version_key,
+)
 from infra_agent.agent.runner import AgentRunner
 from infra_agent.change.plan import ApprovalRecord, ChangePlan, ChangeState, Tier
 from infra_agent.change.store import PlanStore
@@ -26,23 +32,28 @@ NOW = datetime(2026, 2, 1, 12, 0, tzinfo=UTC)
 
 
 @dataclass
-class FakeSample:
-    name: str
-    labels: dict[str, str]
-    value: float
+class FakePromql:
+    """Stands in for `metrics.promql`.
 
+    Collector health has to come from Prometheus: `run_collector` sets those
+    gauges in the `infra-collectors` container, so the agent's own registry
+    never has a sample and a registry scan would report an empty, healthy-
+    looking estate every single day.
+    """
 
-@dataclass
-class FakeFamily:
-    samples: list[FakeSample]
+    series: dict[str, list[tuple[dict[str, str], float]]] = field(default_factory=dict)
+    error: Exception | None = None
+    queries: list[str] = field(default_factory=list)
 
-
-@dataclass
-class FakeRegistry:
-    families: list[FakeFamily] = field(default_factory=list)
-
-    def collect(self) -> list[FakeFamily]:
-        return self.families
+    def __call__(self, query: str) -> dict[str, Any]:
+        self.queries.append(query)
+        if self.error is not None:
+            return {"query": query, "error": f"{type(self.error).__name__}: {self.error}"}
+        rows = [
+            {"labels": labels, "at": 1770000000, "value": str(value)}
+            for labels, value in self.series.get(query, [])
+        ]
+        return {"query": query, "result_type": "vector", "row_count": len(rows), "rows": rows}
 
 
 @dataclass
@@ -105,7 +116,7 @@ def make_duties(settings, snapshots, *, turns=None, **kwargs) -> tuple[Duties, F
     )
     kwargs.setdefault("notifier", RecordingNotifier())
     kwargs.setdefault("config_store", FakeConfigStore())
-    kwargs.setdefault("registry", FakeRegistry())
+    kwargs.setdefault("metrics_query", FakePromql())
     duties = Duties(
         settings=settings,
         runner=runner,
@@ -126,53 +137,112 @@ def save(store: FileSnapshotStore, device: str, collector: str, data: dict, at: 
 # -- collector health ---------------------------------------------------------
 
 
+def collector_series(**overrides: Any) -> dict[str, list[tuple[dict[str, str], float]]]:
+    cisco = {"collector": "cisco", "device": "sw-core-01"}
+    esxi = {"collector": "esxi", "device": "esx-01"}
+    series = {
+        COLLECTOR_QUERIES["last_success"]: [
+            (cisco, NOW.timestamp() - 120),
+            (esxi, NOW.timestamp() - 7200),
+        ],
+        COLLECTOR_QUERIES["errors_last_24h"]: [(esxi, 3.0)],
+        COLLECTOR_QUERIES["changes_last_run"]: [(cisco, 2.0)],
+    }
+    series.update(overrides)
+    return series
+
+
 def test_collector_health_reads_the_collectors_own_metrics(settings, snapshots):
-    registry = FakeRegistry(
-        [
-            FakeFamily(
-                [
-                    FakeSample(
-                        "infra_collector_last_success_timestamp_seconds",
-                        {"collector": "cisco", "device": "sw-core-01"},
-                        NOW.timestamp() - 120,
-                    ),
-                    FakeSample(
-                        "infra_collector_last_success_timestamp_seconds",
-                        {"collector": "esxi", "device": "esx-01"},
-                        NOW.timestamp() - 7200,
-                    ),
-                    FakeSample(
-                        "infra_collector_errors_total",
-                        {"collector": "esxi", "device": "esx-01"},
-                        3.0,
-                    ),
-                    FakeSample(
-                        "infra_snapshot_changes",
-                        {"collector": "cisco", "device": "sw-core-01"},
-                        2.0,
-                    ),
-                ]
-            )
-        ]
-    )
-    duties, _ = make_duties(settings, snapshots, registry=registry)
+    promql = FakePromql(collector_series())
+    duties, _ = make_duties(settings, snapshots, metrics_query=promql)
 
-    rows = {row["device"]: row for row in duties.collector_health()}
+    health = duties.collector_health()
+    rows = {row["device"]: row for row in health["collectors"]}
 
+    assert health["available"] is True
+    assert health["source"] == "prometheus"
     assert rows["sw-core-01"]["stale"] is False
     assert rows["sw-core-01"]["age_seconds"] == 120
     assert rows["sw-core-01"]["changes_last_run"] == 2
     assert rows["esx-01"]["stale"] is True, "an hour-old collector run is an alert in itself"
-    assert rows["esx-01"]["errors_total"] == 3
+    assert rows["esx-01"]["errors_last_24h"] == 3
+    assert set(promql.queries) == set(COLLECTOR_QUERIES.values())
 
 
-def test_a_broken_metrics_registry_does_not_break_the_digest(settings, snapshots):
-    class Broken:
-        def collect(self):
-            raise RuntimeError("registry unavailable")
+def test_collector_health_goes_through_the_real_promql_tool(settings, snapshots, tmp_path):
+    """The agent container has no collector samples of its own; Prometheus does."""
+    from infra_agent.tools import observability_tools as obs
+    from tests.test_observability_tools import FakeHttp
 
-    duties, _ = make_duties(settings, snapshots, registry=Broken())
-    assert duties.collector_health() == []
+    http = FakeHttp(
+        {
+            "/api/v1/query": {
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {
+                            "metric": {"collector": "cisco", "device": "sw-core-01"},
+                            "value": [1770000000, str(NOW.timestamp() - 60)],
+                        }
+                    ],
+                },
+            }
+        }
+    )
+    obs.reset()
+    try:
+        obs.configure(
+            settings=settings,
+            gateway=RedactionGateway(audit_log=tmp_path / "audit.jsonl"),
+            http=http,
+        )
+        duties, _ = make_duties(settings, snapshots, metrics_query=None)
+
+        health = duties.collector_health()
+    finally:
+        obs.reset()
+
+    assert health["available"] is True
+    assert [row["device"] for row in health["collectors"]] == ["sw-core-01"]
+    assert health["collectors"][0]["stale"] is False
+    assert [url for url, _ in http.calls] == ["http://prometheus:9090/api/v1/query"] * len(
+        COLLECTOR_QUERIES
+    )
+
+
+def test_an_unreachable_prometheus_is_said_out_loud_not_reported_as_health(settings, snapshots):
+    promql = FakePromql(error=ConnectionError("prometheus down"))
+    duties, _ = make_duties(settings, snapshots, metrics_query=promql)
+
+    health = duties.collector_health()
+
+    assert health["available"] is False
+    assert "ConnectionError" in health["reason"]
+    assert health["collectors"] == []
+
+
+def test_a_raising_metrics_query_does_not_break_the_digest(settings, snapshots):
+    def boom(query: str) -> dict[str, Any]:
+        raise RuntimeError("prometheus client exploded")
+
+    duties, _ = make_duties(settings, snapshots, metrics_query=boom)
+
+    health = duties.collector_health()
+
+    assert health["available"] is False
+    assert "RuntimeError" in health["reason"]
+
+
+def test_no_collector_series_at_all_is_a_finding_not_silence(settings, snapshots):
+    """An empty answer means the collectors are not reporting, not that they are fine."""
+    duties, _ = make_duties(settings, snapshots, metrics_query=FakePromql({}))
+
+    health = duties.collector_health()
+
+    assert health["available"] is False
+    assert "no infra_collector_" in health["reason"]
+    assert health["collectors"] == []
 
 
 # -- snapshot ages ------------------------------------------------------------
@@ -585,3 +655,52 @@ def test_every_duty_is_scheduled(settings, snapshots):
     assert jobs["heartbeat"][2]["minutes"] == 5
     assert jobs["daily-digest"][1] == "cron"
     assert jobs["weekly-report"][2]["day_of_week"] == "mon"
+
+
+# -- the maintained baseline --------------------------------------------------
+
+
+def test_the_known_good_list_is_re_read_on_every_run(settings, snapshots, tmp_path, monkeypatch):
+    """ "Maintained" means the owner edits the file, not that they restart the agent."""
+    baseline = tmp_path / "known_good_versions.yaml"
+    baseline.write_text("fortigate:\n  known_good: ['7.4.5']\n  minimum: '7.4.5'\n")
+    monkeypatch.setattr("infra_agent.agent.duties.KNOWN_GOOD_VERSIONS", baseline)
+    save(snapshots, "fw-01", "fortigate", {"system": {"version": "v7.4.4"}}, NOW)
+    duties, _ = make_duties(settings, snapshots)
+
+    first = {row["device"]: row for row in duties.firmware_versions()}
+    assert first["fw-01"]["status"] == "below_minimum"
+
+    baseline.write_text("fortigate:\n  known_good: ['7.4.4', '7.4.5']\n  minimum: '7.4.4'\n")
+    second = {row["device"]: row for row in duties.firmware_versions()}
+
+    assert second["fw-01"]["status"] == "known_good", "no restart needed"
+
+
+def test_an_unreadable_baseline_is_not_a_crash(settings, snapshots, tmp_path, monkeypatch):
+    broken = tmp_path / "known_good_versions.yaml"
+    broken.write_text("{{ this is not yaml")
+    monkeypatch.setattr("infra_agent.agent.duties.KNOWN_GOOD_VERSIONS", broken)
+    duties, _ = make_duties(settings, snapshots)
+
+    rows = duties.firmware_versions()
+
+    assert {row["status"] for row in rows} == {"unknown"}
+
+
+def test_an_explicit_baseline_pins_it(settings, snapshots):
+    duties, _ = make_duties(settings, snapshots, known_good={"fortigate": {"known_good": ["9.9"]}})
+
+    assert duties.known_good() == {"fortigate": {"known_good": ["9.9"]}}
+
+
+def test_the_digest_says_when_collector_health_is_unknown(settings, snapshots):
+    duties, client = make_duties(
+        settings, snapshots, metrics_query=FakePromql(error=ConnectionError("down"))
+    )
+
+    duties.daily_digest()
+
+    content = client.calls[0]["messages"][0]["content"]
+    assert "could not query Prometheus" in content
+    assert '"available": false' in content.lower()

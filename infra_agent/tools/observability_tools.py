@@ -2,10 +2,15 @@
 
 Everything here is read-only by construction:
 
-* `device.show` refuses any command that is not on the platform's allowlist in
-  `infra_agent/redaction/redaction.yaml` (which excludes `show run*`,
-  `show tech*`, FortiOS `diagnose`/`execute backup`, and so on), and connects
-  with the collector's read-only credential.
+* `device.show` turns a model-supplied string into a command that runs on a
+  switch, a firewall or an ESXi shell, so it does not rely on the allowlist
+  regexes alone. A command must survive three checks, in this order: a
+  character allowlist (which rejects the embedded newline that would otherwise
+  smuggle `configure terminal` past a `show ip route.*` pattern, and every
+  shell metacharacter), the platform allowlist in
+  `infra_agent/redaction/redaction.yaml`, and a per-platform structural check
+  (`cisco` must be a `show`, `esxcli` must use a `get`/`list` verb). Only the
+  normalised string is ever sent to the device.
 * Every result leaves through `RedactionGateway.egress`, which also refuses
   anything that still looks like a raw device configuration.
 
@@ -16,6 +21,10 @@ a device or an HTTP endpoint.
 from __future__ import annotations
 
 import logging
+import os
+import re
+import shlex
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -31,9 +40,24 @@ log = logging.getLogger(__name__)
 MAX_LOG_LINES = 1000
 MAX_LOG_MINUTES = 24 * 60
 
-#: FortiOS is queried through the read-only REST monitor API rather than a CLI,
-#: so each allowlisted `get`/`diagnose` command maps to a `monitor/...` path.
-FORTIOS_MONITOR_MAP: dict[str, str] = {
+#: Everything an allowlisted read-only command needs, and nothing else. A
+#: denylist of shell metacharacters is one forgotten character away from a
+#: bypass; this is checked against the RAW command, before whitespace is
+#: collapsed, because collapsing is what hides an embedded newline.
+COMMAND_CHARSET = re.compile(r"^[A-Za-z0-9 _.:/@=,+-]+$")
+
+#: The only `esxcli` verbs that read. The allow pattern in `redaction.yaml` is
+#: a prefix match (`^esxcli (network|storage|...)\b`), so without this check
+#: `esxcli network firewall set --enabled false` is "allowed".
+ESXCLI_READ_VERBS = frozenset({"get", "list"})
+
+#: FortiOS is queried through the read-only REST API rather than a CLI. Live
+#: state comes from `monitor/...`; *configured* objects come from the read half
+#: of the config API, `cmdb/...` (a plain GET). The distinction matters: asking
+#: `monitor/firewall/policy` for the policies returns hit and byte counters
+#: rather than the rules, and `monitor/firewall/address-dynamic` lists only
+#: SDN-resolved addresses, not the address objects the owner configured.
+FORTIOS_ENDPOINT_MAP: dict[str, str] = {
     "get system status": "monitor/system/status",
     "get system performance status": "monitor/system/resource/usage",
     "get system interface": "monitor/system/interface",
@@ -43,14 +67,94 @@ FORTIOS_MONITOR_MAP: dict[str, str] = {
     "get system session status": "monitor/system/resource/usage",
     "get router info routing-table all": "monitor/router/ipv4",
     "get vpn ipsec tunnel summary": "monitor/vpn/ipsec",
-    "get firewall policy": "monitor/firewall/policy",
-    "get firewall address": "monitor/firewall/address-dynamic",
+    "get firewall policy": "cmdb/firewall/policy",
+    "get firewall address": "cmdb/firewall/address",
+    "get firewall service custom": "cmdb/firewall.service/custom",
+    "get firewall vip": "cmdb/firewall/vip",
     "diagnose sys top": "monitor/system/resource/usage",
     "diagnose hardware sysinfo memory": "monitor/system/resource/usage",
     "diagnose hardware sysinfo cpu": "monitor/system/resource/usage",
     "diagnose ip arp list": "monitor/network/arp",
     "diagnose netlink interface list": "monitor/system/interface",
 }
+
+#: What the model would otherwise have to infer from an empty result.
+FORTIOS_ENDPOINT_NOTES: dict[str, str] = {
+    "get system ha status": (
+        "this FortiGate 60F is standalone: an empty ha-peer list means there is no "
+        "HA cluster, not that the query failed"
+    ),
+}
+
+#: One poller at >=60s is what `docs/architecture.md` allows the 60F; a tool the
+#: model can call in a loop gets its own floor.
+FORTIGATE_MIN_INTERVAL_SECONDS = 2.0
+
+
+def ssh_known_hosts() -> str | None:
+    """Path to the operator's recorded host keys, when there is one.
+
+    Until onboarding records a host key per device (a Phase 4 prerequisite:
+    the ESXi SSH path is the one that will carry writes, and the Catalyst read
+    account is priv-15), `INFRA_SSH_KNOWN_HOSTS` is the way to pin them. With
+    it set, an unknown host key is a refusal rather than a warning.
+    """
+    value = os.environ.get("INFRA_SSH_KNOWN_HOSTS", "").strip()
+    return value or None
+
+
+def normalise_command(command: str) -> str:
+    """The single spelling of a command that is checked *and* sent."""
+    return " ".join(command.split())
+
+
+def command_refusal(platform: str, command: str, gateway: RedactionGateway) -> str | None:
+    """Why this command must not run, or None when it may. Never raises."""
+    if not command.strip():
+        return "no command was given"
+    if not COMMAND_CHARSET.match(command):
+        return (
+            "the command contains characters that a read-only command never needs "
+            "(control characters, newlines and shell metacharacters are refused)"
+        )
+    normalised = normalise_command(command)
+    if not gateway.is_command_allowed(platform, normalised):
+        return (
+            "command is not on the read-only allowlist for platform "
+            f"{platform}; see docs/redaction-policy.md"
+        )
+    if platform == "cisco" and not normalised.startswith("show "):
+        return "only `show ...` commands are read-only on cisco"
+    if platform == "esxi":
+        return _esxi_refusal(normalised)
+    return None
+
+
+def _esxi_refusal(command: str) -> str | None:
+    """ESXi runs this through a shell as the SSH user, so parse it as argv."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return "the command could not be parsed into arguments"
+    if not argv:
+        return "empty command"
+    if argv[0] == "vim-cmd":
+        # The vim-cmd allow patterns are anchored and name read-only verbs.
+        return None
+    if argv[0] != "esxcli":
+        return "only `esxcli` and `vim-cmd` are read-only on esxi"
+    path = []
+    for token in argv[1:]:
+        if token.startswith("-"):
+            break
+        path.append(token)
+    verb = path[-1] if path else ""
+    if verb not in ESXCLI_READ_VERBS:
+        return (
+            f"esxcli verb {verb or '(none)'!r} is not read-only; "
+            f"only {sorted(ESXCLI_READ_VERBS)} are allowed"
+        )
+    return None
 
 
 class HttpTransport(Protocol):
@@ -85,16 +189,20 @@ class CiscoShowTransport:
 
         if cred is None:
             raise LookupError(f"no stored credential for {device.name}")
+        known_hosts = ssh_known_hosts()
+        strict: dict[str, Any] = {"auth_strict_key": False}
+        if known_hosts:
+            strict = {"auth_strict_key": True, "ssh_known_hosts_file": known_hosts}
         driver = IOSXEDriver(
             host=device.mgmt_ip,
             port=device.port or 22,
             auth_username=cred.username or "",
             auth_password=cred.password.get_secret_value() if cred.password else "",
-            auth_strict_key=False,
             transport="paramiko",
             timeout_socket=20,
             timeout_transport=30,
             timeout_ops=60,
+            **strict,
         )
         with driver as conn:
             response = conn.send_command(command)
@@ -107,27 +215,65 @@ class CiscoShowTransport:
 
 
 class FortiGateShowTransport:
-    """FortiOS REST monitor API; the CLI is never used and never writes."""
+    """FortiOS REST API, GET only; the CLI is never used and never writes.
+
+    One `requests.Session` per device is kept and reused: the 60F is a small box
+    that `docs/architecture.md` gives one poller at >=60s, and a tool the model
+    can call repeatedly should not open a new TLS session each time. Calls to the
+    same device are also spaced by `FORTIGATE_MIN_INTERVAL_SECONDS`.
+    """
 
     def __init__(self, timeout: float = 20.0) -> None:
         self.timeout = timeout
+        self._sessions: dict[str, Any] = {}
+        self._last_call: dict[str, float] = {}
+        self._lock = threading.Lock()
 
-    def run(self, device: SeedDevice, cred: Credential | None, command: str) -> Any:
+    def session(self, device: SeedDevice, cred: Credential) -> Any:
         import requests
 
+        with self._lock:
+            session = self._sessions.get(device.name)
+            if session is None:
+                session = requests.Session()
+                # TLS pinning is a Phase 1 decision; until it lands this mirrors
+                # the collector rather than inventing a second policy.
+                session.verify = False
+                self._sessions[device.name] = session
+            token = cred.token.get_secret_value() if cred.token else ""
+            session.headers["Authorization"] = f"Bearer {token}"
+            return session
+
+    def _throttle(self, device: SeedDevice) -> None:
+        with self._lock:
+            last = self._last_call.get(device.name)
+            now = time.monotonic()
+            wait = 0.0 if last is None else FORTIGATE_MIN_INTERVAL_SECONDS - (now - last)
+            self._last_call[device.name] = now + max(wait, 0.0)
+        if wait > 0:
+            time.sleep(wait)
+
+    def run(self, device: SeedDevice, cred: Credential | None, command: str) -> Any:
         if cred is None or not cred.token:
             raise LookupError(f"no API token credential for {device.name}")
-        endpoint = FORTIOS_MONITOR_MAP.get(" ".join(command.split()))
+        normalised = normalise_command(command)
+        endpoint = FORTIOS_ENDPOINT_MAP.get(normalised)
         if endpoint is None:
             raise LookupError(f"no read-only REST mapping for {command!r}")
-        session = requests.Session()
-        session.headers["Authorization"] = f"Bearer {cred.token.get_secret_value()}"
-        session.verify = False  # pinned in Phase 1
+        self._throttle(device)
+        session = self.session(device, cred)
         base = f"https://{device.mgmt_ip}:{device.port or 443}/api/v2/"
         response = session.get(base + endpoint, timeout=self.timeout)
         response.raise_for_status()
         body = response.json()
-        return body.get("results", body) if isinstance(body, dict) else body
+        results = body.get("results", body) if isinstance(body, dict) else body
+        # The endpoint is part of the answer: `cmdb/firewall/policy` is the rules,
+        # `monitor/firewall/policy` would have been the counters.
+        payload: dict[str, Any] = {"endpoint": f"api/v2/{endpoint}", "results": results}
+        note = FORTIOS_ENDPOINT_NOTES.get(normalised)
+        if note:
+            payload["note"] = note
+        return payload
 
 
 class EsxiShowTransport:
@@ -141,8 +287,16 @@ class EsxiShowTransport:
 
         if cred is None:
             raise LookupError(f"no stored credential for {device.name}")
+        # `exec_command` still reaches a shell, which is why `command_refusal`
+        # rejects every metacharacter before anything gets here.
+        command = " ".join(shlex.split(normalise_command(command)))
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        known_hosts = ssh_known_hosts()
+        if known_hosts:
+            client.load_host_keys(known_hosts)
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        else:
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             client.connect(
                 hostname=device.mgmt_ip,
@@ -359,41 +513,48 @@ def show(device: str, command: str) -> dict[str, Any]:
     if target is None:
         return dict(
             d.gateway.egress(
-                {"device": device, "command": command, "error": f"unknown device {device!r}"},
+                {
+                    "device": device,
+                    "command": normalise_command(command),
+                    "error": f"unknown device {device!r}",
+                },
                 tool="device.show",
             )
         )
-    if not d.gateway.is_command_allowed(target.platform, command):
-        log.warning("refused %r on %s (%s): not allowlisted", command, device, target.platform)
+    refusal = command_refusal(target.platform, command, d.gateway)
+    if refusal is not None:
+        # `command` is logged as the model wrote it, so a bypass attempt is
+        # visible in the log; only the normalised form is ever reported or run.
+        log.warning("refused %r on %s (%s): %s", command, device, target.platform, refusal)
         return dict(
             d.gateway.egress(
                 {
                     "device": device,
                     "platform": target.platform,
-                    "command": command,
+                    "command": normalise_command(command),
                     "allowed": False,
-                    "error": (
-                        "command is not on the read-only allowlist for platform "
-                        f"{target.platform}; see docs/redaction-policy.md"
-                    ),
+                    "error": refusal,
                 },
                 tool="device.show",
             )
         )
+    # From here on only the normalised command exists: the transport never sees
+    # the string the model actually sent.
+    normalised = normalise_command(command)
     try:
         cred = d.credentials(target)
-        output = d.devices.run(target, cred, command)
+        output = d.devices.run(target, cred, normalised)
     except Exception as exc:
         return dict(
             d.gateway.egress(
-                _error("device.show", exc, device=device, command=command, allowed=True),
+                _error("device.show", exc, device=device, command=normalised, allowed=True),
                 tool="device.show",
             )
         )
     payload = {
         "device": device,
         "platform": target.platform,
-        "command": command,
+        "command": normalised,
         "allowed": True,
         "output": output,
     }

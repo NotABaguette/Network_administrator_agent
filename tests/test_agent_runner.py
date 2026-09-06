@@ -63,12 +63,28 @@ def call(tool: str, **kwargs: Any) -> FakeMessage:
     return FakeMessage([FakeBlock("tool_use", name=tool, input=kwargs)], stop_reason="tool_use")
 
 
+def _runnable(tools: list[Any]) -> list[Any]:
+    """The SDK's own partition of `tools`, reproduced exactly.
+
+    `client.beta.messages.tool_runner` splits its argument with
+    `isinstance(tool, (BetaFunctionTool, BetaBuiltinFunctionTool))`; anything
+    else is serialised into the request verbatim and never dispatched. A fake
+    that dispatches on `.name` alone would hide exactly that bug, so this fake
+    refuses to be more forgiving than the SDK.
+    """
+    from anthropic.lib.tools import BetaBuiltinFunctionTool
+    from anthropic.lib.tools._beta_functions import BetaFunctionTool
+
+    return [t for t in tools if isinstance(t, (BetaFunctionTool, BetaBuiltinFunctionTool))]
+
+
 class FakeToolRunner:
     """Yields the scripted turns and runs each turn's tools the way the SDK does."""
 
     def __init__(self, turns: list[FakeMessage], tools: list[Any]) -> None:
         self.turns = turns
-        self.tools = {tool.name: tool for tool in tools}
+        self.raw_tools = [t for t in tools if t not in _runnable(tools)]
+        self.tools = {tool.name: tool for tool in _runnable(tools)}
         self.results: list[tuple[str, str]] = []
         self.unknown: list[str] = []
 
@@ -468,3 +484,160 @@ def test_run_records_the_outcome_metric(settings, gateway):
     before = value()
     make_runner(settings, gateway, FakeClient([say("hi")])).run("go", kind="unit_test")
     assert value() == before + 1
+
+
+# -- the SDK contracts, exercised against the real SDK -------------------------
+#
+# The fakes above are a model of `client.beta.messages.tool_runner`. These tests
+# use the real thing: two production-fatal defects (a wrapper the runner never
+# dispatched to, and a non-streaming call the SDK rejected outright) both passed
+# a green suite because nothing here touched the SDK's own classes.
+
+
+def beta_message(content: list[dict[str, Any]], stop_reason: str) -> Any:
+    from anthropic.types.beta import BetaMessage
+
+    return BetaMessage.model_validate(
+        {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": content,
+            "stop_reason": stop_reason,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    )
+
+
+def scripted_client(messages: list[Any]) -> tuple[Any, list[dict[str, Any]]]:
+    """A real `Anthropic` whose `beta.messages.parse` returns scripted turns."""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key="test-key", max_retries=0)
+    seen: list[dict[str, Any]] = []
+    turns = list(messages)
+
+    def parse(**kwargs: Any) -> Any:
+        seen.append(kwargs)
+        return turns.pop(0)
+
+    client.beta.messages.parse = parse  # type: ignore[method-assign]
+    return client, seen
+
+
+def test_the_real_sdk_runner_dispatches_to_the_redacting_wrapper(settings, gateway):
+    """If the wrapper is not a runnable tool, the SDK never calls it and nothing
+    is redacted, counted or capped - the model just gets 'Tool not found'."""
+    client, requests = scripted_client(
+        [
+            beta_message(
+                [{"type": "tool_use", "id": "toolu_1", "name": "test_leaky", "input": {}}],
+                "tool_use",
+            ),
+            beta_message([{"type": "text", "text": "done"}], "end_turn"),
+        ]
+    )
+    runner = make_runner(settings, gateway, client, tools=[spec("test.leaky", leaky)])
+    before = counter("test.leaky")
+
+    result = runner.run("look", kind="triage")
+
+    assert result.outcome == "completed"
+    assert result.tool_calls == 1, "the wrapper ran, so the budget saw the call"
+    assert counter("test.leaky") == before + 1
+    # The tool result the SDK put back into the conversation is the redacted one.
+    followup = requests[1]["messages"][-1]["content"][0]
+    assert followup["type"] == "tool_result"
+    assert "S3cretC0mmunity" not in followup["content"]
+    assert "<REDACTED>" in followup["content"]
+
+
+def test_the_real_sdk_serialises_every_tool_as_a_schema(settings, gateway):
+    """A tool the SDK does not recognise is placed in the request as the Python
+    object itself, which is neither serialisable nor dispatchable."""
+    client, requests = scripted_client([beta_message([{"type": "text", "text": "hi"}], "end_turn")])
+    AgentRunner(settings=settings, gateway=gateway, client=client, summary_provider=dict).run("go")
+
+    tools = requests[0]["tools"]
+    assert tools, "the registry tools reached the request"
+    assert all(isinstance(tool, dict) for tool in tools), tools
+    assert all({"name", "description", "input_schema"} <= set(tool) for tool in tools)
+    names = {tool["name"] for tool in tools}
+    assert "device_show" in names and "change_propose" in names
+    assert not any("." in name for name in names)
+    assert {"change_approve", "change_execute"}.isdisjoint(names)
+
+
+def test_every_registry_tool_has_a_schema_the_sdk_can_build(settings, gateway):
+    """`build_tools` drops a tool it cannot describe; none of ours may be dropped."""
+    from infra_agent.tools.registry import llm_tools, load_all
+
+    load_all()
+    expected = {s.name for s in llm_tools() if s.name not in FORBIDDEN_TOOLS and s.llm_callable}
+    runner = AgentRunner(settings=settings, gateway=gateway, client=FakeClient())
+
+    built = runner.build_tools(ToolBudget(limit=5))
+
+    assert {tool.spec.name for tool in built} == expected
+    for tool in built:
+        schema = tool.to_dict()
+        assert schema["input_schema"]["type"] == "object"
+        assert schema["description"], tool.name
+
+
+def test_an_unreachable_api_fails_on_the_network_not_on_validation(settings, gateway):
+    """The prescribed 64k non-streaming call must be legal before it is sent."""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key="test-key", base_url="http://127.0.0.1:1", max_retries=0)
+    assert settings.max_output_tokens_per_run > 21_333, "the guard only fires above this"
+
+    result = make_runner(settings, gateway, client, tools=[]).run("go", kind="triage")
+
+    assert result.outcome == "error"
+    assert "APIConnectionError" in result.report, result.report
+    assert "Streaming is required" not in result.report
+
+
+def test_the_runner_states_a_timeout_the_sdk_accepts(settings, gateway):
+    client = FakeClient([say("hi")])
+    make_runner(settings, gateway, client).run("go")
+
+    assert client.calls[0]["timeout"] is not None
+
+
+def test_the_wrapper_is_a_tool_the_sdk_will_dispatch(settings, gateway):
+    from anthropic.lib.tools import BetaBuiltinFunctionTool
+
+    tools = make_runner(settings, gateway, FakeClient()).build_tools(ToolBudget(limit=5))
+
+    assert tools and all(isinstance(tool, BetaBuiltinFunctionTool) for tool in tools)
+
+
+# -- public IPs come back on the way to the owner -----------------------------
+
+
+def test_public_ip_pseudonyms_are_reversed_for_the_owner(settings, gateway):
+    """`docs/redaction-policy.md`: reversed on the way back, so the report is usable."""
+    client = FakeClient([call("test_leaky"), say("The peer PUBIP_1 is unreachable.")])
+
+    result = make_runner(settings, gateway, client, tools=[spec("test.leaky", leaky)]).run("why")
+
+    (_, payload) = client.runners[0].results[0]
+    assert "8.8.4.4" not in payload, "the model still only saw the pseudonym"
+    assert result.text == "The peer 8.8.4.4 is unreachable."
+    assert "8.8.4.4" in result.report
+
+
+def test_reversal_does_not_corrupt_a_two_digit_pseudonym(settings, gateway):
+    """A plain in-order replace rewrites the `PUBIP_1` inside `PUBIP_10`."""
+    for octet in range(1, 12):
+        gateway.redact_text(f"8.8.4.{octet}")
+    token = gateway.ips.forward["8.8.4.10"]
+    client = FakeClient([say(f"Both {token} and PUBIP_1 answered.")])
+
+    result = make_runner(settings, gateway, client).run("check")
+
+    assert result.text == "Both 8.8.4.10 and 8.8.4.1 answered."

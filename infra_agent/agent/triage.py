@@ -1,16 +1,25 @@
 """Alert triage: Alertmanager webhook -> grouped incident -> one advisory agent run.
 
 The model is advisory. It may propose a `ChangePlan` and may nominate a single
-Tier 0 candidate; it can do neither by itself:
+Tier 0 candidate; it can do neither by itself, and nothing it writes is taken
+as a fact about the estate:
 
-* a proposed plan is re-tiered here (the model can escalate a tier, never lower
-  one), persisted through `PlanStore`, and put in front of a human. The approval
-  token minted by `PlanStore.request_approval` is handed straight to
-  `Notifier.send_approval_request` and to nothing else - not the model, not the
-  returned `Triage`, not the log.
-* a Tier 0 candidate is checked by `Tier0Guard`, which honours
-  `settings.frozen` and `settings.tier0_shadow_mode`. At most one Tier 0 action
-  runs (or is shadowed) per triage run.
+* a proposed plan contributes *content only* (`PLAN_CONTENT_FIELDS`). Its id,
+  tier, state, approval record, history, window, timestamps and Tier 2
+  confirmation phrase are minted here, so the model cannot hand itself an
+  approved plan, choose a phrase it then knows, or overwrite a plan the owner
+  is already looking at. The token minted by `PlanStore.request_approval` goes
+  straight to `Notifier.send_approval_request` and nowhere else - not the
+  model, not the returned `Triage`, not the log.
+* a Tier 0 candidate names an action and an object; the opt-in tags come from
+  the inventory record for that object and the cause is derived from the
+  incident, never read off the model's own JSON. `docs/risk-tiers.md` makes
+  both properties of the estate, not assertions by the proposer.
+* the guard honours `settings.frozen` - re-read from the break-glass marker on
+  every run - and `settings.tier0_shadow_mode`, and at most one Tier 0 action
+  runs (or is shadowed) per triage run. Its cooldowns and per-day caps survive
+  a restart via `AgentStateStore` and are serialised across the webhook's
+  threads by one lock.
 """
 
 from __future__ import annotations
@@ -18,18 +27,22 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from infra_agent.agent.freeze import refresh_frozen
 from infra_agent.agent.notify import LogNotifier, Notifier
 from infra_agent.agent.runner import AgentRunner, AgentRunResult
+from infra_agent.agent.state import AgentStateStore
 from infra_agent.change.plan import ChangePlan, ChangeState, Tier
 from infra_agent.change.store import PlanStore
-from infra_agent.change.tiers import ImpactSummary, Tier0Guard, compute_tier
+from infra_agent.change.tiers import TIER0_POLICIES, ImpactSummary, Tier0Guard, compute_tier
 from infra_agent.config import Settings, get_settings
+from infra_agent.models.common import SeedInventory
 from infra_agent.monitoring import metrics
 from infra_agent.redaction.gateway import RedactionGateway
 
@@ -50,6 +63,26 @@ CONFIRMATION_WORDS = (
     "tundra",
 )
 
+#: The only fields a proposed plan may contribute: its content. Everything else
+#: about a `ChangePlan` is platform state, and a model that could set `state`
+#: could persist an already-approved plan, one that could set `id` could swap
+#: the body of a plan the owner is being asked to approve, and one that could
+#: set `confirmation_phrase` would know the Tier 2 phrase.
+PLAN_CONTENT_FIELDS = (
+    "title",
+    "action",
+    "targets",
+    "summary",
+    "diff",
+    "pre_checks",
+    "steps",
+    "post_checks",
+    "rollback",
+)
+
+#: Labels an alert may carry that state the cause outright.
+CAUSE_LABEL_KEYS = ("cause", "reason", "errdisable_reason", "err_disable_reason")
+
 TRIAGE_INSTRUCTIONS = """\
 Triage this grouped alert. Use the read tools to gather evidence before you
 conclude anything; say what you do not know rather than guessing.
@@ -62,12 +95,17 @@ last in your message, with these keys:
   evidence            array of strings, each naming a tool result you relied on
   recommended_action  string, one clear recommendation for the owner
   proposed_plan       a ChangePlan object, or null if no change is warranted.
-                      Use the same fields as `change.propose`: title, action,
-                      targets, summary, diff (structured, never raw config),
-                      pre_checks, steps, post_checks, rollback.
-  tier0_candidate     null, or an object {action, object_id, object_tags,
-                      cause, rationale} naming ONE idempotent, reversible,
-                      single-object Tier 0 action from the allowlist.
+                      Use the same fields as the `change_propose` tool: title,
+                      action, targets, summary, diff (structured, never raw
+                      config), pre_checks, steps, post_checks, rollback. Any
+                      other field is ignored: the platform owns the plan's id,
+                      tier, state and approval.
+  tier0_candidate     null, or an object {action, object_id, cause, rationale}
+                      naming ONE idempotent, reversible, single-object Tier 0
+                      action from the allowlist. The opt-in tag is read from
+                      the inventory and the cause from the alert itself, so
+                      nominate the object by its real name and expect a refusal
+                      if it is not opted in.
 
 You cannot approve or execute anything. Proposing a plan only puts it in front
 of the owner; a Tier 0 candidate is still checked against its guard.
@@ -136,12 +174,20 @@ class Incident(BaseModel):
 
 
 class Tier0Candidate(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    """A Tier 0 action the model nominates. Only `action` and `object_id` are used.
+
+    `claimed_tags` and `claimed_cause` are kept under their wire names so the
+    model's own JSON still parses and so the record shows what it asserted, but
+    they are evidence about the model, not about the estate: the guard is given
+    the tags on the inventory object and the cause derived from the incident.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     action: str
     object_id: str
-    object_tags: list[str] = Field(default_factory=list)
-    cause: str | None = None
+    claimed_tags: list[str] = Field(default_factory=list, alias="object_tags")
+    claimed_cause: str | None = Field(default=None, alias="cause")
     rationale: str = ""
 
 
@@ -151,9 +197,12 @@ class Tier0Decision(BaseModel):
     action: str
     object_id: str
     allowed: bool
-    mode: str  # shadow | live | unwired | refused | skipped
+    mode: str  # shadow | live | unwired | refused | skipped | failed
     reason: str
     executed: bool = False
+    #: The tags and cause the guard actually judged, from the platform's records.
+    object_tags: list[str] = Field(default_factory=list)
+    cause: str | None = None
 
 
 class Triage(BaseModel):
@@ -183,6 +232,49 @@ def _requested_tier(proposed: dict[str, Any]) -> Tier | None:
         return Tier(int(proposed["tier"]))
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def mint_confirmation_phrase() -> str:
+    """A Tier 2 phrase the owner types back. Minted here so the model never sees it."""
+    return "-".join(secrets.choice(CONFIRMATION_WORDS) for _ in range(3))
+
+
+def _label_sources(incident: Incident) -> Iterable[dict[str, str]]:
+    yield incident.common_labels
+    yield incident.group_labels
+    yield incident.annotations
+    for alert in incident.alerts:
+        for key in ("labels", "annotations"):
+            value = alert.get(key)
+            if isinstance(value, dict):
+                yield {str(k): str(v) for k, v in value.items()}
+
+
+def derive_cause(action: str, incident: Incident) -> str | None:
+    """The cause of this incident, taken from the alert rather than the model.
+
+    An explicit `cause`/`reason` label wins. Otherwise the incident's own text
+    is searched for one of the action's known causes, and a denied cause found
+    anywhere wins over an allowed one: `bpduguard` mentioned next to `link-flap`
+    must not clear an err-disable. An ambiguous or absent cause returns None,
+    which the guard refuses for any action with a cause allowlist.
+    """
+    policy = TIER0_POLICIES.get(action)
+    if policy is None:
+        return None
+    for labels in _label_sources(incident):
+        for key in CAUSE_LABEL_KEYS:
+            value = labels.get(key)
+            if value:
+                return str(value)
+    haystack = " ".join(
+        str(value) for labels in _label_sources(incident) for value in labels.values()
+    ).lower()
+    denied = [c for c in policy.cause_denylist if c.lower() in haystack]
+    if denied:
+        return denied[0]
+    allowed = [c for c in (policy.cause_allowlist or []) if c.lower() in haystack]
+    return allowed[0] if len(allowed) == 1 else None
 
 
 def group_incident(payload: AlertmanagerWebhook) -> Incident:
@@ -235,6 +327,8 @@ class TriageService:
         gateway: RedactionGateway | None = None,
         impact_provider: Callable[[ChangePlan], ImpactSummary] | None = None,
         tier0_executor: Callable[[Tier0Candidate, Incident], str] | None = None,
+        inventory: Callable[[], SeedInventory] | None = None,
+        state: AgentStateStore | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.gateway = gateway or RedactionGateway(audit_log=self.settings.audit_log)
@@ -246,6 +340,12 @@ class TriageService:
         )
         self.impact_provider = impact_provider
         self.tier0_executor = tier0_executor
+        self._inventory = inventory or (lambda: SeedInventory.load(self.settings.seed_inventory))
+        self.state = state or AgentStateStore(self.settings.data_dir / "agent-state.db")
+        # The webhook triages in FastAPI's threadpool, so two alerts for the
+        # same object can reach the guard at once. allow+record is one step.
+        self._tier0_lock = threading.RLock()
+        self._history_loaded = False
 
     # -- entry points -------------------------------------------------------
     def parse(self, payload: dict[str, Any]) -> Incident:
@@ -255,6 +355,9 @@ class TriageService:
         return self.triage(self.parse(payload))
 
     def triage(self, incident: Incident) -> Triage:
+        # A freeze issued while the service is running must be visible to this
+        # run, not to the one after the next restart.
+        refresh_frozen(self.settings)
         result = self.runner.run_json(
             TRIAGE_INSTRUCTIONS,
             kind="triage",
@@ -293,26 +396,39 @@ class TriageService:
     def _handle_plan(self, triage: Triage, proposed: Any) -> None:
         if not isinstance(proposed, dict) or not proposed:
             return
+        # Content only. `tier` is read separately by `_retier`, which allows an
+        # escalation and nothing else; every other field is platform state.
+        content = {key: proposed[key] for key in PLAN_CONTENT_FIELDS if key in proposed}
+        ignored = sorted(set(proposed) - set(PLAN_CONTENT_FIELDS) - {"tier"})
         try:
-            plan = ChangePlan.model_validate({**proposed, "proposed_by": "agent-triage"})
+            plan = ChangePlan.model_validate({**content, "proposed_by": "agent-triage"})
         except Exception as exc:
             triage.notes.append(f"The proposed plan was not a valid ChangePlan: {exc}")
             return
+        if ignored:
+            triage.notes.append(
+                "Ignored proposed plan fields the platform owns: " + ", ".join(ignored)
+            )
         self._retier(plan, _requested_tier(proposed))
+        if plan.tier is Tier.WINDOW:
+            # Always minted, never kept: a phrase the model chose is a phrase
+            # the model knows, and the phrase is half of the Tier 2 gate.
+            plan.confirmation_phrase = mint_confirmation_phrase()
+        try:
+            plan.transition(
+                ChangeState.dry_run,
+                "no executor wired yet (Phase 4); recorded so the plan can await approval",
+            )
+        except Exception as exc:  # pragma: no cover - a fresh plan is always `proposed`
+            triage.notes.append(f"Could not record the proposed plan: {exc}")
+            return
+        # Saved only once it is in a state the engine recognises, so a failure
+        # above never leaves a half-built plan in the store.
+        self.plans.save(plan)
         triage.proposed_plan = plan.llm_view()
         triage.plan_id = plan.id
         triage.plan_tier = int(plan.tier)
-        if plan.tier is Tier.WINDOW and not plan.confirmation_phrase:
-            plan.confirmation_phrase = "-".join(
-                secrets.choice(CONFIRMATION_WORDS) for _ in range(3)
-            )
-        self.plans.save(plan)
         try:
-            if plan.state is ChangeState.proposed:
-                plan.transition(
-                    ChangeState.dry_run,
-                    "no executor wired yet (Phase 4); recorded so the plan can await approval",
-                )
             token = self.plans.request_approval(plan)
         except Exception as exc:
             triage.notes.append(f"Could not request approval for {plan.id}: {exc}")
@@ -365,70 +481,144 @@ class TriageService:
             )
         triage.tier0_decisions.insert(0, self._apply_tier0(parsed[0], incident))
 
-    def _apply_tier0(self, candidate: Tier0Candidate, incident: Incident) -> Tier0Decision:
-        # Re-read the safety flags every time so a freeze between runs takes effect.
-        self.guard.frozen = self.settings.frozen
-        self.guard.shadow_mode = self.settings.tier0_shadow_mode
-        allowed, reason = self.guard.allow(
-            candidate.action, candidate.object_id, candidate.object_tags, candidate.cause
+    def object_tags(self, object_id: str) -> tuple[list[str], str | None]:
+        """The opt-in tags the *platform* holds for an object, or why it cannot say.
+
+        `object_id` is `device` or `device:port`; the device part is looked up
+        in the seed inventory (NetBox later). The model's own claim about the
+        tags is never consulted - that is the whole point of an opt-in tag.
+        """
+        device_name = object_id.split(":", 1)[0].strip()
+        if not device_name:
+            return [], f"{object_id!r} does not name an object"
+        try:
+            device = self._inventory().get(device_name)
+        except Exception as exc:
+            log.exception("could not read the inventory for %s", object_id)
+            return [], f"the inventory could not be read ({type(exc).__name__})"
+        if device is None:
+            return [], f"{device_name!r} is not a device in the inventory"
+        return list(device.tags), None
+
+    def _load_tier0_history(self) -> None:
+        """Replay the persisted Tier 0 history into the guard, once per process.
+
+        Without this a restart (or a crash loop) hands every object a fresh
+        cooldown and a fresh per-day retry cap.
+        """
+        if self._history_loaded:
+            return
+        self._history_loaded = True
+        try:
+            self.state.prune_tier0()
+            for action, object_id, at in self.state.tier0_history():
+                self.guard.record(action, object_id, now=at)
+        except Exception:
+            log.exception("could not restore the Tier 0 history; cooldowns start empty")
+
+    def _tier0_refusal(
+        self, candidate: Tier0Candidate, reason: str, tags: list[str], cause: str | None
+    ) -> Tier0Decision:
+        metrics.AGENT_TIER0_ACTIONS.labels(action=candidate.action, mode="refused").inc()
+        self.notifier.send(
+            f"Tier 0 refused: {candidate.action} on {candidate.object_id} ({reason})."
         )
+        return Tier0Decision(
+            action=candidate.action,
+            object_id=candidate.object_id,
+            allowed=False,
+            mode="refused",
+            reason=reason,
+            object_tags=tags,
+            cause=cause,
+        )
+
+    def _apply_tier0(self, candidate: Tier0Candidate, incident: Incident) -> Tier0Decision:
+        # The break-glass marker is re-read here and not only at start-up: the
+        # freeze has to stop the action this run is about to take.
+        frozen = refresh_frozen(self.settings)
+        self.guard.frozen = frozen
+        self.guard.shadow_mode = self.settings.tier0_shadow_mode
+        if frozen:
+            # `cause` stays None: the decision record carries what the platform
+            # established, and a frozen run establishes nothing.
+            return self._tier0_refusal(candidate, "platform is frozen (break-glass)", [], None)
+        policy = TIER0_POLICIES.get(candidate.action)
+        tags: list[str] = []
+        if policy is not None and policy.required_tag:
+            # Only an action with an opt-in tag needs the object to be one the
+            # platform knows: `alert.silence` and `discovery.rerun` are not
+            # inventory objects at all.
+            tags, problem = self.object_tags(candidate.object_id)
+            if problem is not None:
+                return self._tier0_refusal(candidate, problem, tags, None)
+        cause = derive_cause(candidate.action, incident)
+        with self._tier0_lock:
+            self._load_tier0_history()
+            allowed, reason = self.guard.allow(candidate.action, candidate.object_id, tags, cause)
+            if allowed:
+                # Cooldowns and retry caps must behave the same in shadow mode,
+                # otherwise a week of shadow proves nothing about live, and they
+                # are recorded before the action so a crash cannot retry it.
+                self.guard.record(candidate.action, candidate.object_id)
+                try:
+                    self.state.record_tier0(candidate.action, candidate.object_id)
+                except Exception:
+                    log.exception("could not persist the Tier 0 record for %s", candidate.action)
         if not allowed:
-            metrics.AGENT_TIER0_ACTIONS.labels(action=candidate.action, mode="refused").inc()
-            self.notifier.send(
-                f"Tier 0 refused: {candidate.action} on {candidate.object_id} ({reason})."
-            )
-            return Tier0Decision(
-                action=candidate.action,
-                object_id=candidate.object_id,
-                allowed=False,
-                mode="refused",
-                reason=reason,
-            )
-        # Cooldowns and retry caps must behave the same in shadow mode, otherwise
-        # a week of shadow proves nothing about the live behaviour.
-        self.guard.record(candidate.action, candidate.object_id)
+            return self._tier0_refusal(candidate, reason, tags, cause)
+        decision = Tier0Decision(
+            action=candidate.action,
+            object_id=candidate.object_id,
+            allowed=True,
+            mode="shadow",
+            reason=reason,
+            object_tags=tags,
+            cause=cause,
+        )
         if self.guard.shadow_mode:
             metrics.AGENT_TIER0_ACTIONS.labels(action=candidate.action, mode="shadow").inc()
             self.notifier.send(
                 f"Tier 0 (shadow): would have run {candidate.action} on "
                 f"{candidate.object_id} for {incident.title}. {candidate.rationale}".strip()
             )
-            return Tier0Decision(
-                action=candidate.action,
-                object_id=candidate.object_id,
-                allowed=True,
-                mode="shadow",
-                reason=reason,
-                executed=False,
-            )
+            return decision
         if self.tier0_executor is None:
             metrics.AGENT_TIER0_ACTIONS.labels(action=candidate.action, mode="unwired").inc()
             self.notifier.send(
                 f"Tier 0 allowed but no executor is wired for {candidate.action} "
                 f"on {candidate.object_id}; nothing was done."
             )
-            return Tier0Decision(
-                action=candidate.action,
-                object_id=candidate.object_id,
-                allowed=True,
-                mode="unwired",
-                reason="allowed, but no Tier 0 executor is wired yet",
-                executed=False,
+            return decision.model_copy(
+                update={
+                    "mode": "unwired",
+                    "reason": "allowed, but no Tier 0 executor is wired yet",
+                }
             )
-        outcome = self.tier0_executor(candidate, incident)
+        try:
+            outcome = self.tier0_executor(candidate, incident)
+        except Exception as exc:
+            # The cooldown slot is already spent, so the owner is told what was
+            # attempted and on what; swallowing this would leave a Tier 0 action
+            # that failed silently on a device.
+            log.exception(
+                "Tier 0 executor failed for %s on %s", candidate.action, candidate.object_id
+            )
+            metrics.AGENT_TIER0_ACTIONS.labels(action=candidate.action, mode="failed").inc()
+            self.notifier.send(
+                f"Tier 0 FAILED: {candidate.action} on {candidate.object_id} raised "
+                f"{type(exc).__name__}: {exc}. The object may be half-changed; check it.",
+                critical=True,
+            )
+            return decision.model_copy(
+                update={"mode": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+            )
         metrics.AGENT_TIER0_ACTIONS.labels(action=candidate.action, mode="live").inc()
         self.notifier.send(
             f"Tier 0 executed: {candidate.action} on {candidate.object_id} -> {outcome}",
             critical=True,
         )
-        return Tier0Decision(
-            action=candidate.action,
-            object_id=candidate.object_id,
-            allowed=True,
-            mode="live",
-            reason=outcome,
-            executed=True,
-        )
+        return decision.model_copy(update={"mode": "live", "reason": outcome, "executed": True})
 
     # -- presentation -------------------------------------------------------
     def summary(self, triage: Triage) -> str:
@@ -443,9 +633,12 @@ class TriageService:
             state = "awaiting your approval" if triage.approval_requested else "recorded"
             lines.append(f"ChangePlan {triage.plan_id} (tier {triage.plan_tier}) is {state}.")
         for decision in triage.tier0_decisions:
+            # The cause is the platform's reading of the alert, not the model's
+            # claim, so it belongs in what the owner is shown.
+            cause = f", cause {decision.cause}" if decision.cause else ""
             lines.append(
-                f"Tier 0 {decision.mode}: {decision.action} on {decision.object_id} "
-                f"({decision.reason})"
+                f"Tier 0 {decision.mode}: {decision.action} on {decision.object_id}"
+                f"{cause} ({decision.reason})"
             )
         lines.extend(triage.notes)
         return "\n".join(lines)

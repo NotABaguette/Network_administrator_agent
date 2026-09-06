@@ -39,6 +39,16 @@ STALE_SNAPSHOT_SECONDS = 3600
 DATASTORE_WARN_DAYS = 30
 DATASTORE_WARN_PERCENT = 15.0
 
+#: Collector health has to come from Prometheus, not from this process's own
+#: registry: `run_collector` sets these gauges inside the `infra-collectors`
+#: container (`deploy/docker-compose.yml`), so in the agent the families exist
+#: with no samples and a registry scan silently reports "nothing wrong".
+COLLECTOR_QUERIES: dict[str, str] = {
+    "last_success": "infra_collector_last_success_timestamp_seconds",
+    "errors_last_24h": "increase(infra_collector_errors_total[24h])",
+    "changes_last_run": "infra_snapshot_changes",
+}
+
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)+(?:\([0-9a-zA-Z]+\))?[0-9a-zA-Z.]*)")
 
 #: Where each collector tends to record the running firmware version.
@@ -168,7 +178,7 @@ class Duties:
         plan_store: PlanStore | None = None,
         config_store: ConfigGitStore | None = None,
         inventory: Callable[[], SeedInventory] | None = None,
-        registry: Any | None = None,
+        metrics_query: Callable[[str], dict[str, Any]] | None = None,
         known_good: dict[str, Any] | None = None,
         drift_provider: Callable[[], dict[str, Any]] | None = None,
         heartbeat_url_provider: Callable[[], str | None] | None = None,
@@ -182,8 +192,10 @@ class Duties:
         self.plans = plan_store or PlanStore(self.settings.data_dir / "plans.db")
         self.configs = config_store or ConfigGitStore(self.settings.config_repo)
         self._inventory = inventory or (lambda: SeedInventory.load(self.settings.seed_inventory))
-        self._registry = registry
-        self.known_good = known_good if known_good is not None else load_known_good()
+        self._metrics_query = metrics_query
+        #: An explicit list pins the baseline (tests); otherwise the maintained
+        #: YAML is re-read on every run, which is what "maintained" implies.
+        self._known_good = known_good
         self.drift_provider = drift_provider
         self.heartbeat_url_provider = heartbeat_url_provider
         self._now = now or (lambda: datetime.now(UTC))
@@ -192,12 +204,23 @@ class Duties:
     def devices(self) -> list[SeedDevice]:
         return list(self._inventory().devices)
 
-    def registry(self) -> Any:
-        if self._registry is None:
-            from prometheus_client import REGISTRY
+    def metrics_query(self, query: str) -> dict[str, Any]:
+        """One instant PromQL query, through the same tool the model uses."""
+        if self._metrics_query is not None:
+            return self._metrics_query(query)
+        from infra_agent.tools import observability_tools
 
-            self._registry = REGISTRY
-        return self._registry
+        return observability_tools.promql(query=query)
+
+    def known_good(self) -> dict[str, Any]:
+        """The maintained known-good firmware list, re-read on every run."""
+        if self._known_good is not None:
+            return self._known_good
+        try:
+            return load_known_good()
+        except Exception:
+            log.exception("could not read %s", KNOWN_GOOD_VERSIONS)
+            return {}
 
     def latest(self, device: SeedDevice) -> Any:
         for collector in (device.platform, device.kind.value):
@@ -212,41 +235,61 @@ class Duties:
         return result
 
     # -- context builders ---------------------------------------------------
-    def collector_health(self) -> list[dict[str, Any]]:
-        """Freshness and error counts straight out of the collectors' own metrics."""
+    def collector_health(self) -> dict[str, Any]:
+        """Freshness and error counts of the collectors, out of Prometheus.
+
+        A silence here is never reported as health: if Prometheus cannot be
+        reached, or has no `infra_collector_*` series at all, the digest says
+        so. A stale collector is an incident in itself
+        (`docs/architecture.md`), and so is not knowing.
+        """
         now = self._now().timestamp()
-        last_success: dict[tuple[str, str], float] = {}
-        errors: dict[tuple[str, str], float] = {}
-        changes: dict[tuple[str, str], float] = {}
-        try:
-            families = list(self.registry().collect())
-        except Exception:
-            log.exception("could not read the metrics registry")
-            return []
-        for family in families:
-            for sample in family.samples:
-                key = (sample.labels.get("collector", ""), sample.labels.get("device", ""))
-                if sample.name == "infra_collector_last_success_timestamp_seconds":
-                    last_success[key] = sample.value
-                elif sample.name == "infra_collector_errors_total":
-                    errors[key] = sample.value
-                elif sample.name == "infra_snapshot_changes":
-                    changes[key] = sample.value
+        series: dict[str, dict[tuple[str, str], float]] = {}
+        for name, query in COLLECTOR_QUERIES.items():
+            try:
+                answer = self.metrics_query(query)
+            except Exception as exc:
+                log.exception("collector health query %r failed", query)
+                return self._collector_health_unavailable(f"{type(exc).__name__}: {exc}", query)
+            if not isinstance(answer, dict) or answer.get("error"):
+                reason = str((answer or {}).get("error", "no answer from Prometheus"))
+                return self._collector_health_unavailable(reason, query)
+            series[name] = _samples_by_collector(answer)
+        keys = sorted(set().union(*(s.keys() for s in series.values())) if series else set())
         rows = []
-        for key in sorted(set(last_success) | set(errors) | set(changes)):
+        for key in keys:
             collector, device = key
-            success = last_success.get(key)
+            success = series.get("last_success", {}).get(key)
             rows.append(
                 {
                     "collector": collector,
                     "device": device,
                     "age_seconds": int(now - success) if success else None,
                     "stale": success is None or (now - success) > STALE_SNAPSHOT_SECONDS,
-                    "errors_total": int(errors.get(key, 0)),
-                    "changes_last_run": int(changes.get(key, 0)),
+                    "errors_last_24h": round(series.get("errors_last_24h", {}).get(key, 0.0), 2),
+                    "changes_last_run": int(series.get("changes_last_run", {}).get(key, 0.0)),
                 }
             )
-        return rows
+        if not rows:
+            return {
+                "available": False,
+                "source": "prometheus",
+                "reason": (
+                    "Prometheus has no infra_collector_* series: the collectors have not "
+                    "reported since its retention window, or are not being scraped"
+                ),
+                "collectors": [],
+            }
+        return {"available": True, "source": "prometheus", "collectors": rows}
+
+    @staticmethod
+    def _collector_health_unavailable(reason: str, query: str) -> dict[str, Any]:
+        return {
+            "available": False,
+            "source": "prometheus",
+            "reason": f"could not query Prometheus ({reason}); query was {query!r}",
+            "collectors": [],
+        }
 
     def snapshot_ages(self) -> list[dict[str, Any]]:
         now = self._now()
@@ -478,11 +521,12 @@ class Duties:
 
     def firmware_versions(self) -> list[dict[str, Any]]:
         """Observed firmware per device against the maintained known-good list."""
+        known_good = self.known_good()
         rows: list[dict[str, Any]] = []
         for device in self.devices():
             snapshot = self.latest(device)
             observed = extract_version(snapshot.data) if snapshot else None
-            baseline = self.known_good.get(device.kind.value) or {}
+            baseline = known_good.get(device.kind.value) or {}
             good = [str(v) for v in baseline.get("known_good") or []]
             minimum = baseline.get("minimum")
             if observed is None:
@@ -576,7 +620,13 @@ class Duties:
 
     # -- scheduling ---------------------------------------------------------
     def register(self, scheduler: Any) -> Any:
-        """Add every duty to an APScheduler scheduler. Times are the owner's mornings."""
+        """Add every duty to an APScheduler scheduler.
+
+        The times are the owner's mornings, which means the scheduler has to be
+        built in the owner's timezone (`infra_agent.agent.service.scheduler_timezone`,
+        from `INFRA_AGENT_TIMEZONE` or `TZ`) - 07:30 UTC is not a morning
+        everywhere.
+        """
         scheduler.add_job(self.daily_digest, "cron", hour=7, minute=30, id="daily-digest")
         scheduler.add_job(
             self.weekly_report, "cron", day_of_week="mon", hour=8, minute=0, id="weekly-report"
@@ -591,6 +641,24 @@ class Duties:
         )
         scheduler.add_job(self.heartbeat, "interval", minutes=5, id="heartbeat")
         return scheduler
+
+
+def _samples_by_collector(answer: dict[str, Any]) -> dict[tuple[str, str], float]:
+    """`metrics.promql` rows keyed by (collector, device), values as floats."""
+    samples: dict[tuple[str, str], float] = {}
+    for row in answer.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        labels = row.get("labels") or {}
+        key = (str(labels.get("collector", "")), str(labels.get("device", "")))
+        value = row.get("value")
+        if value is None:
+            continue
+        try:
+            samples[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return samples
 
 
 def _parse_time(value: Any) -> datetime | None:
