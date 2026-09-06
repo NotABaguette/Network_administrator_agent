@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 LABELS = ["collector", "device"]
@@ -134,3 +136,76 @@ ILO_CONTROLLER_HEALTH = Gauge(
 ILO_ACTIVE_FAULTS = Gauge(
     "infra_ilo_active_faults", "Unrepaired IML entries above informational severity", ["device"]
 )
+CONFIG_BACKUP_ERRORS = Counter(
+    "infra_config_backup_errors_total",
+    "Config backup attempts that failed (the collector run itself still succeeded)",
+    LABELS,
+)
+
+ESXI_VM_EXPECTED_ON = Gauge(
+    "infra_esxi_vm_expected_on",
+    "1 when the VM is meant to be running (not a template, not deliberately parked)",
+    ["device", "vm"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Per-object gauge bookkeeping.
+#
+# A VM that is unregistered, a datastore that is unmounted and a drive that is
+# pulled for RMA must lose their series, otherwise the gauge keeps its last
+# value forever and the alert built on it can never resolve. Collectors record
+# what they published for a device through `DeviceSeries` and sweep the rest.
+# ---------------------------------------------------------------------------
+class SeriesRun:
+    """One `publish_metrics` call: sets gauges and remembers the label tuples."""
+
+    def __init__(self, owner: DeviceSeries, device: str) -> None:
+        self._owner = owner
+        self._device = device
+        self._seen: dict[str, tuple[Gauge, set[tuple[str, ...]]]] = {}
+
+    def set(self, gauge: Gauge, value: float, **labels: str) -> None:
+        gauge.labels(**labels).set(value)
+        key = tuple(str(labels[name]) for name in gauge._labelnames)
+        self._seen.setdefault(gauge._name, (gauge, set()))[1].add(key)
+
+    def sweep(self, skip: Iterable[Gauge] = ()) -> list[tuple[str, tuple[str, ...]]]:
+        """Drop the series this device published before but not in this run.
+
+        `skip` names gauges whose source section failed this run: absent rows
+        there mean "not collected", not "gone", so their series are kept.
+        """
+        spared = {gauge._name for gauge in skip}
+        previous = self._owner.published.get(self._device, {})
+        removed: list[tuple[str, tuple[str, ...]]] = []
+        for name, (gauge, keys) in previous.items():
+            if name in spared:
+                continue
+            for key in keys - self._seen.get(name, (gauge, set()))[1]:
+                try:
+                    gauge.remove(*key)
+                except KeyError:  # already gone; nothing to do
+                    pass
+                removed.append((name, key))
+        merged: dict[str, tuple[Gauge, set[tuple[str, ...]]]] = dict(self._seen)
+        for name, (gauge, keys) in previous.items():
+            if name in spared and name not in merged:
+                merged[name] = (gauge, set(keys))
+            elif name in spared:
+                merged[name][1].update(keys)
+        self._owner.published[self._device] = merged
+        return removed
+
+
+class DeviceSeries:
+    """Per-collector memory of the label tuples each device published."""
+
+    def __init__(self) -> None:
+        self.published: dict[str, dict[str, tuple[Gauge, set[tuple[str, ...]]]]] = {}
+
+    def run(self, device: str) -> SeriesRun:
+        return SeriesRun(self, device)
+
+    def forget(self, device: str) -> None:
+        self.published.pop(device, None)

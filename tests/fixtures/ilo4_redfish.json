@@ -1,6 +1,5 @@
 {
-  "_comment": "Recorded Redfish responses from an HPE ProLiant DL380 Gen9 with iLO 4 v2.82 (Redfish 1.0.0). Keys are request paths. Serials, MACs, UUIDs and licence keys are made up. Note the iLO4-isms: Oem/Hp, Processors/Memory as summary objects rather than links, links.Member collections, MacAddress with a lowercase a, CurrentReading instead of ReadingCelsius, a Current firmware map, and no /redfish/v1/UpdateService/FirmwareInventory at all.",
-
+  "_comment": "Recorded Redfish responses from an HPE ProLiant DL380 Gen9 with iLO 4 v2.82 (Redfish 1.0.0). Keys are request paths. Serials, MACs, UUIDs and licence keys are made up. Note the iLO4-isms: Oem/Hp; Processors/Memory as summary objects rather than links; collections that carry the same members twice, as Redfish Members and as legacy links.Member with /rest/v1 hrefs; the Smart Array controller linking its drives as Links/PhysicalDrives (and legacy links/PhysicalDrives) whose URL segment is DiskDrives; MacAddress with a lowercase a; CurrentReading instead of ReadingCelsius; IML entries expanded inline under Items; a Current firmware map; and no /redfish/v1/UpdateService/FirmwareInventory at all.",
   "/redfish/v1/": {
     "@odata.id": "/redfish/v1/",
     "@odata.type": "#ServiceRoot.1.0.0.ServiceRoot",
@@ -9,11 +8,21 @@
     "RedfishVersion": "1.0.0",
     "ServiceVersion": "1.0.0",
     "UUID": "8dea7372-23f9-565f-9396-2cd07febbe29",
-    "AccountService": { "@odata.id": "/redfish/v1/AccountService/" },
-    "Chassis": { "@odata.id": "/redfish/v1/Chassis/" },
-    "Managers": { "@odata.id": "/redfish/v1/Managers/" },
-    "SessionService": { "@odata.id": "/redfish/v1/SessionService/" },
-    "Systems": { "@odata.id": "/redfish/v1/Systems/" },
+    "AccountService": {
+      "@odata.id": "/redfish/v1/AccountService/"
+    },
+    "Chassis": {
+      "@odata.id": "/redfish/v1/Chassis/"
+    },
+    "Managers": {
+      "@odata.id": "/redfish/v1/Managers/"
+    },
+    "SessionService": {
+      "@odata.id": "/redfish/v1/SessionService/"
+    },
+    "Systems": {
+      "@odata.id": "/redfish/v1/Systems/"
+    },
     "Oem": {
       "Hp": {
         "Type": "HpRestServiceExt.1.0.0.HpRestServiceExt",
@@ -27,7 +36,6 @@
       }
     }
   },
-
   "/redfish/v1/Systems/1": {
     "@odata.id": "/redfish/v1/Systems/1/",
     "@odata.type": "#ComputerSystem.1.0.1.ComputerSystem",
@@ -45,17 +53,26 @@
     "SystemType": "Physical",
     "UUID": "31313131-3131-4331-5A33-343231414230",
     "PowerState": "On",
-    "Status": { "Health": "OK", "State": "Enabled" },
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
     "Memory": {
-      "Status": { "HealthRollUp": "OK" },
+      "Status": {
+        "HealthRollUp": "OK"
+      },
       "TotalSystemMemoryGB": 128
     },
     "Processors": {
       "Count": 2,
       "ProcessorFamily": "Intel(R) Xeon(R) CPU E5-2650 v4 @ 2.20GHz",
-      "Status": { "HealthRollUp": "OK" }
+      "Status": {
+        "HealthRollUp": "OK"
+      }
     },
-    "LogServices": { "@odata.id": "/redfish/v1/Systems/1/LogServices/" },
+    "LogServices": {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/"
+    },
     "Oem": {
       "Hp": {
         "Type": "HpComputerSystemExt.1.1.0.HpComputerSystemExt",
@@ -63,8 +80,16 @@
         "PowerAutoOn": "PowerOn",
         "PowerRegulatorMode": "Dynamic",
         "Bios": {
-          "Backup": { "Date": "05/21/2018", "Family": "P89", "VersionString": "P89 v2.60" },
-          "Current": { "Date": "10/21/2019", "Family": "P89", "VersionString": "P89 v2.76" }
+          "Backup": {
+            "Date": "05/21/2018",
+            "Family": "P89",
+            "VersionString": "P89 v2.60"
+          },
+          "Current": {
+            "Date": "10/21/2019",
+            "Family": "P89",
+            "VersionString": "P89 v2.76"
+          }
         },
         "DeviceDiscoveryComplete": {
           "AMSDeviceDiscovery": "NoAMS",
@@ -73,32 +98,75 @@
         },
         "AggregateHealthStatus": {
           "AgentlessManagementService": "Unavailable",
-          "BiosOrHardwareHealth": { "Status": { "Health": "OK" } },
+          "BiosOrHardwareHealth": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
           "FanRedundancy": "Redundant",
-          "Fans": { "Status": { "Health": "OK" } },
-          "Memory": { "Status": { "Health": "OK" } },
-          "Network": { "Status": { "Health": "OK" } },
+          "Fans": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Memory": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Network": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
           "PowerSupplies": {
             "PowerSuppliesMismatch": false,
-            "Status": { "Health": "Warning" }
+            "Status": {
+              "Health": "Warning"
+            }
           },
           "PowerSupplyRedundancy": "Failed",
-          "Processors": { "Status": { "Health": "OK" } },
-          "Storage": { "Status": { "Health": "Warning" } },
-          "Temperatures": { "Status": { "Health": "OK" } }
+          "Processors": {
+            "Status": {
+              "Health": "OK"
+            }
+          },
+          "Storage": {
+            "Status": {
+              "Health": "Warning"
+            }
+          },
+          "Temperatures": {
+            "Status": {
+              "Health": "OK"
+            }
+          }
         },
         "Links": {
-          "EthernetInterfaces": { "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/" },
-          "FirmwareInventory": { "@odata.id": "/redfish/v1/Systems/1/FirmwareInventory/" },
-          "Memory": { "@odata.id": "/redfish/v1/Systems/1/Memory/" },
-          "PCIDevices": { "@odata.id": "/redfish/v1/Systems/1/PCIDevices/" },
-          "SmartStorage": { "@odata.id": "/redfish/v1/Systems/1/SmartStorage/" }
+          "EthernetInterfaces": {
+            "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/"
+          },
+          "FirmwareInventory": {
+            "@odata.id": "/redfish/v1/Systems/1/FirmwareInventory/"
+          },
+          "Memory": {
+            "@odata.id": "/redfish/v1/Systems/1/Memory/"
+          },
+          "PCIDevices": {
+            "@odata.id": "/redfish/v1/Systems/1/PCIDevices/"
+          },
+          "SmartStorage": {
+            "@odata.id": "/redfish/v1/Systems/1/SmartStorage/"
+          }
         }
       }
     },
-    "links": { "self": { "href": "/redfish/v1/Systems/1/" } }
+    "links": {
+      "self": {
+        "href": "/redfish/v1/Systems/1/"
+      }
+    }
   },
-
   "/redfish/v1/Managers/1": {
     "@odata.id": "/redfish/v1/Managers/1/",
     "@odata.type": "#Manager.1.0.0.Manager",
@@ -109,8 +177,13 @@
     "Model": "iLO 4",
     "FirmwareVersion": "iLO 4 v2.82",
     "UUID": "c5d5a4b0-1111-5cbb-9d6a-1c98ec1b0000",
-    "Status": { "Health": "OK", "State": "Enabled" },
-    "EthernetInterfaces": { "@odata.id": "/redfish/v1/Managers/1/EthernetInterfaces/" },
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "EthernetInterfaces": {
+      "@odata.id": "/redfish/v1/Managers/1/EthernetInterfaces/"
+    },
     "Oem": {
       "Hp": {
         "Type": "HpiLO.1.1.0.HpiLO",
@@ -122,7 +195,6 @@
       }
     }
   },
-
   "/redfish/v1/Chassis/1": {
     "@odata.id": "/redfish/v1/Chassis/1/",
     "Id": "1",
@@ -132,11 +204,17 @@
     "Model": "ProLiant DL380 Gen9",
     "SKU": "719064-B21",
     "SerialNumber": "CZ3421AB01",
-    "Status": { "Health": "OK", "State": "Enabled" },
-    "Power": { "@odata.id": "/redfish/v1/Chassis/1/Power/" },
-    "Thermal": { "@odata.id": "/redfish/v1/Chassis/1/Thermal/" }
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "Power": {
+      "@odata.id": "/redfish/v1/Chassis/1/Power/"
+    },
+    "Thermal": {
+      "@odata.id": "/redfish/v1/Chassis/1/Thermal/"
+    }
   },
-
   "/redfish/v1/Chassis/1/Thermal": {
     "@odata.id": "/redfish/v1/Chassis/1/Thermal/",
     "Id": "Thermal",
@@ -146,22 +224,45 @@
         "FanName": "Fan 1",
         "CurrentReading": 22,
         "Units": "Percent",
-        "Status": { "Health": "OK", "State": "Enabled" },
-        "Oem": { "Hp": { "Location": "System", "HotPluggable": true } }
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hp": {
+            "Location": "System",
+            "HotPluggable": true
+          }
+        }
       },
       {
         "FanName": "Fan 2",
         "CurrentReading": 24,
         "Units": "Percent",
-        "Status": { "Health": "OK", "State": "Enabled" },
-        "Oem": { "Hp": { "Location": "System", "HotPluggable": true } }
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hp": {
+            "Location": "System",
+            "HotPluggable": true
+          }
+        }
       },
       {
         "FanName": "Fan 3",
         "CurrentReading": 0,
         "Units": "Percent",
-        "Status": { "State": "Absent" },
-        "Oem": { "Hp": { "Location": "System", "HotPluggable": true } }
+        "Status": {
+          "State": "Absent"
+        },
+        "Oem": {
+          "Hp": {
+            "Location": "System",
+            "HotPluggable": true
+          }
+        }
       }
     ],
     "Temperatures": [
@@ -173,7 +274,10 @@
         "Units": "Celsius",
         "UpperThresholdCritical": 42,
         "UpperThresholdFatal": 46,
-        "Status": { "Health": "OK", "State": "Enabled" }
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        }
       },
       {
         "Name": "04-P1 DIMM 1-6",
@@ -183,7 +287,10 @@
         "Units": "Celsius",
         "UpperThresholdCritical": 87,
         "UpperThresholdFatal": 92,
-        "Status": { "Health": "OK", "State": "Enabled" }
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        }
       },
       {
         "Name": "14-Chipset",
@@ -193,11 +300,12 @@
         "Units": "Celsius",
         "UpperThresholdCritical": null,
         "UpperThresholdFatal": null,
-        "Status": { "State": "Absent" }
+        "Status": {
+          "State": "Absent"
+        }
       }
     ]
   },
-
   "/redfish/v1/Chassis/1/Power": {
     "@odata.id": "/redfish/v1/Chassis/1/Power/",
     "Id": "Power",
@@ -227,8 +335,16 @@
         "LastPowerOutputWatts": 92,
         "LineInputVoltage": 231,
         "LineInputVoltageType": "ACHighLine",
-        "Status": { "Health": "OK", "State": "Enabled" },
-        "Oem": { "Hp": { "BayNumber": 1, "HotplugCapable": true } }
+        "Status": {
+          "Health": "OK",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hp": {
+            "BayNumber": 1,
+            "HotplugCapable": true
+          }
+        }
       },
       {
         "Name": "HpServerPowerSupply",
@@ -240,20 +356,44 @@
         "LastPowerOutputWatts": 0,
         "LineInputVoltage": 0,
         "LineInputVoltageType": "Unknown",
-        "Status": { "Health": "Warning", "State": "Enabled" },
-        "Oem": { "Hp": { "BayNumber": 2, "HotplugCapable": true } }
+        "Status": {
+          "Health": "Warning",
+          "State": "Enabled"
+        },
+        "Oem": {
+          "Hp": {
+            "BayNumber": 2,
+            "HotplugCapable": true
+          }
+        }
       }
     ]
   },
-
   "/redfish/v1/Systems/1/Processors/": {
     "@odata.id": "/redfish/v1/Systems/1/Processors/",
     "Name": "Processors Collection",
     "Members@odata.count": 2,
     "Members": [
-      { "@odata.id": "/redfish/v1/Systems/1/Processors/1/" },
-      { "@odata.id": "/redfish/v1/Systems/1/Processors/2/" }
-    ]
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Processors/1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Processors/2/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/Processors/1"
+        },
+        {
+          "href": "/rest/v1/Systems/1/Processors/2"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/Processors"
+      }
+    }
   },
   "/redfish/v1/Systems/1/Processors/1/": {
     "@odata.id": "/redfish/v1/Systems/1/Processors/1/",
@@ -267,7 +407,10 @@
     "ProcessorType": "CPU",
     "TotalCores": 12,
     "TotalThreads": 24,
-    "Status": { "Health": "OK", "State": "Enabled" }
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
   },
   "/redfish/v1/Systems/1/Processors/2/": {
     "@odata.id": "/redfish/v1/Systems/1/Processors/2/",
@@ -281,22 +424,43 @@
     "ProcessorType": "CPU",
     "TotalCores": 12,
     "TotalThreads": 24,
-    "Status": { "Health": "OK", "State": "Enabled" }
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
   },
-
   "/redfish/v1/Systems/1/Memory/": {
     "@odata.id": "/redfish/v1/Systems/1/Memory/",
     "Name": "Memory DIMM Collection",
     "Type": "Collection.0.9.5",
-    "Total": 3,
     "links": {
       "Member": [
-        { "href": "/redfish/v1/Systems/1/Memory/proc1dimm1/" },
-        { "href": "/redfish/v1/Systems/1/Memory/proc1dimm4/" },
-        { "href": "/redfish/v1/Systems/1/Memory/proc1dimm2/" }
+        {
+          "href": "/rest/v1/Systems/1/Memory/proc1dimm1"
+        },
+        {
+          "href": "/rest/v1/Systems/1/Memory/proc1dimm4"
+        },
+        {
+          "href": "/rest/v1/Systems/1/Memory/proc1dimm2"
+        }
       ],
-      "self": { "href": "/redfish/v1/Systems/1/Memory/" }
-    }
+      "self": {
+        "href": "/rest/v1/Systems/1/Memory"
+      }
+    },
+    "Members@odata.count": 3,
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm4/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm2/"
+      }
+    ]
   },
   "/redfish/v1/Systems/1/Memory/proc1dimm1/": {
     "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm1/",
@@ -311,7 +475,10 @@
     "PartNumber": "809208-091      ",
     "Rank": 2,
     "SocketLocator": "PROC 1 DIMM 1",
-    "Status": { "Health": "OK", "State": "Enabled" }
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
   },
   "/redfish/v1/Systems/1/Memory/proc1dimm4/": {
     "@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm4/",
@@ -335,15 +502,31 @@
     "SizeMB": 0,
     "SocketLocator": "PROC 1 DIMM 2"
   },
-
   "/redfish/v1/Systems/1/EthernetInterfaces/": {
     "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/",
     "Name": "Ethernet Interface Collection",
     "Members@odata.count": 2,
     "Members": [
-      { "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/1/" },
-      { "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/2/" }
-    ]
+      {
+        "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/1/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/2/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/EthernetInterfaces/1"
+        },
+        {
+          "href": "/rest/v1/Systems/1/EthernetInterfaces/2"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/EthernetInterfaces"
+      }
+    }
   },
   "/redfish/v1/Systems/1/EthernetInterfaces/1/": {
     "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/1/",
@@ -353,8 +536,16 @@
     "FullDuplex": true,
     "MacAddress": "38:63:BB:3F:5A:10",
     "SpeedMbps": 1000,
-    "Status": { "Health": "OK", "State": "Enabled" },
-    "Oem": { "Hp": { "BadReceives": 0, "GoodTransmits": 152344 } }
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    },
+    "Oem": {
+      "Hp": {
+        "BadReceives": 0,
+        "GoodTransmits": 152344
+      }
+    }
   },
   "/redfish/v1/Systems/1/EthernetInterfaces/2/": {
     "@odata.id": "/redfish/v1/Systems/1/EthernetInterfaces/2/",
@@ -364,10 +555,17 @@
     "FullDuplex": false,
     "MacAddress": "38:63:BB:3F:5A:11",
     "SpeedMbps": 0,
-    "Status": { "Health": "OK", "State": "Disabled" },
-    "Oem": { "Hp": { "BadReceives": 0, "GoodTransmits": 0 } }
+    "Status": {
+      "Health": "OK",
+      "State": "Disabled"
+    },
+    "Oem": {
+      "Hp": {
+        "BadReceives": 0,
+        "GoodTransmits": 0
+      }
+    }
   },
-
   "/redfish/v1/Systems/1/FirmwareInventory/": {
     "@odata.id": "/redfish/v1/Systems/1/FirmwareInventory/",
     "Id": "FirmwareInventory",
@@ -375,7 +573,11 @@
     "Type": "HpServerFirmwareInventory.1.0.0",
     "Current": {
       "SystemBMC": [
-        { "Location": "System Board", "Name": "iLO", "VersionString": "2.82 Dec 07 2023" }
+        {
+          "Location": "System Board",
+          "Name": "iLO",
+          "VersionString": "2.82 Dec 07 2023"
+        }
       ],
       "SystemRomActive": [
         {
@@ -392,7 +594,11 @@
         }
       ],
       "SmartArray": [
-        { "Location": "Slot 0", "Name": "Smart Array P440ar Controller", "VersionString": "6.30" }
+        {
+          "Location": "Slot 0",
+          "Name": "Smart Array P440ar Controller",
+          "VersionString": "6.30"
+        }
       ],
       "IntelligentProvisioning": [
         {
@@ -403,22 +609,52 @@
       ]
     }
   },
-
   "/redfish/v1/Systems/1/SmartStorage/": {
     "@odata.id": "/redfish/v1/Systems/1/SmartStorage/",
     "Id": "SmartStorage",
     "Name": "HP Smart Storage",
-    "Status": { "Health": "Warning" },
+    "Status": {
+      "Health": "Warning"
+    },
     "Links": {
-      "ArrayControllers": { "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/" },
-      "HostBusAdapters": { "@odata.id": "/redfish/v1/Systems/1/SmartStorage/HostBusAdapters/" }
+      "ArrayControllers": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+      },
+      "HostBusAdapters": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/HostBusAdapters/"
+      }
+    },
+    "links": {
+      "ArrayControllers": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers"
+      },
+      "HostBusAdapters": {
+        "href": "/rest/v1/Systems/1/SmartStorage/HostBusAdapters"
+      },
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage"
+      }
     }
   },
   "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/": {
     "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/",
     "Name": "HpSmartStorageArrayControllers",
     "Members@odata.count": 1,
-    "Members": [{ "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/" }]
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers"
+      }
+    }
   },
   "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/": {
     "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/",
@@ -429,17 +665,44 @@
     "Location": "Slot 0",
     "CacheMemorySizeMiB": 2048,
     "EncryptionEnabled": false,
-    "FirmwareVersion": { "Current": { "VersionString": "6.30" } },
-    "Status": { "Health": "Warning", "State": "Enabled" },
+    "FirmwareVersion": {
+      "Current": {
+        "VersionString": "6.30"
+      }
+    },
+    "Status": {
+      "Health": "Warning",
+      "State": "Enabled"
+    },
     "Links": {
       "LogicalDrives": {
         "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/"
       },
-      "DiskDrives": {
+      "PhysicalDrives": {
         "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/"
       },
       "StorageEnclosures": {
         "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/StorageEnclosures/"
+      },
+      "UnconfiguredDrives": {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/UnconfiguredDrives/"
+      }
+    },
+    "links": {
+      "LogicalDrives": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives"
+      },
+      "PhysicalDrives": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives"
+      },
+      "StorageEnclosures": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/StorageEnclosures"
+      },
+      "UnconfiguredDrives": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/UnconfiguredDrives"
+      },
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0"
       }
     }
   },
@@ -448,8 +711,20 @@
     "Name": "HpSmartStorageLogicalDrives",
     "Members@odata.count": 1,
     "Members": [
-      { "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/" }
-    ]
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives"
+      }
+    }
   },
   "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/": {
     "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/",
@@ -462,10 +737,21 @@
     "Raid": "1",
     "StripeSizeBytes": 262144,
     "VolumeUniqueIdentifier": "600508B1001C1E1F2A3B4C5D6E7F8090",
-    "Status": { "Health": "Warning", "State": "Enabled" },
+    "Status": {
+      "Health": "Warning",
+      "State": "Enabled"
+    },
     "Links": {
       "DataDrives": {
         "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives/"
+      }
+    },
+    "links": {
+      "DataDrives": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives"
+      },
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1"
       }
     }
   },
@@ -474,18 +760,52 @@
     "Name": "HpSmartStorageDiskDrives",
     "Members@odata.count": 2,
     "Members": [
-      { "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/" },
-      { "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/" }
-    ]
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0"
+        },
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/LogicalDrives/1/DataDrives"
+      }
+    }
   },
   "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/": {
     "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/",
     "Name": "HpSmartStorageDiskDrives",
     "Members@odata.count": 2,
     "Members": [
-      { "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/" },
-      { "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/" }
-    ]
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/"
+      },
+      {
+        "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/"
+      }
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0"
+        },
+        {
+          "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives"
+      }
+    }
   },
   "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/": {
     "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/",
@@ -499,8 +819,15 @@
     "SerialNumber": "KZG8AB0001      ",
     "RotationalSpeedRpm": 10000,
     "PowerOnHours": 41235,
-    "FirmwareVersion": { "Current": { "VersionString": "HPD4" } },
-    "Status": { "Health": "OK", "State": "Enabled" }
+    "FirmwareVersion": {
+      "Current": {
+        "VersionString": "HPD4"
+      }
+    },
+    "Status": {
+      "Health": "OK",
+      "State": "Enabled"
+    }
   },
   "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/": {
     "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/",
@@ -514,22 +841,34 @@
     "SerialNumber": "KZG8AB0002      ",
     "RotationalSpeedRpm": 10000,
     "PowerOnHours": 41230,
-    "FirmwareVersion": { "Current": { "VersionString": "HPD4" } },
-    "Status": { "Health": "Warning", "State": "Enabled" }
+    "FirmwareVersion": {
+      "Current": {
+        "VersionString": "HPD4"
+      }
+    },
+    "Status": {
+      "Health": "Warning",
+      "State": "Enabled"
+    }
   },
-
   "/redfish/v1/Systems/1/LogServices/": {
     "@odata.id": "/redfish/v1/Systems/1/LogServices/",
     "Name": "Log Service Collection",
     "Members@odata.count": 1,
-    "Members": [{ "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/" }]
+    "Members": [
+      {
+        "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/"
+      }
+    ]
   },
   "/redfish/v1/Systems/1/LogServices/IML/": {
     "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/",
     "Id": "IML",
     "Name": "Integrated Management Log",
     "OverWritePolicy": "WrapsWhenFull",
-    "Entries": { "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/" }
+    "Entries": {
+      "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/"
+    }
   },
   "/redfish/v1/Systems/1/LogServices/IML/Entries/": {
     "@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/",
@@ -545,7 +884,9 @@
         "Severity": "OK",
         "Oem": {
           "Hp": {
-            "Categories": ["Maintenance"],
+            "Categories": [
+              "Maintenance"
+            ],
             "Class": 33,
             "Code": 1,
             "Count": 1,
@@ -564,7 +905,9 @@
         "Severity": "Warning",
         "Oem": {
           "Hp": {
-            "Categories": ["Power"],
+            "Categories": [
+              "Power"
+            ],
             "Class": 4,
             "Code": 2,
             "Count": 1,
@@ -584,7 +927,9 @@
         "Severity": "Critical",
         "Oem": {
           "Hp": {
-            "Categories": ["Storage"],
+            "Categories": [
+              "Storage"
+            ],
             "Class": 3,
             "Code": 2,
             "Count": 1,
@@ -595,6 +940,22 @@
           }
         }
       }
-    ]
+    ],
+    "links": {
+      "Member": [
+        {
+          "href": "/rest/v1/Systems/1/LogServices/IML/Entries/1"
+        },
+        {
+          "href": "/rest/v1/Systems/1/LogServices/IML/Entries/7"
+        },
+        {
+          "href": "/rest/v1/Systems/1/LogServices/IML/Entries/9"
+        }
+      ],
+      "self": {
+        "href": "/rest/v1/Systems/1/LogServices/IML/Entries"
+      }
+    }
   }
 }

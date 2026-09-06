@@ -11,9 +11,14 @@ at the end. Basic auth is only the fallback when session login is refused.
 Generation differences the code absorbs:
 
 * iLO4 puts its extensions under `Oem/Hp`, iLO5 and iLO6 under `Oem/Hpe`.
-* Smart Array lives under `Systems/1/SmartStorage/...` on both, but iLO5/6 also
-  publish the standard `Systems/1/Storage` collection, which is used when
-  SmartStorage is absent.
+* Smart Array lives under `Systems/1/SmartStorage/...` on both. The array
+  controller links its drives as `Links/PhysicalDrives` (whose URL segment is
+  `DiskDrives`), and iLO4 repeats the same link in a legacy lowercase `links`
+  block with a `/rest/v1` `href`. iLO5/6 also publish the standard
+  `Systems/1/Storage` collection, used when SmartStorage yields no drives.
+* iLO4 collections carry the same members twice, as Redfish `Members` and as
+  RIS `links.Member`; they are de-duplicated so nothing is fetched or stored
+  twice on the slowest, session-limited box in the estate (ADR 0004).
 * iLO4 firmware is a single `Current` document, iLO5+ a proper
   `UpdateService/FirmwareInventory` collection.
 * iLO4 spells fan readings `FanName`/`CurrentReading`/`Units`, iLO5+
@@ -21,12 +26,20 @@ Generation differences the code absorbs:
 
 Every endpoint is fetched independently: a device that does not publish one
 records the reason in `data["errors"]` and the rest of the run still lands.
+
+`interval_seconds` is 300 because iLO4 is slow and session-limited. The
+scheduler currently runs every collector at the shortest interval of all of
+them, so that declaration is nominal until it grows one job per collector
+kind; keep the endpoint count per run low regardless.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import warnings
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any, Protocol
 
 import requests
@@ -81,8 +94,69 @@ HEALTH_VALUES: dict[str, float] = {
 }
 
 
+#: Gauges that belong to one collection section. When that section failed this
+#: run its rows mean "not collected", not "gone", so its series survive the
+#: sweep that clears the objects which really disappeared.
+SECTION_GAUGES: tuple[tuple[tuple[str, ...], tuple[Any, ...]], ...] = (
+    (("system",), (metrics.ILO_HEALTH_ROLLUP,)),
+    (
+        ("thermal",),
+        (
+            metrics.ILO_TEMPERATURE_CELSIUS,
+            metrics.ILO_TEMPERATURE_CRITICAL_CELSIUS,
+            metrics.ILO_FAN_PERCENT,
+            metrics.ILO_FAN_HEALTH,
+        ),
+    ),
+    (
+        ("power",),
+        (metrics.ILO_PSU_HEALTH, metrics.ILO_PSU_OUTPUT_WATTS, metrics.ILO_POWER_CONSUMED_WATTS),
+    ),
+    (
+        # both storage trees: SmartStorage keys and the standard Storage keys
+        (
+            "smart_storage",
+            "storage",
+            "array_controllers",
+            "disk_drives",
+            "logical_drives",
+            "drives",
+            "volumes",
+        ),
+        (
+            metrics.ILO_DRIVE_HEALTH,
+            metrics.ILO_LOGICAL_DRIVE_HEALTH,
+            metrics.ILO_CONTROLLER_HEALTH,
+        ),
+    ),
+)
+
+#: Label tuples published per device, so a drive pulled for RMA loses its series.
+_SERIES = metrics.DeviceSeries()
+
+
 class RedfishError(RuntimeError):
     """One Redfish GET failed. Callers degrade instead of losing the run."""
+
+
+@contextmanager
+def quiet_tls_warnings() -> Iterator[None]:
+    """Silence urllib3's InsecureRequestWarning for one request.
+
+    Certificate pinning needs a fingerprint recorded per device at onboarding,
+    which does not exist yet, so `verify=False` is still the transport default.
+    A global `urllib3.disable_warnings()` would hide that everywhere in the
+    process; scoping it here keeps the warning meaningful for anything else
+    while not printing one line per GET on every poll.
+    """
+    with warnings.catch_warnings():
+        try:
+            from urllib3.exceptions import InsecureRequestWarning
+
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+        except ImportError:  # pragma: no cover - urllib3 ships with requests
+            pass
+        yield
 
 
 class RedfishClient(Protocol):
@@ -119,11 +193,12 @@ class RedfishSession:
     def open(self) -> RedfishSession:
         """Log in once. Falls back to Basic auth when SessionService refuses."""
         try:
-            response = self._http.post(
-                f"{self.base_url}{SESSIONS_PATH}",
-                json={"UserName": self._username, "Password": self._secret()},
-                timeout=self.timeout,
-            )
+            with quiet_tls_warnings():
+                response = self._http.post(
+                    f"{self.base_url}{SESSIONS_PATH}",
+                    json={"UserName": self._username, "Password": self._secret()},
+                    timeout=self.timeout,
+                )
             token = response.headers.get("X-Auth-Token")
             if response.status_code in (200, 201) and token:
                 self._http.headers["X-Auth-Token"] = token
@@ -142,7 +217,8 @@ class RedfishSession:
 
     def get(self, path: str) -> dict[str, Any]:
         try:
-            response = self._http.get(self.url(path), timeout=self.timeout)
+            with quiet_tls_warnings():
+                response = self._http.get(self.url(path), timeout=self.timeout)
             response.raise_for_status()
             body = response.json()
         except requests.RequestException as exc:
@@ -156,7 +232,8 @@ class RedfishSession:
     def close(self) -> None:
         if self._session_uri:
             try:
-                self._http.delete(self.url(self._session_uri), timeout=self.timeout)
+                with quiet_tls_warnings():
+                    self._http.delete(self.url(self._session_uri), timeout=self.timeout)
             except requests.RequestException as exc:
                 log.debug("could not delete the redfish session: %s", exc)
             self._session_uri = None
@@ -180,6 +257,50 @@ def _ref(node: Any) -> str | None:
     if isinstance(node, dict):
         value = node.get("@odata.id") or node.get("href")
         return value if isinstance(value, str) else None
+    return None
+
+
+def redfish_path(reference: str | None) -> str | None:
+    """A link in the spelling this collector fetches.
+
+    iLO4 publishes the same resource under two roots: the Redfish `@odata.id`
+    (`/redfish/v1/...`) and the legacy RIS `href` (`/rest/v1/...`). Both are
+    served by the same firmware, so a legacy href is rewritten rather than
+    fetched as if it were a second resource.
+    """
+    if not reference:
+        return None
+    if reference.startswith("/rest/v1/"):
+        return "/redfish/v1/" + reference[len("/rest/v1/") :]
+    return reference
+
+
+def reference_key(reference: str | None) -> str | None:
+    """Identity of a link, independent of spelling and of the trailing slash."""
+    path = redfish_path(reference)
+    return path.rstrip("/") if path else None
+
+
+def path_id(reference: str | None) -> str | None:
+    """Last segment of a link: `.../DiskDrives/1/` -> `1`, the drive's `Id`."""
+    key = reference_key(reference)
+    if not key:
+        return None
+    return key.rsplit("/", 1)[-1] or None
+
+
+def linked(doc: Any, *names: str) -> str | None:
+    """Resolve a named link wherever this generation keeps it.
+
+    iLO5/6 use `Links/<Name>` with an `@odata.id`, iLO4 carries both that and a
+    lowercase `links/<Name>` with a `/rest/v1` `href`, and a few resources hang
+    the collection straight off the document.
+    """
+    for name in names:
+        for node in (_nav(doc, "Links", name), _nav(doc, "links", name), _nav(doc, name)):
+            reference = redfish_path(_ref(node))
+            if reference:
+                return reference
     return None
 
 
@@ -226,14 +347,25 @@ def status_row(status: Any) -> dict[str, Any]:
     }
 
 
-def collection_entries(doc: Any) -> tuple[list[dict[str, Any]], list[str]]:
-    """Split a Redfish collection into already-expanded members and links to fetch.
+#: One member of a collection: either the expanded document or a link to fetch.
+Member = tuple[dict[str, Any] | None, str | None]
 
-    iLO uses `Members`, older firmware `Items` or `links.Member`, and sometimes
-    inlines the whole member instead of linking to it.
+
+def collection_members(doc: Any) -> list[Member]:
+    """Ordered members of a Redfish collection, de-duplicated across spellings.
+
+    iLO uses `Members`, older firmware `Items` or `links.Member`, and it
+    inlines some collections instead of linking to them (log entries are
+    `Items` on iLO4 and expanded `Members` on iLO5). A real iLO4 collection
+    carries the same members *twice*, once as Redfish `Members` and once as RIS
+    `links.Member`; without de-duplication every DIMM, CPU, NIC, drive and IML
+    entry would be fetched twice over `/rest/v1` and stored twice.
+
+    Members keep document order (the IML cap wants the recent tail), the first
+    spelling wins, and an expanded member always beats a bare link to itself.
     """
-    inline: list[dict[str, Any]] = []
-    links: list[str] = []
+    order: list[str] = []
+    best: dict[str, Member] = {}
     groups = (
         _nav(doc, "Members"),
         _nav(doc, "Items"),
@@ -248,10 +380,23 @@ def collection_entries(doc: Any) -> tuple[list[dict[str, Any]], list[str]]:
                 continue
             payload = {k: v for k, v in entry.items() if not k.startswith("@") and k != "href"}
             reference = _ref(entry)
-            if payload:
-                inline.append(entry)
-            elif reference:
-                links.append(reference)
+            candidate: Member = (entry, None) if payload else (None, redfish_path(reference))
+            if candidate == (None, None):
+                continue
+            key = reference_key(reference) or f"#{payload.get('Id') or repr(payload)[:200]}"
+            if key not in best:
+                order.append(key)
+                best[key] = candidate
+            elif payload and best[key][0] is None:
+                best[key] = candidate  # an expanded member replaces the link to it
+    return [best[key] for key in order]
+
+
+def collection_entries(doc: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """`collection_members` split into expanded members and links still to fetch."""
+    members = collection_members(doc)
+    inline = [entry for entry, _ in members if entry is not None]
+    links = [reference for entry, reference in members if entry is None and reference]
     return inline, links
 
 
@@ -522,6 +667,24 @@ class IloCollector(Collector):
             errors[key] = str(exc)
             return None
 
+    def _materialise(
+        self,
+        client: RedfishClient,
+        members: list[Member],
+        key: str,
+        errors: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Documents for a list of members, fetching only the ones that are links."""
+        rows: list[dict[str, Any]] = []
+        for inline, reference in members:
+            if inline is not None:
+                rows.append(inline)
+            elif reference:
+                document = self._fetch(client, errors, f"{key}[{reference}]", reference)
+                if document is not None:
+                    rows.append(document)
+        return rows
+
     def _expand(
         self,
         client: RedfishClient,
@@ -530,16 +693,16 @@ class IloCollector(Collector):
         errors: dict[str, str],
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Members of a collection, fetching the ones that are only linked."""
-        inline, links = collection_entries(collection or {})
-        if limit is not None and len(links) > limit:
-            links = links[-limit:]  # the tail is the recent end of a log
-        rows = list(inline)
-        for reference in links:
-            document = self._fetch(client, errors, f"{key}[{reference}]", reference)
-            if document is not None:
-                rows.append(document)
-        return rows
+        """Members of a collection, fetching the ones that are only linked.
+
+        `limit` caps the *combined* list and keeps its tail, so an inline log
+        (iLO4 `Items`, iLO5 expanded `Members`) is bounded exactly like a
+        linked one and nothing beyond the cap is fetched.
+        """
+        members = collection_members(collection or {})
+        if limit is not None and len(members) > limit:
+            members = members[-limit:]  # the tail is the recent end of a log
+        return self._materialise(client, members, key, errors)
 
     def _fetch_collection(
         self,
@@ -585,6 +748,7 @@ class IloCollector(Collector):
         first_control = (
             power_control[0] if isinstance(power_control, list) and power_control else {}
         )
+        iml = self.collect_iml(client, system, errors)
 
         return {
             "redfish_version": root.get("RedfishVersion"),
@@ -612,7 +776,8 @@ class IloCollector(Collector):
             "health": health_rollup(system),
             "firmware": self.collect_firmware(client, errors),
             "storage": self.collect_storage(client, system, errors),
-            "iml": self.collect_iml(client, system, errors),
+            "iml": iml["entries"],
+            "iml_summary": {key: value for key, value in iml.items() if key != "entries"},
             "errors": errors,
         }
 
@@ -661,24 +826,35 @@ class IloCollector(Collector):
         errors.update(attempts)
         return []
 
+    @staticmethod
+    def _has_drives(controllers: list[dict[str, Any]]) -> bool:
+        return any(controller["physical_drives"] for controller in controllers)
+
     def collect_storage(
         self, client: RedfishClient, system: dict[str, Any], errors: dict[str, str]
     ) -> list[dict[str, Any]]:
         """Smart Array first (both generations), the standard Storage tree as fallback.
 
-        Each path keeps its own errors so that a host which simply does not
-        publish SmartStorage is not reported as broken when Storage answered.
+        The fallback is decided on *drives*, not on controllers: the physical
+        disks are the leaf of the VM -> VMDK -> datastore -> logical drive ->
+        physical disk chain the correlator walks, and a controller row without
+        them is not worth keeping if the other tree has the full picture. Each
+        path keeps its own errors so that a host which simply does not publish
+        SmartStorage is not reported as broken when Storage answered.
         """
         smart_errors: dict[str, str] = {}
-        controllers = self.collect_smart_storage(client, system, smart_errors)
-        if controllers:
+        smart = self.collect_smart_storage(client, system, smart_errors)
+        if self._has_drives(smart):
             errors.update(smart_errors)
-            return controllers
+            return smart
         standard_errors: dict[str, str] = {}
-        controllers = self.collect_standard_storage(client, system, standard_errors)
-        if controllers:
+        standard = self.collect_standard_storage(client, system, standard_errors)
+        if self._has_drives(standard) or (standard and not smart):
             errors.update(standard_errors)
-            return controllers
+            return standard
+        if smart:
+            errors.update(smart_errors)
+            return smart
         errors.update(smart_errors)
         errors.update(standard_errors)
         return []
@@ -687,17 +863,16 @@ class IloCollector(Collector):
         self, client: RedfishClient, system: dict[str, Any], errors: dict[str, str]
     ) -> list[dict[str, Any]]:
         base = (
-            _ref(system.get("SmartStorage"))
-            or _ref(_nav(oem(system), "Links", "SmartStorage"))
+            linked(system, "SmartStorage")
+            or linked(oem(system), "SmartStorage")
             or SMART_STORAGE_PATH
         )
         document = self._fetch(client, errors, "smart_storage", base)
         if document is None:
             return []
         controllers_path = (
-            _ref(document.get("ArrayControllers"))
-            or _ref(_nav(document, "Links", "ArrayControllers"))
-            or _ref(_nav(oem(document), "Links", "ArrayControllers"))
+            linked(document, "ArrayControllers")
+            or linked(oem(document), "ArrayControllers")
             or f"{base.rstrip('/')}/ArrayControllers/"
         )
         rows = []
@@ -713,17 +888,22 @@ class IloCollector(Collector):
         identifier = str(controller.get("Id") or controller.get("Location") or "controller")
         logical: list[dict[str, Any]] = []
         physical: list[dict[str, Any]] = []
-        logical_path = _ref(controller.get("LogicalDrives")) or _ref(
-            _nav(controller, "Links", "LogicalDrives")
+        # HPE names the drive collection `PhysicalDrives` on both generations
+        # even though its URL segment is `DiskDrives`; iLO4 repeats it in the
+        # lowercase `links` block. `DiskDrives` is accepted as a link name too,
+        # and the conventional path is the last resort.
+        base = reference_key(_ref(controller)) or ""
+        logical_path = linked(controller, "LogicalDrives") or (
+            f"{base}/LogicalDrives/" if base else None
         )
-        physical_path = _ref(controller.get("DiskDrives")) or _ref(
-            _nav(controller, "Links", "DiskDrives")
+        physical_path = linked(controller, "PhysicalDrives", "DiskDrives") or (
+            f"{base}/DiskDrives/" if base else None
         )
         if logical_path:
             key = f"logical_drives:{identifier}"
             for document in self._fetch_collection(client, errors, key, logical_path):
                 row = logical_drive_row(document)
-                row["data_drives"] = self.data_drive_refs(client, document, errors, key)
+                row["data_drives"] = self.data_drive_ids(client, document, errors, key)
                 logical.append(row)
         if physical_path:
             key = f"disk_drives:{identifier}"
@@ -745,30 +925,52 @@ class IloCollector(Collector):
             "physical_drives": physical,
         }
 
-    def data_drive_refs(
+    def data_drive_ids(
         self,
         client: RedfishClient,
         logical_drive: dict[str, Any],
         errors: dict[str, str],
         key: str,
     ) -> list[str]:
-        """Physical drives backing one logical drive: the storage half of the graph."""
-        node = _nav(logical_drive, "Links", "DataDrives") or logical_drive.get("DataDrives")
+        """Physical drives backing one logical drive: the storage half of the graph.
+
+        Both halves of the join use the drive `Id`, whatever the link spelling
+        was: a linked member contributes the last segment of its path, an
+        expanded one its `Id`, and `physical_drives[*].id` is the same value.
+        """
+        node = (
+            _nav(logical_drive, "Links", "DataDrives")
+            or _nav(logical_drive, "links", "DataDrives")
+            or logical_drive.get("DataDrives")
+        )
         if isinstance(node, list):
-            return [ref for ref in (_ref(entry) for entry in node) if ref]
-        reference = _ref(node)
+            entries = [(entry, None) for entry in node if isinstance(entry, dict)]
+            return self._drive_ids(entries)
+        reference = redfish_path(_ref(node))
         if not reference:
             return []
         collection = self._fetch(client, errors, f"{key}:data_drives", reference)
         if collection is None:
             return []
-        inline, links = collection_entries(collection)
-        return links + [str(entry.get("Id")) for entry in inline if entry.get("Id")]
+        return self._drive_ids(collection_members(collection))
+
+    @staticmethod
+    def _drive_ids(members: Sequence[Member]) -> list[str]:
+        ids: list[str] = []
+        for entry, reference in members:
+            identifier = None
+            if entry is not None:
+                identifier = entry.get("Id") or path_id(_ref(entry))
+            else:
+                identifier = path_id(reference)
+            if identifier:
+                ids.append(str(identifier))
+        return ids
 
     def collect_standard_storage(
         self, client: RedfishClient, system: dict[str, Any], errors: dict[str, str]
     ) -> list[dict[str, Any]]:
-        path = _ref(system.get("Storage"))
+        path = linked(system, "Storage")
         if not path:
             return []
         rows = []
@@ -777,21 +979,30 @@ class IloCollector(Collector):
             controllers = storage.get("StorageControllers") or []
             primary = controllers[0] if controllers else {}
             drives = []
-            for reference in (_ref(d) for d in storage.get("Drives") or []):
+            for reference in (redfish_path(_ref(d)) for d in storage.get("Drives") or []):
                 if not reference:
                     continue
                 document = self._fetch(client, errors, f"drives:{identifier}", reference)
                 if document is not None:
-                    drives.append(physical_drive_row(document))
-            volumes = []
-            volumes_path = _ref(storage.get("Volumes"))
+                    row = physical_drive_row(document)
+                    row["id"] = row["id"] or path_id(reference)
+                    drives.append(row)
+            volumes: list[dict[str, Any]] = []
+            volumes_path = linked(storage, "Volumes")
             if volumes_path:
-                volumes = [
-                    logical_drive_row(v)
-                    for v in self._fetch_collection(
-                        client, errors, f"volumes:{identifier}", volumes_path
+                for document in self._fetch_collection(
+                    client, errors, f"volumes:{identifier}", volumes_path
+                ):
+                    volume = logical_drive_row(document)
+                    # Same join key as SmartStorage: the drive Id on both sides.
+                    volume["data_drives"] = self._drive_ids(
+                        [
+                            (entry, None)
+                            for entry in _nav(document, "Links", "Drives") or []
+                            if isinstance(entry, dict)
+                        ]
                     )
-                ]
+                    volumes.append(volume)
             rows.append(
                 {
                     "id": identifier,
@@ -811,46 +1022,83 @@ class IloCollector(Collector):
 
     def collect_iml(
         self, client: RedfishClient, system: dict[str, Any], errors: dict[str, str]
-    ) -> list[dict[str, Any]]:
-        base = _ref(system.get("LogServices")) or LOG_SERVICES_PATH
+    ) -> dict[str, Any]:
+        """The tail of the Integrated Management Log, plus what was left out.
+
+        A Gen9 that has been running for years holds hundreds of IML entries,
+        and iLO4 hands them over inline: the cap applies to the whole ordered
+        list so neither the snapshot nor the structured diff grows without
+        bound. Entries that were already in hand still count towards the active
+        fault total, so the metric reflects the log rather than the tail.
+        """
+        base = linked(system, "LogServices") or LOG_SERVICES_PATH
         services = self._fetch(client, errors, "log_services", base)
         iml_path = None
         if services is not None:
-            inline, links = collection_entries(services)
-            for reference in links:
-                if reference.rstrip("/").rsplit("/", 1)[-1].upper() == "IML":
+            for entry, reference in collection_members(services):
+                if entry is not None and str(entry.get("Id") or "").upper() == "IML":
+                    iml_path = redfish_path(_ref(entry)) or iml_path
+                elif reference and path_id(reference) == "IML":
                     iml_path = reference
+                if iml_path:
                     break
-            for entry in inline:
-                if str(entry.get("Id") or "").upper() == "IML":
-                    iml_path = _ref(entry) or iml_path
         if iml_path is None:
             iml_path = f"{base.rstrip('/')}/IML/"
         service = self._fetch(client, errors, "iml", iml_path)
-        entries_path = _ref((service or {}).get("Entries")) or f"{iml_path.rstrip('/')}/Entries/"
-        documents = self._fetch_collection(
-            client, errors, "iml_entries", entries_path, limit=IML_MAX_ENTRIES
-        )
-        return [iml_row(d) for d in documents]
+        entries_path = linked(service or {}, "Entries") or f"{iml_path.rstrip('/')}/Entries/"
+        collection = self._fetch(client, errors, "iml_entries", entries_path)
+        members = collection_members(collection or {})
+        kept = members[-IML_MAX_ENTRIES:] if len(members) > IML_MAX_ENTRIES else members
+        rows = [iml_row(d) for d in self._materialise(client, kept, "iml_entries", errors)]
+        dropped = [
+            iml_row(entry) for entry, _ in members[: len(members) - len(kept)] if entry is not None
+        ]
+        return {
+            "entries": rows,
+            "total": len(members),
+            "returned": len(rows),
+            "truncated": len(members) > len(kept),
+            "active": sum(1 for row in rows + dropped if row["active"]),
+        }
 
     # -- metrics -----------------------------------------------------------
+    @staticmethod
+    def spared_gauges(errors: dict[str, str]) -> list[Any]:
+        """Gauges whose section failed this run: absent rows mean "not collected"."""
+        spared: list[Any] = []
+        for prefixes, gauges in SECTION_GAUGES:
+            if any(key.startswith(prefixes) for key in errors):
+                spared.extend(gauges)
+        return spared
+
     def publish_metrics(self, device_name: str, data: dict[str, Any]) -> None:
+        """Set this run's gauges and drop the series of objects that are gone.
+
+        A drive pulled for RMA, a supply removed from its bay or a sensor that
+        stops being reported would otherwise keep its last value forever and
+        its alert could never resolve.
+        """
+        run = _SERIES.run(device_name)
+
         for subsystem, health in (data.get("health") or {}).items():
             value = health_value(health)
             if value is not None:
-                metrics.ILO_HEALTH_ROLLUP.labels(device=device_name, subsystem=subsystem).set(value)
+                run.set(metrics.ILO_HEALTH_ROLLUP, value, device=device_name, subsystem=subsystem)
 
         for sensor in data.get("temperatures") or []:
             name = sensor.get("name")
             reading = sensor.get("celsius")
             if not name or not isinstance(reading, (int, float)) or reading <= 0:
                 continue  # absent sensors report 0
-            metrics.ILO_TEMPERATURE_CELSIUS.labels(device=device_name, sensor=name).set(reading)
+            run.set(metrics.ILO_TEMPERATURE_CELSIUS, reading, device=device_name, sensor=name)
             critical = sensor.get("upper_critical")
             if isinstance(critical, (int, float)):
-                metrics.ILO_TEMPERATURE_CRITICAL_CELSIUS.labels(
-                    device=device_name, sensor=name
-                ).set(critical)
+                run.set(
+                    metrics.ILO_TEMPERATURE_CRITICAL_CELSIUS,
+                    critical,
+                    device=device_name,
+                    sensor=name,
+                )
 
         for fan in data.get("fans") or []:
             name = fan.get("name")
@@ -858,10 +1106,10 @@ class IloCollector(Collector):
                 continue
             reading = fan.get("reading")
             if isinstance(reading, (int, float)):
-                metrics.ILO_FAN_PERCENT.labels(device=device_name, fan=name).set(reading)
+                run.set(metrics.ILO_FAN_PERCENT, reading, device=device_name, fan=name)
             value = health_value((fan.get("status") or {}).get("health"))
             if value is not None:
-                metrics.ILO_FAN_HEALTH.labels(device=device_name, fan=name).set(value)
+                run.set(metrics.ILO_FAN_HEALTH, value, device=device_name, fan=name)
 
         for psu in data.get("power_supplies") or []:
             name = psu.get("label") or psu.get("id") or psu.get("name")
@@ -869,36 +1117,51 @@ class IloCollector(Collector):
                 continue
             value = health_value((psu.get("status") or {}).get("health"))
             if value is not None:
-                metrics.ILO_PSU_HEALTH.labels(device=device_name, psu=name).set(value)
+                run.set(metrics.ILO_PSU_HEALTH, value, device=device_name, psu=name)
             output = psu.get("output_watts")
             if isinstance(output, (int, float)):
-                metrics.ILO_PSU_OUTPUT_WATTS.labels(device=device_name, psu=name).set(output)
+                run.set(metrics.ILO_PSU_OUTPUT_WATTS, output, device=device_name, psu=name)
 
         consumed = (data.get("power") or {}).get("consumed_watts")
         if isinstance(consumed, (int, float)):
-            metrics.ILO_POWER_CONSUMED_WATTS.labels(device=device_name).set(consumed)
+            run.set(metrics.ILO_POWER_CONSUMED_WATTS, consumed, device=device_name)
 
         for controller in data.get("storage") or []:
             controller_id = str(controller.get("id") or "controller")
             value = health_value((controller.get("status") or {}).get("health"))
             if value is not None:
-                metrics.ILO_CONTROLLER_HEALTH.labels(
-                    device=device_name, controller=controller_id
-                ).set(value)
+                run.set(
+                    metrics.ILO_CONTROLLER_HEALTH,
+                    value,
+                    device=device_name,
+                    controller=controller_id,
+                )
             for drive in controller.get("physical_drives") or []:
                 name = drive.get("location") or drive.get("id")
                 value = health_value((drive.get("status") or {}).get("health"))
                 if name and value is not None:
-                    metrics.ILO_DRIVE_HEALTH.labels(
-                        device=device_name, controller=controller_id, drive=str(name)
-                    ).set(value)
+                    run.set(
+                        metrics.ILO_DRIVE_HEALTH,
+                        value,
+                        device=device_name,
+                        controller=controller_id,
+                        drive=str(name),
+                    )
             for drive in controller.get("logical_drives") or []:
                 name = drive.get("name") or drive.get("id")
                 value = health_value((drive.get("status") or {}).get("health"))
                 if name and value is not None:
-                    metrics.ILO_LOGICAL_DRIVE_HEALTH.labels(
-                        device=device_name, controller=controller_id, drive=str(name)
-                    ).set(value)
+                    run.set(
+                        metrics.ILO_LOGICAL_DRIVE_HEALTH,
+                        value,
+                        device=device_name,
+                        controller=controller_id,
+                        drive=str(name),
+                    )
 
-        active = sum(1 for entry in data.get("iml") or [] if entry.get("active"))
-        metrics.ILO_ACTIVE_FAULTS.labels(device=device_name).set(active)
+        summary = data.get("iml_summary") or {}
+        active = summary.get("active")
+        if not isinstance(active, int):
+            active = sum(1 for entry in data.get("iml") or [] if entry.get("active"))
+        run.set(metrics.ILO_ACTIVE_FAULTS, active, device=device_name)
+        run.sweep(skip=self.spared_gauges(data.get("errors") or {}))

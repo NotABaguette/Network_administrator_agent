@@ -20,13 +20,27 @@ groups:
           summary: "Datastore {{ $labels.datastore }} on {{ $labels.device }} is below 5% free"
           description: "A full datastore stuns every VM on it. Free space before anything else."
 
+      # Only VMs that are meant to be running: templates and deliberately
+      # parked VMs (the cold-standby copy of mgmt-01, anything annotated
+      # expect:off) publish infra_esxi_vm_expected_on == 0 and are 0 forever,
+      # so alerting on the power state alone would fire on them permanently.
+      # The same pair is what the Tier 0 "power on a VM tagged auto:restart"
+      # action keys off: expected on, observed off, nobody powered it off.
       - alert: VirtualMachineDown
-        expr: infra_esxi_vm_power_state == 0
+        expr: infra_esxi_vm_power_state == 0 and on(device, vm) infra_esxi_vm_expected_on == 1
         for: 10m
         labels: { severity: warning }
         annotations:
           summary: "VM {{ $labels.vm }} on {{ $labels.device }} is not powered on"
-          description: "Check the host event log in the snapshot first: a human power-off blocks the auto:restart Tier 0 action."
+          description: "Check the host event log in the snapshot first: a human power-off blocks the auto:restart Tier 0 action. The VM's expected_on_reason in the snapshot says why it is expected to be running."
+
+      - alert: VirtualMachineParked
+        expr: infra_esxi_vm_expected_on == 0 and on(device, vm) infra_esxi_vm_power_state == 1
+        for: 30m
+        labels: { severity: info }
+        annotations:
+          summary: "VM {{ $labels.vm }} on {{ $labels.device }} is running but is not meant to be"
+          description: "A template that was booted, or a cold standby left running after a failover test. Two copies of a standby VM on the network is worse than none."
 
       - alert: EsxiHostCpuSaturated
         expr: infra_esxi_host_cpu_usage_ratio > 0.9
@@ -73,3 +87,14 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "VM {{ $labels.vm }} on {{ $labels.device }} carries {{ $value }} snapshots"
+
+      # The host-config bundle is what an ESXi rollback restores from and what
+      # makes a manual host edit visible as a commit. It runs over SSH with the
+      # key from onboarding, so it fails silently if SSH or the key is gone.
+      - alert: HostConfigBackupFailing
+        expr: increase(infra_config_backup_errors_total{collector="esxi"}[3h]) > 2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.device }}: the host-config backup keeps failing"
+          description: "Check that SSH is enabled on the host and that the collector credential's key is authorised. Until it succeeds there is no pre-change host backup and no change detection for this host."

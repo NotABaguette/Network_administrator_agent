@@ -2,25 +2,52 @@
 
 There is no vCenter, so every host is queried on its own hostd. The collector
 never writes: it holds a read-only role and only issues `Retrieve*`/`Query*`
-calls. The one thing that leaves the API path is the host-config backup in
+calls.
+
+The one thing that leaves the API path is the host-config backup in
 `configs()`, which shells out over SSH because `vim-cmd
-hostsvc/firmware/backup_config` is the only supported way to produce a bundle;
-that bundle goes to the config git store base64-encoded and never to the LLM.
+hostsvc/firmware/backup_config` is the only supported way to produce a bundle.
+Two things follow from the credential model in `docs/prerequisites.md`:
+
+* The collector account is `infra-ro`, a read-only role, and ESXi grants shell
+  access only to Administrator-role users — with SSH disabled by default. So
+  the backup runs only when the credential carries `ssh_key_path`, the
+  documented SSH identity; a password alone is the API password and means
+  nothing here. Enabling it needs SSH on the host and an authorized key.
+* A backup that fails must not fail the run. `collect()` has already produced
+  the observed state at that point, and a raised exception would leave the
+  freshness metric unset and report the host as stale every single cycle.
+  Failures are logged once, counted in `infra_config_backup_errors_total`, and
+  the collector returns no files.
+
+What lands in the config git store is the *content* of the bundle, not the
+bundle: `backup_config` re-tars /etc on every call, so the tarball's bytes
+differ every run even when nothing changed, which would produce a commit per
+cycle and make `UnapprovedConfigChange` meaningless. The tarball is unpacked in
+process and its configuration files are committed individually, so a manual
+edit shows up as a per-line diff and an unchanged host produces no commit. The
+bundle never reaches the language model.
 
 Free-licence detection matters downstream: a host whose licence name contains
 "Hypervisor" rejects API writes, so the change executor has to take the SSH
 path for it (see `docs/architecture.md`).
 
 Everything returned by `collect()` is parsed structure — rows, not raw text.
-`pyVim`/`pyVmomi` are imported lazily so the package imports without them.
+`pyVim`/`pyVmomi` and `paramiko` are imported lazily so the package imports
+without them.
 """
 
 from __future__ import annotations
 
-import base64
+import io
 import logging
+import posixpath
 import re
+import shlex
 import ssl
+import tarfile
+import time
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -78,10 +105,62 @@ MAX_EVENTS = 200
 WANTED_CDP_OPERATION = "both"
 
 BACKUP_COMMAND = "vim-cmd hostsvc/firmware/backup_config"
-BACKUP_FILENAME = "host-config.tgz.b64"
+#: Directory the unpacked bundle is committed under, inside the device's tree.
+BACKUP_DIR = "host-config"
+#: `/scratch` is a symlink to the host's real scratch location on every
+#: supported ESXi build; `readlink -f` resolves it if the symlink is missing.
+SCRATCH = "/scratch"
+#: The bundle is a snapshot of /etc: taking one per collect cycle would write a
+#: new directory into /scratch every 60 s for nothing.
+BACKUP_MIN_INTERVAL_SECONDS = 3600
+#: Nested archives (configBundle -> state.tgz -> local.tgz) and their leaves.
+MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_CONFIG_FILE_BYTES = 256 * 1024
+MAX_ARCHIVE_DEPTH = 3
+#: Never commit key material or hashes; the bundle carries /etc wholesale.
+SECRET_PATH_PARTS = ("/ssl/", "/sfcb/", "/ssh_host_", "/shadow", "/passwd-", "/.ssh/id_")
+SECRET_PATH_SUFFIXES = (".key", ".pem", ".p12", ".pfx", ".crt", ".db")
 # The URL's path part only. The host part is normally the literal `*`, so the
 # match is anchored on /downloads/ rather than on the first slash.
 _BUNDLE_RE = re.compile(r"(/downloads/[^\s\"'<>]*configBundle[^\s\"'<>]*\.tgz)")
+
+#: Annotation (VM Notes) tokens stating whether a VM is meant to be running.
+EXPECT_ON_TAGS = ("expect:on", "auto:restart")
+EXPECT_OFF_TAGS = ("expect:off", "expect:down", "cold-standby", "no-monitor")
+
+#: Gauges that belong to one collection section. When that section failed this
+#: run its rows mean "not collected", not "gone", so its series survive the
+#: sweep that clears the objects which really disappeared.
+SECTION_GAUGES: tuple[tuple[str, tuple[Any, ...]], ...] = (
+    (
+        "host",
+        (
+            metrics.ESXI_HOST_CPU_USAGE_RATIO,
+            metrics.ESXI_HOST_MEMORY_USAGE_RATIO,
+            metrics.ESXI_HOST_UPTIME_SECONDS,
+        ),
+    ),
+    ("pnics", (metrics.ESXI_PNIC_LINK_UP,)),
+    (
+        "datastores",
+        (metrics.ESXI_DATASTORE_CAPACITY_BYTES, metrics.ESXI_DATASTORE_FREE_BYTES),
+    ),
+    (
+        "vms",
+        (
+            metrics.ESXI_VM_POWER_STATE,
+            metrics.ESXI_VM_EXPECTED_ON,
+            metrics.ESXI_VM_SNAPSHOT_COUNT,
+            metrics.ESXI_VM_SNAPSHOT_AGE_SECONDS,
+        ),
+    ),
+)
+
+#: Label tuples published per device, so an unregistered VM loses its series.
+_SERIES = metrics.DeviceSeries()
+#: Monotonic time of the last host-config backup attempt, per device. The
+#: collector is re-instantiated for every run, so this cannot live on `self`.
+_LAST_BACKUP: dict[str, float] = {}
 
 
 # --------------------------------------------------------------------------
@@ -125,20 +204,99 @@ def short_type_name(obj: Any) -> str:
     return type(obj).__name__.rsplit(".", 1)[-1]
 
 
-def bundle_paths(command_output: str) -> list[str]:
-    """Candidate on-host paths for the bundle `backup_config` just wrote.
+def bundle_url_path(command_output: str) -> str:
+    """The URL path `backup_config` reported.
 
     The command answers with a download URL whose host part is a literal `*`,
     e.g. `Bundle can be downloaded at : http://*/downloads/52f.../
-    configBundle-esx-01.tgz`. The same file is on disk under /scratch.
+    configBundle-esx-01.tgz`. Only the path part is of any use.
     """
     match = _BUNDLE_RE.search(command_output or "")
     if not match:
         raise ValueError("backup_config did not report a configBundle path")
-    remote = match.group(1)
-    # /scratch is the real location; the bare URL path is the fallback for hosts
-    # whose scratch partition is mounted elsewhere.
-    return list(dict.fromkeys([f"/scratch{remote}", remote]))
+    return match.group(1)
+
+
+def bundle_paths(command_output: str, scratch: str = SCRATCH) -> list[str]:
+    """On-host paths for the bundle `backup_config` just wrote.
+
+    hostd writes it under the host's scratch location, which `/scratch` points
+    at. The bare URL path is not a filesystem path and is never tried; a host
+    without the `/scratch` symlink is handled by resolving it and asking again.
+    """
+    return [f"{scratch.rstrip('/')}{bundle_url_path(command_output)}"]
+
+
+def is_secret_path(name: str) -> bool:
+    """Key material, certificates and password hashes stay on the host."""
+    path = "/" + name.lstrip("/")
+    return path.endswith(SECRET_PATH_SUFFIXES) or any(part in path for part in SECRET_PATH_PARTS)
+
+
+def _safe_member_name(name: str) -> str | None:
+    """A relative, traversal-free member name, or None if it cannot be trusted.
+
+    Member names become paths in the config git repository, so an absolute name
+    or one climbing out of the tree is dropped rather than sanitised: a bundle
+    that contains one is not a bundle this collector should be committing.
+    """
+    cleaned = name.replace("\\", "/")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    if cleaned.startswith(("/", "../")) or "/../" in cleaned or cleaned == "..":
+        return None
+    cleaned = posixpath.normpath(cleaned).strip("/")
+    if not cleaned or cleaned.startswith("."):
+        return None
+    return cleaned
+
+
+def _archive_files(blob: bytes, depth: int = 0) -> Iterator[tuple[str, bytes]]:
+    """Every regular file in a tarball, descending into nested tarballs."""
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            name = _safe_member_name(member.name)
+            if name is None:
+                log.debug("skipping suspicious bundle member %r", member.name)
+                continue
+            nested = name.endswith((".tgz", ".tar.gz"))
+            if member.size > (MAX_ARCHIVE_BYTES if nested else MAX_CONFIG_FILE_BYTES):
+                continue
+            handle = archive.extractfile(member)
+            if handle is None:
+                continue
+            payload = handle.read()
+            if nested and depth < MAX_ARCHIVE_DEPTH:
+                yield from _archive_files(payload, depth + 1)
+            else:
+                yield name, payload
+
+
+def unpack_bundle(blob: bytes) -> dict[str, str]:
+    """The text configuration files inside an ESXi host-config bundle.
+
+    The bundle is `Manifest.txt` plus `state.tgz`, which holds `local.tgz`,
+    which holds `etc/...`; everything is unpacked in process. Keys are paths
+    under `host-config/`, so the config git store gets one file per
+    configuration file and a real diff when one of them changes — unlike the
+    tarball itself, whose bytes change on every `backup_config` invocation.
+    Binary members, oversized members and anything holding key material are
+    left out.
+    """
+    files: dict[str, str] = {}
+    for name, payload in _archive_files(blob):
+        if is_secret_path(name) or b"\x00" in payload:
+            continue
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            continue  # binary member: nothing to diff
+        if not text.endswith("\n"):
+            text += "\n"
+        files[f"{BACKUP_DIR}/{name}"] = text
+    return dict(sorted(files.items()))
 
 
 def _section(errors: dict[str, str], key: str, fn: Any, default: Any) -> Any:
@@ -528,6 +686,57 @@ def vm_row(vm: Any, now: datetime) -> dict[str, Any]:
     }
 
 
+def autostart_actions(host: Any) -> dict[str, str]:
+    """VM name -> configured start action, from the host's autostart manager.
+
+    On a standalone host with no vCenter and no DRS this is the only
+    machine-readable statement of which VMs are meant to be running after a
+    reboot, which is exactly the question "is this VM supposed to be up?".
+    """
+    manager = getattr(getattr(host, "configManager", None), "autoStartManager", None)
+    config = getattr(manager, "config", None)
+    actions: dict[str, str] = {}
+    for entry in getattr(config, "powerInfo", None) or []:
+        name = getattr(getattr(entry, "key", None), "name", None)
+        if name:
+            actions[str(name)] = str(getattr(entry, "startAction", None) or "none")
+    return actions
+
+
+def _annotation_tags(annotation: Any) -> str:
+    return f" {str(annotation or '').lower()} ".replace("\n", " ")
+
+
+def expected_power_state(
+    vm: dict[str, Any], autostart: dict[str, str], autostart_in_use: bool
+) -> tuple[bool, str]:
+    """Whether a VM is meant to be running, and what said so.
+
+    Without this every deliberately parked VM — a template, the cold-standby
+    copy of mgmt-01 that `docs/architecture.md` requires on another host — is
+    permanently "down" and the alert that should mean "something broke" is
+    permanently firing. Precedence, most explicit first:
+
+    1. the VM annotation (Notes): `expect:off` / `cold-standby` or
+       `expect:on` / `auto:restart`, which is also the tag the Tier 0
+       power-on action keys off;
+    2. templates are never running;
+    3. the host's autostart configuration, when the host uses it at all: a VM
+       left out of it is parked on purpose;
+    4. otherwise a registered VM is assumed to be meant to run.
+    """
+    tags = _annotation_tags(vm.get("annotation"))
+    if any(tag in tags for tag in EXPECT_OFF_TAGS):
+        return False, "annotation"
+    if any(tag in tags for tag in EXPECT_ON_TAGS):
+        return True, "annotation"
+    if vm.get("template"):
+        return False, "template"
+    if autostart_in_use:
+        return autostart.get(str(vm.get("name"))) == "powerOn", "autostart"
+    return True, "default"
+
+
 def event_row(event: Any) -> dict[str, Any]:
     vm = getattr(event, "vm", None)
     host = getattr(event, "host", None)
@@ -623,6 +832,12 @@ class EsxiCollector(Collector):
             errors, "datastores", lambda: [datastore_row(d) for d in host.datastore or []], []
         )
         vms = _section(errors, "vms", lambda: [vm_row(vm, now) for vm in host.vm or []], [])
+        autostart = _section(errors, "autostart", lambda: autostart_actions(host), {})
+        autostart_in_use = any(action == "powerOn" for action in autostart.values())
+        for vm in vms:
+            vm["expected_on"], vm["expected_on_reason"] = expected_power_state(
+                vm, autostart, autostart_in_use
+            )
         version = _section(errors, "version", lambda: version_row(content.about), {})
         licenses = _section(
             errors,
@@ -660,6 +875,7 @@ class EsxiCollector(Collector):
             "vmkernel": vmkernels,
             "datastores": datastores,
             "vms": vms,
+            "autostart": autostart,
             "events": events,
             "warnings": warnings,
             "errors": errors,
@@ -691,22 +907,42 @@ class EsxiCollector(Collector):
         return spec
 
     # -- metrics -----------------------------------------------------------
+    @staticmethod
+    def spared_gauges(errors: dict[str, str]) -> list[Any]:
+        """Gauges whose section failed this run: absent rows mean "not collected"."""
+        spared: list[Any] = []
+        for section, gauges in SECTION_GAUGES:
+            if section in errors:
+                spared.extend(gauges)
+        return spared
+
     def publish_metrics(self, device_name: str, data: dict[str, Any]) -> None:
+        """Set this run's gauges and drop the series of objects that are gone.
+
+        VMs move between standalone hosts by hand here: without the sweep the
+        host they left keeps `infra_esxi_vm_power_state{vm=...} = 0` and pages
+        forever, a renamed VM shows up twice, and an unmounted datastore keeps
+        its last free-space reading.
+        """
+        run = _SERIES.run(device_name)
         host = data.get("host") or {}
         cpu = host.get("cpu_usage_ratio")
         if cpu is not None:
-            metrics.ESXI_HOST_CPU_USAGE_RATIO.labels(device=device_name).set(cpu)
+            run.set(metrics.ESXI_HOST_CPU_USAGE_RATIO, cpu, device=device_name)
         memory = host.get("memory_usage_ratio")
         if memory is not None:
-            metrics.ESXI_HOST_MEMORY_USAGE_RATIO.labels(device=device_name).set(memory)
+            run.set(metrics.ESXI_HOST_MEMORY_USAGE_RATIO, memory, device=device_name)
         uptime = _num(host.get("uptime_seconds"))
         if uptime is not None:
-            metrics.ESXI_HOST_UPTIME_SECONDS.labels(device=device_name).set(uptime)
+            run.set(metrics.ESXI_HOST_UPTIME_SECONDS, uptime, device=device_name)
 
         for pnic in data.get("pnics") or []:
             if pnic.get("name"):
-                metrics.ESXI_PNIC_LINK_UP.labels(device=device_name, pnic=pnic["name"]).set(
-                    1 if pnic.get("link") else 0
+                run.set(
+                    metrics.ESXI_PNIC_LINK_UP,
+                    1 if pnic.get("link") else 0,
+                    device=device_name,
+                    pnic=pnic["name"],
                 )
 
         for datastore in data.get("datastores") or []:
@@ -716,27 +952,47 @@ class EsxiCollector(Collector):
             capacity = _num(datastore.get("capacity_bytes"))
             free = _num(datastore.get("free_bytes"))
             if capacity is not None:
-                metrics.ESXI_DATASTORE_CAPACITY_BYTES.labels(
-                    device=device_name, datastore=name
-                ).set(capacity)
-            if free is not None:
-                metrics.ESXI_DATASTORE_FREE_BYTES.labels(device=device_name, datastore=name).set(
-                    free
+                run.set(
+                    metrics.ESXI_DATASTORE_CAPACITY_BYTES,
+                    capacity,
+                    device=device_name,
+                    datastore=name,
                 )
+            if free is not None:
+                run.set(metrics.ESXI_DATASTORE_FREE_BYTES, free, device=device_name, datastore=name)
 
         for vm in data.get("vms") or []:
             name = vm.get("name")
             if not name:
                 continue
-            metrics.ESXI_VM_POWER_STATE.labels(device=device_name, vm=name).set(
-                1 if vm.get("power_state") == "poweredOn" else 0
+            run.set(
+                metrics.ESXI_VM_POWER_STATE,
+                1 if vm.get("power_state") == "poweredOn" else 0,
+                device=device_name,
+                vm=name,
             )
-            metrics.ESXI_VM_SNAPSHOT_COUNT.labels(device=device_name, vm=name).set(
-                vm.get("snapshot_count") or 0
+            # Paired with the power state by the VirtualMachineDown rule, so a
+            # template or a cold standby cannot page anybody.
+            run.set(
+                metrics.ESXI_VM_EXPECTED_ON,
+                1 if vm.get("expected_on", True) else 0,
+                device=device_name,
+                vm=name,
             )
-            metrics.ESXI_VM_SNAPSHOT_AGE_SECONDS.labels(device=device_name, vm=name).set(
-                _num(vm.get("oldest_snapshot_age_seconds")) or 0.0
+            run.set(
+                metrics.ESXI_VM_SNAPSHOT_COUNT,
+                vm.get("snapshot_count") or 0,
+                device=device_name,
+                vm=name,
             )
+            run.set(
+                metrics.ESXI_VM_SNAPSHOT_AGE_SECONDS,
+                _num(vm.get("oldest_snapshot_age_seconds")) or 0.0,
+                device=device_name,
+                vm=name,
+            )
+
+        run.sweep(skip=self.spared_gauges(data.get("errors") or {}))
 
     # -- host config backup (SSH) -----------------------------------------
     def _ssh_client(self, device: SeedDevice, cred: Credential) -> Any:
@@ -786,22 +1042,69 @@ class EsxiCollector(Collector):
         finally:
             sftp.close()
 
-    def configs(self, device: SeedDevice, cred: Credential) -> dict[str, str]:
-        """Host-config bundle, base64-encoded, for the config git store.
+    def _remove_bundle(self, client: Any, path: str) -> None:
+        """Delete the bundle hostd just wrote, so /scratch does not fill up.
 
-        The bundle is a tarball, so it is stored base64 (line-wrapped, so git
-        still produces a usable diff). It is a backup artefact: like every raw
-        config it stays in the git store and never reaches the language model.
-        Without an SSH credential there is no supported way to take it, so the
-        collector returns nothing rather than guessing.
+        A collector must leave the device as it found it, and `backup_config`
+        creates a new `<scratch>/downloads/<uuid>/` directory every time it
+        runs. Only paths that came out of the backup command's own URL are
+        removed, and a failure here never costs the backup.
         """
-        if not (cred.ssh_key_path or cred.password):
-            log.info("no SSH credential for %s: skipping host-config backup", device.name)
-            return {}
+        directory = posixpath.dirname(path)
+        if "/downloads/" not in directory or directory.rstrip("/").endswith("/downloads"):
+            log.debug("not removing unexpected bundle directory %r", directory)
+            return
+        try:
+            self._run(client, f"rm -rf {shlex.quote(directory)}")
+        except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+            log.debug("could not remove %s: %s", directory, exc)
+
+    def _backup(self, device: SeedDevice, cred: Credential) -> dict[str, str]:
         client = self._ssh_client(device, cred)
         try:
             output = self._run(client, BACKUP_COMMAND)
-            blob = self._download(client, bundle_paths(output))
+            paths = bundle_paths(output)
+            try:
+                blob = self._download(client, paths)
+            except FileNotFoundError:
+                scratch = self._run(client, f"readlink -f {SCRATCH}").strip()
+                if not scratch or scratch == SCRATCH:
+                    raise
+                paths = bundle_paths(output, scratch=scratch)
+                blob = self._download(client, paths)
+            self._remove_bundle(client, paths[-1])
         finally:
             client.close()
-        return {BACKUP_FILENAME: base64.encodebytes(blob).decode("ascii")}
+        return unpack_bundle(blob)
+
+    def configs(self, device: SeedDevice, cred: Credential) -> dict[str, str]:
+        """The host's configuration files, unpacked from a fresh backup bundle.
+
+        Gated on `cred.ssh_key_path`: the collector account is the read-only
+        API user and ESXi only gives a shell to Administrator-role users, so a
+        password alone is not an SSH credential and trying anyway would fail on
+        every host on every cycle. Throttled to one bundle an hour, because
+        each one writes a directory into the host's scratch space.
+
+        A failure degrades to "no files this run": the observed state has
+        already been collected and must not be lost, so the error is logged and
+        counted rather than raised.
+        """
+        if not cred.ssh_key_path:
+            log.debug(
+                "%s: no SSH key in the credential, skipping the host-config backup", device.name
+            )
+            return {}
+        last = _LAST_BACKUP.get(device.name)
+        now = time.monotonic()
+        if last is not None and now - last < BACKUP_MIN_INTERVAL_SECONDS:
+            return {}
+        _LAST_BACKUP[device.name] = now
+        try:
+            return self._backup(device, cred)
+        except Exception as exc:  # noqa: BLE001 - a failed backup must not fail the run
+            log.warning(
+                "host-config backup for %s failed (%s: %s)", device.name, type(exc).__name__, exc
+            )
+            metrics.CONFIG_BACKUP_ERRORS.labels(collector=self.name, device=device.name).inc()
+            return {}

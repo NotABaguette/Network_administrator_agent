@@ -28,12 +28,16 @@ from infra_agent.collectors.ilo import (
     RedfishError,
     RedfishSession,
     collection_entries,
+    collection_members,
     firmware_rows,
     health_rollup,
     health_value,
     ilo_generation,
+    linked,
     oem,
     oem_vendor,
+    path_id,
+    redfish_path,
     version_string,
 )
 from infra_agent.models.common import Credential, DeviceKind, SeedDevice
@@ -47,7 +51,12 @@ def load(name: str) -> dict[str, Any]:
 
 
 class FakeRedfish:
-    """Serves recorded documents; an unrecorded path fails the way a real GET would."""
+    """Serves recorded documents; an unrecorded path fails the way a real GET would.
+
+    iLO answers a resource with or without its trailing slash, so the fake does
+    too; anything that was not recorded 404s, exactly like a box that does not
+    publish that endpoint.
+    """
 
     def __init__(self, documents: dict[str, Any]):
         self.documents = documents
@@ -56,10 +65,15 @@ class FakeRedfish:
 
     def get(self, path: str) -> dict[str, Any]:
         self.requested.append(path)
-        try:
-            return self.documents[path]
-        except KeyError:
-            raise RedfishError(f"GET {path}: 404 Not Found") from None
+        for candidate in (path, path.rstrip("/") + "/", path.rstrip("/")):
+            if candidate in self.documents:
+                return self.documents[candidate]
+        raise RedfishError(f"GET {path}: 404 Not Found")
+
+    def count(self, path: str) -> int:
+        """How many GETs landed on one resource, whatever the spelling."""
+        wanted = path.rstrip("/")
+        return sum(1 for seen in self.requested if seen.rstrip("/") == wanted)
 
     def close(self) -> None:
         self.closed = True
@@ -128,6 +142,67 @@ def test_collection_entries_handles_every_shape_ilo_uses():
     )
     assert collection_entries({"links": {"Member": [{"href": "/b"}]}}) == ([], ["/b"])
     assert collection_entries({}) == ([], [])
+
+
+def test_redfish_path_rewrites_the_legacy_rest_prefix():
+    assert (
+        redfish_path("/rest/v1/Systems/1/Memory/proc1dimm1")
+        == "/redfish/v1/Systems/1/Memory/proc1dimm1"
+    )
+    assert redfish_path("/redfish/v1/Systems/1/") == "/redfish/v1/Systems/1/"
+    assert redfish_path(None) is None
+    assert path_id("/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/") == "1"
+    assert path_id(None) is None
+
+
+def test_collection_members_fetches_each_member_once_on_ilo4():
+    """A real iLO4 collection lists the same members twice, Redfish and RIS."""
+    collection = {
+        "@odata.id": "/redfish/v1/Systems/1/Memory/",
+        "Members@odata.count": 2,
+        "Members": [
+            {"@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm1/"},
+            {"@odata.id": "/redfish/v1/Systems/1/Memory/proc1dimm2/"},
+        ],
+        "links": {
+            "Member": [
+                {"href": "/rest/v1/Systems/1/Memory/proc1dimm1"},
+                {"href": "/rest/v1/Systems/1/Memory/proc1dimm2"},
+            ],
+            "self": {"href": "/rest/v1/Systems/1/Memory"},
+        },
+    }
+    assert collection_members(collection) == [
+        (None, "/redfish/v1/Systems/1/Memory/proc1dimm1/"),
+        (None, "/redfish/v1/Systems/1/Memory/proc1dimm2/"),
+    ]
+
+
+def test_collection_members_prefers_an_expanded_member_over_a_link_to_it():
+    entry = {"@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/7/", "Id": "7"}
+    collection = {
+        "Items": [entry],
+        "links": {"Member": [{"href": "/rest/v1/Systems/1/LogServices/IML/Entries/7"}]},
+    }
+    assert collection_members(collection) == [(entry, None)]
+
+    # ...whichever order the two spellings appear in
+    collection = {
+        "Members": [{"@odata.id": entry["@odata.id"]}],
+        "Items": [entry],
+    }
+    assert collection_members(collection) == [(entry, None)]
+
+
+def test_linked_resolves_a_name_wherever_the_generation_keeps_it():
+    modern = {"Links": {"PhysicalDrives": {"@odata.id": "/redfish/v1/a/DiskDrives/"}}}
+    legacy = {"links": {"PhysicalDrives": {"href": "/rest/v1/a/DiskDrives"}}}
+    direct = {"PhysicalDrives": {"@odata.id": "/redfish/v1/a/DiskDrives/"}}
+    assert linked(modern, "PhysicalDrives") == "/redfish/v1/a/DiskDrives/"
+    assert linked(legacy, "PhysicalDrives") == "/redfish/v1/a/DiskDrives"
+    assert linked(direct, "PhysicalDrives") == "/redfish/v1/a/DiskDrives/"
+    assert linked(modern, "DiskDrives", "PhysicalDrives") == "/redfish/v1/a/DiskDrives/"
+    assert linked({}, "PhysicalDrives") is None
 
 
 def test_version_string_accepts_both_encodings():
@@ -293,10 +368,9 @@ def test_ilo4_smart_storage_via_the_oem_hp_paths(data4):
     assert logical["raid"] == "1"
     assert logical["name"] == "01"
     assert logical["capacity_bytes"] == 1_144_609 * 1024 * 1024
-    assert logical["data_drives"] == [
-        "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/0/",
-        "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives/1/",
-    ]
+    # The storage graph joins on the drive Id, the same value on both sides.
+    assert logical["data_drives"] == ["0", "1"]
+    assert [d["id"] for d in controller["physical_drives"]] == ["0", "1"]
 
     drives = {d["location"]: d for d in controller["physical_drives"]}
     assert drives["1I:1:1"]["model"] == "EG1200JEHMC"  # trimmed
@@ -377,7 +451,7 @@ def test_ilo5_smart_storage_via_the_oem_hpe_paths(data5):
     assert controller["firmware"] == "3.53"
     (logical,) = controller["logical_drives"]
     assert logical["raid"] == "1"
-    assert len(logical["data_drives"]) == 2
+    assert logical["data_drives"] == [d["id"] for d in controller["physical_drives"]] == ["0", "1"]
     drives = {d["location"]: d for d in controller["physical_drives"]}
     assert drives["1I:1:1"]["media_type"] == "SSD"
     assert drives["1I:1:1"]["ssd_endurance_percent"] == 2
@@ -405,6 +479,8 @@ def test_ilo5_falls_back_to_the_standard_storage_tree(collector, ilo5):
     assert drives["Port:1I Box:1 Bay:1"]["capacity_bytes"] == 800_166_076_416
     assert drives["Port:1I Box:1 Bay:1"]["life_left_percent"] == 98
     assert drives["Port:1I Box:1 Bay:1"]["failure_predicted"] is False
+    # the volume joins to those drives by Id here too
+    assert volume["data_drives"] == sorted(d["id"] for d in controller["physical_drives"])
     # The SmartStorage attempt is not reported as a failure once Storage answered.
     assert data["errors"] == {}
 
@@ -444,12 +520,8 @@ def test_a_host_with_no_storage_at_all_reports_both_attempts(collector, ilo5):
     assert "storage" in data["errors"]
 
 
-def test_iml_fetching_is_capped(collector):
-    entries = {
-        f"/redfish/v1/Systems/1/LogServices/IML/Entries/{i}/": {"Id": str(i), "Severity": "OK"}
-        for i in range(100)
-    }
-    documents = {
+def _iml_documents(collection: dict[str, Any], entries: dict[str, Any] | None = None):
+    return {
         "/redfish/v1/Systems/1": {
             "LogServices": {"@odata.id": "/redfish/v1/Systems/1/LogServices/"}
         },
@@ -459,15 +531,179 @@ def test_iml_fetching_is_capped(collector):
         "/redfish/v1/Systems/1/LogServices/IML/": {
             "Entries": {"@odata.id": "/redfish/v1/Systems/1/LogServices/IML/Entries/"}
         },
-        "/redfish/v1/Systems/1/LogServices/IML/Entries/": {
-            "Members": [{"@odata.id": path} for path in entries]
-        },
-        **entries,
+        "/redfish/v1/Systems/1/LogServices/IML/Entries/": collection,
+        **(entries or {}),
     }
+
+
+def test_linked_iml_entries_are_capped_and_only_the_tail_is_fetched(collector):
+    entries = {
+        f"/redfish/v1/Systems/1/LogServices/IML/Entries/{i}/": {"Id": str(i), "Severity": "OK"}
+        for i in range(100)
+    }
+    documents = _iml_documents({"Members": [{"@odata.id": path} for path in entries]}, entries)
     client = FakeRedfish(documents)
-    rows = collector.collect_iml(client, documents["/redfish/v1/Systems/1"], {})
-    assert len(rows) == IML_MAX_ENTRIES
-    assert rows[-1]["id"] == "99"  # the tail, i.e. the recent end of the log
+
+    result = collector.collect_iml(client, documents["/redfish/v1/Systems/1"], {})
+
+    assert result["returned"] == IML_MAX_ENTRIES
+    assert result["total"] == 100 and result["truncated"] is True
+    assert result["entries"][-1]["id"] == "99"  # the recent end of the log
+    # nothing beyond the cap is fetched: that is the point on a slow iLO4
+    assert client.count("/redfish/v1/Systems/1/LogServices/IML/Entries/0/") == 0
+    assert client.count("/redfish/v1/Systems/1/LogServices/IML/Entries/99/") == 1
+
+
+@pytest.mark.parametrize("key", ["Items", "Members"])
+def test_inline_iml_entries_are_capped_too(collector, key):
+    """iLO4 hands the whole log over inline under Items; iLO5 expands Members.
+
+    Without a cap on the combined list a Gen9 with years of history writes
+    hundreds of rows into every snapshot and every structured diff.
+    """
+    inline = [
+        {
+            "@odata.id": f"/redfish/v1/Systems/1/LogServices/IML/Entries/{i}/",
+            "Id": str(i),
+            "Severity": "Critical" if i % 50 == 0 else "OK",
+            "Oem": {"Hp": {"Repaired": False}},
+        }
+        for i in range(100)
+    ]
+    client = FakeRedfish(_iml_documents({key: inline}))
+
+    result = collector.collect_iml(client, {}, {})
+
+    assert result["returned"] == IML_MAX_ENTRIES
+    assert result["total"] == 100 and result["truncated"] is True
+    assert [row["id"] for row in result["entries"]][0] == "75"
+    # entries 0 and 50 are outside the cap but were already in hand, so the
+    # fault count still describes the log rather than only its tail
+    assert result["active"] == 2
+    assert client.count("/redfish/v1/Systems/1/LogServices/IML/Entries/0/") == 0
+
+
+# --------------------------------------------------------------------------
+# Smart Array drive links: the shapes real controllers publish
+# --------------------------------------------------------------------------
+CONTROLLER = "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/0/"
+DISK_DRIVES = f"{CONTROLLER}DiskDrives/"
+
+
+def _smart_storage(controller_links: dict[str, Any]) -> dict[str, Any]:
+    """A minimal SmartStorage tree whose controller links its drives as given."""
+    return {
+        "/redfish/v1/Systems/1": {
+            "SmartStorage": {"@odata.id": "/redfish/v1/Systems/1/SmartStorage/"}
+        },
+        "/redfish/v1/Systems/1/SmartStorage/": {
+            "Links": {
+                "ArrayControllers": {
+                    "@odata.id": "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/"
+                }
+            }
+        },
+        "/redfish/v1/Systems/1/SmartStorage/ArrayControllers/": {
+            "Members": [{"@odata.id": CONTROLLER}]
+        },
+        CONTROLLER: {
+            "@odata.id": CONTROLLER,
+            "Id": "0",
+            "Model": "Smart Array P440ar",
+            "Status": {"Health": "OK"},
+            **controller_links,
+        },
+        f"{CONTROLLER}LogicalDrives/": {"Members": []},
+        DISK_DRIVES: {"Members": [{"@odata.id": f"{DISK_DRIVES}0/"}]},
+        f"{DISK_DRIVES}0/": {
+            "Id": "0",
+            "Location": "1I:1:1",
+            "CapacityMiB": 1_144_609,
+            "Status": {"Health": "OK", "State": "Enabled"},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("links", "shape"),
+    [
+        (
+            {"Links": {"PhysicalDrives": {"@odata.id": DISK_DRIVES}}},
+            "Links/PhysicalDrives: what iLO4 and iLO5 both publish",
+        ),
+        (
+            {
+                "links": {
+                    "PhysicalDrives": {
+                        "href": "/rest/v1/Systems/1/SmartStorage/ArrayControllers/0/DiskDrives"
+                    }
+                }
+            },
+            "the legacy lowercase links block iLO4 carries alongside it",
+        ),
+        (
+            {"Links": {"DiskDrives": {"@odata.id": DISK_DRIVES}}},
+            "a controller that names the link after the URL segment",
+        ),
+        ({}, "no drive link at all: the conventional path under the controller"),
+    ],
+)
+def test_physical_drives_are_found_however_the_controller_links_them(collector, links, shape):
+    client = FakeRedfish(_smart_storage(links))
+    errors: dict[str, str] = {}
+
+    (controller,) = collector.collect_smart_storage(
+        client, client.documents["/redfish/v1/Systems/1"], errors
+    )
+
+    assert [d["location"] for d in controller["physical_drives"]] == ["1I:1:1"], shape
+    assert errors == {}, shape
+
+
+def test_smart_storage_without_drives_falls_back_to_the_storage_tree(collector, ilo5):
+    """The drives are the leaf of the storage chain: a controller row alone is not enough."""
+    documents = dict(ilo5.documents)
+    documents[DISK_DRIVES] = {"Members": []}
+    data = collector.collect_from(FakeRedfish(documents))
+
+    (controller,) = data["storage"]
+    assert controller["source"] == "storage"
+    assert len(controller["physical_drives"]) == 2
+
+
+# --------------------------------------------------------------------------
+# iLO4 publishes every collection twice; nothing may be fetched or kept twice
+# --------------------------------------------------------------------------
+def test_ilo4_fetches_each_member_once_despite_the_duplicated_collections(collector, ilo4):
+    data = collector.collect_from(ilo4)
+
+    assert [d["locator"] for d in data["memory"]] == [
+        "PROC 1 DIMM 1",
+        "PROC 1 DIMM 4",
+        "PROC 1 DIMM 2",
+    ]
+    assert [p["socket"] for p in data["processors"]] == ["Proc 1", "Proc 2"]
+    assert [n["id"] for n in data["nics"]] == ["1", "2"]
+    assert [d["id"] for d in data["storage"][0]["physical_drives"]] == ["0", "1"]
+
+    for path in (
+        "/redfish/v1/Systems/1/Memory/proc1dimm1/",
+        "/redfish/v1/Systems/1/Processors/1/",
+        "/redfish/v1/Systems/1/EthernetInterfaces/1/",
+        f"{DISK_DRIVES}0/",
+    ):
+        assert ilo4.count(path) == 1, path
+    # the RIS root is never asked for: legacy hrefs are rewritten, not fetched
+    assert [path for path in ilo4.requested if path.startswith("/rest/")] == []
+
+
+def test_ilo4_iml_entries_come_from_the_inline_items(collector, ilo4):
+    data = collector.collect_from(ilo4)
+
+    assert [entry["id"] for entry in data["iml"]] == ["1", "7", "9"]
+    assert data["iml_summary"] == {"total": 3, "returned": 3, "truncated": False, "active": 2}
+    # they were already in hand, so they are not fetched again through the links
+    assert ilo4.count("/redfish/v1/Systems/1/LogServices/IML/Entries/7/") == 0
 
 
 # --------------------------------------------------------------------------
@@ -518,6 +754,42 @@ def test_metrics_from_an_ilo5_run(collector, data5):
     assert sample("infra_ilo_psu_health", labels | {"psu": "PSU 2"}) == 1.0
     assert sample("infra_ilo_power_consumed_watts", labels) == 214
     assert sample("infra_ilo_active_faults", labels) == 0
+
+
+def test_a_drive_pulled_for_rma_loses_its_series(collector, ilo5):
+    """Otherwise the failed drive keeps health 0 until another disk lands in the bay."""
+    device = "esx-05-ilo"
+    sample = REGISTRY.get_sample_value
+    collector.publish_metrics(device, collector.collect_from(ilo5))
+    gone = {"device": device, "controller": "0", "drive": "1I:1:2"}
+    stays = {"device": device, "controller": "0", "drive": "1I:1:1"}
+    assert sample("infra_ilo_drive_health", gone) == 1.0
+
+    ilo5.documents[DISK_DRIVES] = {"Members": [{"@odata.id": f"{DISK_DRIVES}0/"}]}
+    del ilo5.documents[f"{DISK_DRIVES}1/"]
+    data = collector.collect_from(ilo5)
+    assert data["errors"] == {}  # the drive is gone, not unreadable
+    collector.publish_metrics(device, data)
+
+    assert sample("infra_ilo_drive_health", gone) is None
+    assert sample("infra_ilo_drive_health", stays) == 1.0
+
+
+def test_a_failed_thermal_read_keeps_the_sensor_series(collector, ilo5):
+    """An endpoint that errored means "not collected", not "the sensor is gone"."""
+    device = "esx-06-ilo"
+    sample = REGISTRY.get_sample_value
+    sensor = {"device": device, "sensor": "06-P1 DIMM 7-12"}
+    collector.publish_metrics(device, collector.collect_from(ilo5))
+    assert sample("infra_ilo_temperature_celsius", sensor) == 82
+
+    del ilo5.documents["/redfish/v1/Chassis/1/Thermal"]
+    data = collector.collect_from(ilo5)
+    assert "thermal" in data["errors"]
+    collector.publish_metrics(device, data)
+
+    assert sample("infra_ilo_temperature_celsius", sensor) == 82
+    assert sample("infra_ilo_power_consumed_watts", {"device": device}) == 214
 
 
 def test_collect_opens_and_closes_one_session(monkeypatch, collector, ilo5):
@@ -649,6 +921,9 @@ def test_client_builds_the_url_from_the_device(monkeypatch, http, collector):
 # alert rules
 # --------------------------------------------------------------------------
 def _metric_names_defined_in_code() -> set[str]:
+    """Metric names as PromQL sees them: a Counter's series carries `_total`."""
+    from prometheus_client import Counter
+
     from infra_agent.monitoring import metrics
 
     names = set()
@@ -656,6 +931,8 @@ def _metric_names_defined_in_code() -> set[str]:
         name = getattr(value, "_name", None)
         if isinstance(name, str) and name.startswith("infra_"):
             names.add(name)
+            if isinstance(value, Counter):
+                names.add(f"{name}_total")
     return names
 
 
