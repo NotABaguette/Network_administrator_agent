@@ -287,25 +287,52 @@ def test_service_create_and_delete_round_trip(executor, ctx, box):
 # ---------------------------------------------------------------------------
 # policy
 # ---------------------------------------------------------------------------
+POLICY_BODY = {
+    "name": "lab-to-db",
+    "srcintf": [{"name": "lab"}],
+    "dstintf": [{"name": "internal"}],
+    "srcaddr": [{"name": "lab-host"}],
+    "dstaddr": [{"name": "srv-db-01"}],
+    "service": [{"name": "PGSQL"}],
+    "schedule": "always",
+}
+
+
+def test_a_policy_create_may_let_the_firewall_assign_the_id(executor, ctx, box):
+    """policyid and seq-num are server-assigned; the POST answer carries it."""
+    result = executor.apply(ctx, step("fortigate.policy", op="create", body=POLICY_BODY))
+    assert result.ok, result.error
+    assert result.output["object"] == "4"  # the fixture's policies are 1..3
+    assert box._find("cmdb/firewall/policy", 4)["name"] == "lab-to-db"
+
+    # and the assigned id is what the rollback deletes
+    assert executor.rollback(ctx, [result])[0].ok
+    assert box._find("cmdb/firewall/policy", 4) is None
+
+
+def test_a_create_the_firewall_gives_no_id_for_is_refused(executor, ctx, box):
+    """Without a key there is no way to delete what was just made."""
+    original = box.request
+
+    def no_mkey(*args, **kwargs):
+        answer = original(*args, **kwargs)
+        if args[2].upper() == "POST":
+            answer.pop("mkey", None)
+        return answer
+
+    box.request = no_mkey
+    result = executor.apply(ctx, step("fortigate.policy", op="create", body=POLICY_BODY))
+    assert result.ok is False
+    assert "cannot be rolled back" in result.error
+
+
+def test_an_update_without_a_key_is_still_refused(executor, ctx):
+    result = executor.apply(ctx, step("fortigate.policy", op="update", body={"nat": "enable"}))
+    assert result.ok is False
+    assert "needs a 'policyid'" in result.error
+
+
 def test_policy_create_uses_the_id_fortios_assigned(executor, ctx, box):
-    result = executor.apply(
-        ctx,
-        step(
-            "fortigate.policy",
-            op="create",
-            policyid="",
-            body={
-                "name": "lab-to-db",
-                "srcintf": [{"name": "lab"}],
-                "dstintf": [{"name": "internal"}],
-                "srcaddr": [{"name": "lab-host"}],
-                "dstaddr": [{"name": "srv-db-01"}],
-                "service": [{"name": "PGSQL"}],
-                "schedule": "always",
-            },
-        ),
-    )
-    assert result.ok is False  # no mkey given and none derivable
     result = executor.apply(
         ctx,
         step(

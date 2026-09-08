@@ -331,7 +331,14 @@ class FortiGateExecutor(Executor):
         return _rows(self._request(ctx, "GET", path))
 
     @staticmethod
-    def _mkey(spec: ObjectSpec, step: ChangeStep) -> Any:
+    def _mkey(spec: ObjectSpec, step: ChangeStep, op: str = UPDATE) -> Any:
+        """The object's key, or None for a create that lets FortiOS assign one.
+
+        A policy id and a static route's `seq-num` are server-assigned, so a
+        create is allowed to omit the key; the POST answer carries the `mkey`
+        the box chose and that is what the rollback deletes. Every other
+        operation has to say which object it means.
+        """
         params = step.params
         for candidate in ("mkey", spec.key, "name", "id"):
             if params.get(candidate) not in (None, ""):
@@ -339,6 +346,8 @@ class FortiGateExecutor(Executor):
         body = params.get("body") or {}
         if isinstance(body, dict) and body.get(spec.key) not in (None, ""):
             return body[spec.key]
+        if op == CREATE:
+            return None
         raise ValueError(f"{step.action} needs a {spec.key!r} to identify the object")
 
     @staticmethod
@@ -455,46 +464,47 @@ class FortiGateExecutor(Executor):
         try:
             spec = self._spec(step)
             op = self._op(step)
-            mkey = self._mkey(spec, step)
+            mkey = self._mkey(spec, step, op)
             body = self._body(step)
         except ValueError as exc:
             return {"action": step.action, "error": str(exc)}, warnings, [str(exc)]
 
+        label = str(mkey) if mkey is not None else f"<new {spec.label}>"
         try:
-            previous = self._get_object(ctx, spec, mkey)
+            previous = self._get_object(ctx, spec, mkey) if mkey is not None else None
         except Exception as exc:  # noqa: BLE001
             detail = short_error(exc)
             return (
-                {"action": step.action, "op": op, "object": str(mkey), "error": detail},
+                {"action": step.action, "op": op, "object": label, "error": detail},
                 warnings,
-                [f"could not read {spec.label} {mkey}: {detail}"],
+                [f"could not read {spec.label} {label}: {detail}"],
             )
 
         entry: dict[str, Any] = {
             "action": step.action,
             "op": op,
-            "object": str(mkey),
+            "object": label,
             "path": spec.path,
             "before": scrub(previous) if previous else None,
         }
 
         if op == CREATE and previous is not None:
-            blockers.append(f"{spec.label} {mkey} already exists")
+            blockers.append(f"{spec.label} {label} already exists")
         if op in (UPDATE, DELETE, MOVE, ENABLE, DISABLE) and previous is None:
-            blockers.append(f"{spec.label} {mkey} does not exist")
+            blockers.append(f"{spec.label} {label} does not exist")
 
         if op == DELETE:
             entry["after"] = None
             hits = self._referencing_policies(live, spec, mkey)
             if hits:
                 blockers.append(
-                    f"{spec.label} {mkey} is still referenced by "
+                    f"{spec.label} {label} is still referenced by "
                     f"{'policies' if len(hits) > 1 else 'policy'} {', '.join(sorted(hits))}"
                 )
             groups = self._referencing_groups(ctx, spec, mkey)
             if groups:
                 blockers.append(
-                    f"{spec.label} {mkey} is still a member of {', '.join(sorted(groups))}"
+                    f"{spec.label} {label} is still a member of {', '.join(sorted(groups))}"
                 )
         elif op in (ENABLE, DISABLE):
             after = dict(scrub(previous) if previous else {})
@@ -519,7 +529,7 @@ class FortiGateExecutor(Executor):
             dropped = secret_fields(body)
             if dropped:
                 warnings.append(
-                    f"{spec.label} {mkey}: {', '.join(dropped)} will not be captured for rollback"
+                    f"{spec.label} {label}: {', '.join(dropped)} will not be captured for rollback"
                 )
 
         if spec.action == "fortigate.policy" and op != DELETE:
@@ -532,7 +542,7 @@ class FortiGateExecutor(Executor):
             if wan:
                 entry["wan_interfaces"] = wan
                 warnings.append(
-                    f"policy {mkey} references WAN interface {', '.join(wan)}: "
+                    f"policy {label} references WAN interface {', '.join(wan)}: "
                     "an edge change, tier accordingly"
                 )
         return entry, warnings, blockers
@@ -712,9 +722,9 @@ class FortiGateExecutor(Executor):
     def _apply(self, ctx: ExecutionContext, step: ChangeStep) -> dict[str, Any]:
         spec = self._spec(step)
         op = self._op(step)
-        mkey = self._mkey(spec, step)
+        mkey = self._mkey(spec, step, op)
         body = self._body(step)
-        previous = self._get_object(ctx, spec, mkey)
+        previous = self._get_object(ctx, spec, mkey) if mkey is not None else None
         dropped: list[str] = []
         output: dict[str, Any] = {
             "action": step.action,
@@ -722,7 +732,7 @@ class FortiGateExecutor(Executor):
             "op": op,
             "path": spec.path,
             "key": spec.key,
-            "object": str(mkey),
+            "object": str(mkey) if mkey is not None else None,
             "existed": previous is not None,
             # local rollback material only: scrubbed, and never LLM-visible
             "previous": scrub(previous, dropped) if previous is not None else None,
@@ -733,9 +743,16 @@ class FortiGateExecutor(Executor):
             if previous is not None:
                 raise ValueError(f"{spec.label} {mkey} already exists")
             payload = dict(body)
-            payload.setdefault(spec.key, mkey)
+            if mkey is not None:
+                payload.setdefault(spec.key, mkey)
             answer = self._request(ctx, "POST", spec.path, body=payload)
             created = answer.get("mkey") if isinstance(answer, dict) else None
+            if created in (None, "") and mkey is None:
+                # Without a key there is no way to delete what was just made.
+                raise ValueError(
+                    f"FortiOS did not report the {spec.key!r} it assigned; "
+                    "the object cannot be rolled back, so give the step an explicit key"
+                )
             output["object"] = str(created if created not in (None, "") else mkey)
             output["rollback"] = DELETE
             return output

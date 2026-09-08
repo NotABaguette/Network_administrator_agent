@@ -95,6 +95,12 @@ All five take `params.op` — one of `create`, `update`, `delete`, `move`,
 
 A `move` needs `params.position` (`before` / `after`) and `params.target`.
 
+A `create` may omit the key — a `policyid` and a static route's `seq-num` are
+server-assigned — and the executor takes the `mkey` from the POST answer, which
+is what the rollback then deletes. If FortiOS reports no key the step fails
+rather than leave an object nothing can remove. Every other operation must say
+which object it means.
+
 ### Rollback
 
 | What was applied | What rollback does |
