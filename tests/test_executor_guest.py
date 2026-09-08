@@ -639,3 +639,29 @@ def test_a_command_result_reports_the_failing_command_without_its_arguments():
     with pytest.raises(gu.GuestError) as caught:
         result.check()
     assert "systemctl exited 5" in str(caught.value)
+
+
+def test_a_restart_that_left_the_unit_failed_is_still_rolled_back(executor, ctx, linux_shell):
+    """The unit was restarted; that it ended up 'failed' does not undo the restart."""
+    states = iter(["active\n", "failed\n"])
+    linux_shell.script["systemctl show -p ActiveState --value -- nginx"] = lambda: (
+        0,
+        next(states),
+        "",
+    )
+    result = executor.apply(ctx, step("guest.service_restart", service="nginx"))
+    assert result.ok is False
+    assert executor.partially_applied(result) is True
+
+    linux_shell.commands.clear()
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert linux_shell.commands == ["systemctl start -- nginx"]
+
+
+def test_a_step_that_never_reached_the_service_is_skipped(executor, ctx, linux_shell):
+    linux_shell.set("systemctl show -p ActiveState --value -- ghost", "missing\n")
+    result = executor.apply(ctx, step("guest.service_restart", service="ghost"))
+    assert result.ok is False
+    assert executor.partially_applied(result) is False
+    assert executor.rollback(ctx, [result]) == []

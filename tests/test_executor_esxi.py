@@ -1307,3 +1307,24 @@ def test_the_licensed_path_destroys_a_clone_on_rollback(api, api_ctx, api_vm):
     )
     assert result.ok, result.error
     assert [c[0] for c in api_vm.calls] == ["clone"]
+
+
+def test_a_step_that_failed_after_its_pre_snapshot_is_still_rolled_back(executor, ctx, host):
+    """The snapshot exists, so the rollback has somewhere to go back to."""
+    host.fail["reconfigure"] = ex.EsxiError("the host rejected the reconfigure")
+    result = executor.apply(ctx, step("vm.resize", vm="web-01", cpu=4))
+    assert result.ok is False
+    assert result.output["pre_snapshot"] == "infra-plan-9f"
+    assert executor.partially_applied(result) is True
+
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert undone.output["undo"] == "reverted to 'infra-plan-9f'"
+
+
+def test_a_step_that_failed_before_touching_anything_is_skipped(executor, ctx, host):
+    host.fail["snapshot_create"] = ex.EsxiError("no space")
+    result = executor.apply(ctx, step("vm.resize", vm="web-01", cpu=4))
+    assert result.ok is False
+    assert executor.partially_applied(result) is False
+    assert executor.rollback(ctx, [result]) == []

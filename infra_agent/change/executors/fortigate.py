@@ -20,8 +20,9 @@ path, so this executor is deliberately narrow:
 
 `dry_run` is where the tiering information comes from: it resolves every
 address, service and interface a step references, blocks a delete whose object
-is still referenced by a policy, and warns when a policy touches a WAN
-interface so the engine can escalate the plan to Tier 2.
+is still referenced by a policy or held by an address or service group, and
+warns when a policy touches a WAN interface so the engine can escalate the plan
+to Tier 2.
 
 TLS verification is off until the Phase 1 pinning work lands; that mirrors the
 collector rather than inventing a second policy.
@@ -423,6 +424,28 @@ class FortiGateExecutor(Executor):
                 hits.append(str(policy.get("policyid")))
         return hits
 
+    def _referencing_groups(self, ctx: ExecutionContext, spec: ObjectSpec, mkey: Any) -> list[str]:
+        """Group names that still hold this object.
+
+        FortiOS rejects a delete for a group membership just as it does for a
+        policy reference, so a plan that only checked policies would fail
+        halfway through instead of at the dry run.
+        """
+        if spec.action == "fortigate.service":
+            path, member_field = SERVICE_GROUP_PATH, "member"
+        elif spec.action in ("fortigate.address", "fortigate.vip"):
+            path, member_field = ADDRGRP_PATH, "member"
+        else:
+            return []
+        name = str(mkey)
+        try:
+            groups = self._collection(ctx, path)
+        except Exception:  # noqa: BLE001 - a missing group family blocks nothing
+            return []
+        return [
+            str(group.get("name")) for group in groups if name in names_of(group.get(member_field))
+        ]
+
     def _step_diff(
         self, ctx: ExecutionContext, live: _Live, step: ChangeStep
     ) -> tuple[dict[str, Any], list[str], list[str]]:
@@ -467,6 +490,11 @@ class FortiGateExecutor(Executor):
                 blockers.append(
                     f"{spec.label} {mkey} is still referenced by "
                     f"{'policies' if len(hits) > 1 else 'policy'} {', '.join(sorted(hits))}"
+                )
+            groups = self._referencing_groups(ctx, spec, mkey)
+            if groups:
+                blockers.append(
+                    f"{spec.label} {mkey} is still a member of {', '.join(sorted(groups))}"
                 )
         elif op in (ENABLE, DISABLE):
             after = dict(scrub(previous) if previous else {})

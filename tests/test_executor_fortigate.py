@@ -692,3 +692,24 @@ def test_step_result_output_stays_json_serialisable(executor, ctx):
         ctx, step("fortigate.address", op="delete", name="lab-host")
     )
     json.dumps(result.model_dump(mode="json"))
+
+
+def test_dry_run_blocks_deleting_an_address_a_group_still_holds(executor, ctx, box):
+    # only the address group references srv-web-01 once policy 2 is gone
+    box.rows("cmdb/firewall/policy").remove(box._find("cmdb/firewall/policy", 2))
+    result = executor.dry_run(ctx, [step("fortigate.address", op="delete", name="srv-web-01")])
+    assert result.ok is False
+    assert any("still a member of servers" in b for b in result.blockers)
+
+
+def test_dry_run_blocks_deleting_a_service_a_group_still_holds(executor, ctx, box):
+    box.rows("cmdb/firewall/policy").clear()
+    result = executor.dry_run(ctx, [step("fortigate.service", op="delete", name="HTTPS")])
+    assert result.ok is False
+    assert any("still a member of web-stack" in b for b in result.blockers)
+
+
+def test_an_unreferenced_object_is_not_blocked_by_the_group_check(executor, ctx, box):
+    box.rows("cmdb/firewall/policy").clear()
+    result = executor.dry_run(ctx, [step("fortigate.service", op="delete", name="PGSQL")])
+    assert result.ok, result.blockers

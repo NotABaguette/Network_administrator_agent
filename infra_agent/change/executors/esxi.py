@@ -1647,10 +1647,22 @@ class EsxiExecutor(Executor):
         }
 
     # -- rollback ---------------------------------------------------------
+    @staticmethod
+    def partially_applied(result: StepResult) -> bool:
+        """Whether a *failed* step left something behind that must be undone.
+
+        A step that took its pre-change snapshot and then failed part-way — the
+        vmx was rewritten but the reload failed, the power-on task errored — is
+        not a no-op, and its snapshot is the only way back. The engine may hand
+        such a step to `rollback` or not; either way it is handled here rather
+        than left as an orphaned `infra-<plan_id>` on the datastore.
+        """
+        return bool(result.output.get("pre_snapshot"))
+
     def rollback(self, ctx: ExecutionContext, applied: list[StepResult]) -> list[StepResult]:
         undone: list[StepResult] = []
         for result in reversed(applied):
-            if not result.ok:
+            if not result.ok and not self.partially_applied(result):
                 continue
             undone.append(self._undo(ctx, result))
         return undone

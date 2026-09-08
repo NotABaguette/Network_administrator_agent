@@ -861,10 +861,25 @@ class GuestExecutor(Executor):
         return {k: v for k, v in dialect.parse_versions(result.stdout).items() if k in set(safe)}
 
     # -- rollback ---------------------------------------------------------
+    @staticmethod
+    def partially_applied(result: StepResult) -> bool:
+        """Whether a *failed* service step already changed the service.
+
+        `systemctl restart` succeeding and the unit then landing in `failed` is
+        a failed step whose service has still been restarted; leaving it there
+        because the step reported an error is how a rollback becomes a lie. The
+        commands the step recorded are the evidence that it acted.
+        """
+        return bool(
+            result.step.action in SERVICE_ACTIONS
+            and result.output.get("previous_state")
+            and result.output.get("commands")
+        )
+
     def rollback(self, ctx: ExecutionContext, applied: list[StepResult]) -> list[StepResult]:
         undone: list[StepResult] = []
         for result in reversed(applied):
-            if not result.ok:
+            if not result.ok and not self.partially_applied(result):
                 continue
             undone.append(self._undo(ctx, result))
         return undone
