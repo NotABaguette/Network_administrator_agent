@@ -19,6 +19,10 @@ def get_probe(kind: DeviceKind) -> Probe:
         from infra_agent.onboarding.probes.ilo import IloProbe
 
         return IloProbe()
+    if kind in (DeviceKind.guest_linux, DeviceKind.guest_windows):
+        from infra_agent.onboarding.probes.guest import GuestProbe
+
+        return GuestProbe()
     raise LookupError(kind)
 
 

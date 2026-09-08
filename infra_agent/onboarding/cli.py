@@ -25,6 +25,7 @@ from infra_agent.onboarding.secrets import (
     set_sops_recipient,
     sops_available,
 )
+from infra_agent.store.snapshots import FileSnapshotStore
 
 app = typer.Typer(help="Onboard devices and platform secrets (human present; secrets stay local)")
 console = Console()
@@ -152,6 +153,106 @@ def accounts(device: str, username: str = "infra-ro") -> None:
         console.print(f"[green]password stored as[/] devices/{device}:{username}")
     for line in account_commands(d.kind, username, password, mgmt_ip):
         console.print(line)
+
+
+@app.command("seed-guests")
+def seed_guests(
+    dry_run: bool = typer.Option(False, "--dry-run", help="list the candidates and stop"),
+    skip_probe: bool = typer.Option(False),
+    write_files: bool = typer.Option(
+        True, help="rewrite ansible/inventory/guests.yml and the Prometheus targets"
+    ),
+) -> None:
+    """Offer the VMs that look like guests, from the latest ESXi snapshots.
+
+    A VM qualifies when its guest IP is known and its annotation (VM Notes,
+    which is where a standalone host keeps a tag without vCenter) carries
+    `guest:linux` or `guest:windows`. Any other `key:value` token in the
+    annotation - `service:nginx`, `auto:restart` - is copied onto the seed
+    device, because that is what the collector's gauges and the Tier 0
+    allowlists key off.
+    """
+    from infra_agent.guest_inventory import guest_candidates, seed_device_for, write_all
+
+    settings = get_settings()
+    inv = SeedInventory.load(settings.seed_inventory)
+    store = FileSnapshotStore(settings.snapshot_dir)
+    candidates = guest_candidates(store, inv)
+    if not candidates:
+        console.print(
+            "[yellow]no candidates[/]: run `infra collect` first, then tag the VMs you want "
+            "collected with `guest:linux` or `guest:windows` in their Notes."
+        )
+        raise typer.Exit(0)
+
+    table = Table("vm", "host", "kind", "address", "tags", "status")
+    for candidate in candidates:
+        table.add_row(
+            candidate.vm,
+            candidate.host,
+            candidate.kind.value,
+            candidate.address or "-",
+            ",".join(candidate.tags),
+            candidate.reason or "ready",
+        )
+    console.print(table)
+    if dry_run:
+        raise typer.Exit(0)
+
+    store_secrets = SecretsStore(settings.secrets_dir)
+    if not store_secrets.available():
+        raise typer.BadParameter("run `infra onboard init` first")
+
+    added = 0
+    for candidate in candidates:
+        if candidate.onboarded or not candidate.address:
+            continue
+        if not typer.confirm(f"onboard {candidate.vm} ({candidate.address})?", default=False):
+            continue
+        name = typer.prompt("device name", default=candidate.suggested_name)
+        device = seed_device_for(candidate, name)
+        username = typer.prompt("username", default="infra-ro")
+        key_path = (
+            typer.prompt("SSH private key path (blank for password)", default="")
+            if candidate.kind is DeviceKind.guest_linux
+            else ""
+        )
+        cred = Credential(
+            username=username,
+            ssh_key_path=key_path or None,
+            password=getpass("password (blank if the key needs none): ") or None,
+        )
+        if not skip_probe:
+            console.print(f"probing {candidate.kind.value} at {device.mgmt_ip} ...")
+            device.probe = get_probe(device.kind).probe(device, cred)
+            if not device.probe.ok:
+                console.print(f"[red]probe failed:[/] {device.probe.error}")
+                if not typer.confirm("store the credential anyway?", default=False):
+                    continue
+            else:
+                console.print(f"[green]identity[/] {device.probe.identity}")
+                console.print(f"[green]privilege[/] {device.probe.privilege}")
+                for warning in device.probe.warnings:
+                    console.print(f"[yellow]warning[/] {warning}")
+        store_secrets.update(
+            "devices",
+            device.credential_ref,
+            {
+                "username": cred.username,
+                "password": cred.password.get_secret_value() if cred.password else None,
+                "ssh_key_path": cred.ssh_key_path,
+            },
+        )
+        inv.upsert(device)
+        added += 1
+        console.print(f"[green]added[/] {device.name} ({device.kind.value})")
+
+    if added:
+        inv.save(settings.seed_inventory)
+        console.print(f"[green]wrote[/] {added} guest(s) to {settings.seed_inventory}")
+    if write_files:
+        for path in write_all(inv, settings):
+            console.print(f"[green]generated[/] {path}")
 
 
 @app.command()

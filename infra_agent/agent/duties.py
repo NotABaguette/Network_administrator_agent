@@ -38,6 +38,9 @@ KNOWN_GOOD_VERSIONS = Path(__file__).with_name("known_good_versions.yaml")
 STALE_SNAPSHOT_SECONDS = 3600
 DATASTORE_WARN_DAYS = 30
 DATASTORE_WARN_PERCENT = 15.0
+#: Certificates inside this many days go in the digest. Kept in the guest
+#: collector so the duty, the gauge and the alert rule share one threshold.
+CERT_EXPIRY_WARN_DAYS = 30
 
 #: Collector health has to come from Prometheus, not from this process's own
 #: registry: `run_collector` sets these gauges inside the `infra-collectors`
@@ -65,11 +68,13 @@ VERSION_PATHS: tuple[tuple[str, ...], ...] = (
 DIGEST_TASK = """\
 Write the owner's daily digest from the context below. Lead with anything that
 needs a decision today, then the rest in one short section each: collector
-health, stale snapshots, unapproved configuration changes, drift, and the
-datastore forecast. Name devices explicitly. If a section has nothing to say,
-say so in one line rather than padding it. If something in the context looks
-wrong or missing, say that too - do not fill the gap with a guess. End with a
-single recommended next action, or "nothing needed today".
+health, stale snapshots, unapproved configuration changes, drift, the datastore
+forecast, and certificates about to expire (an expired one is an outage that has
+already started; say which guest and which service). Name devices explicitly.
+If a section has nothing to say, say so in one line rather than padding it.
+If something in the context looks wrong or missing, say that too - do not fill
+the gap with a guess. End with a single recommended next action, or "nothing
+needed today".
 """
 
 WEEKLY_TASK = """\
@@ -389,6 +394,24 @@ class Duties:
             log.exception("drift provider failed")
             return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
 
+    def certificate_expiry(self, within_days: int = CERT_EXPIRY_WARN_DAYS) -> list[dict[str, Any]]:
+        """Guest certificates inside `within_days`, newest deadline first.
+
+        The rows come from the guest snapshots; the arithmetic is redone against
+        now by `infra_agent.collectors.guest.expiring_certificates`, so a guest
+        whose collector has been failing for a week does not look a week less
+        urgent than it is. Renewal is a Tier 1 change on the guest, so the digest
+        reports and the owner decides.
+        """
+        from infra_agent.collectors.guest import expiring_certificates
+
+        guests = [
+            (device.name, snapshot.data)
+            for device in self.devices()
+            if device.platform == "guest" and (snapshot := self.latest(device)) is not None
+        ]
+        return expiring_certificates(guests, within_days=within_days, now=self._now())
+
     def datastore_forecast(self, window: int = 12) -> list[dict[str, Any]]:
         """Linear free-space forecast per datastore from the recent snapshot series."""
         rows: list[dict[str, Any]] = []
@@ -562,6 +585,7 @@ class Duties:
             "pending_approvals": self.pending_approvals(),
             "drift": self.drift(),
             "datastore_forecast": self.datastore_forecast(),
+            "certificate_expiry": self.certificate_expiry(),
         }
 
     def daily_digest(self) -> AgentRunResult:

@@ -1,0 +1,76 @@
+# windows_exporter on the Windows guests.
+#
+# The MSI installs a service; the only thing worth configuring is the collector
+# set and the listen address. `service` and `logical_disk` are on because the
+# guest alert rules (`infra_agent/monitoring/rules/guest.yaml`) are about
+# services and disks, and the collector's own snapshot is 15 minutes old at
+# worst - the exporter is what fills the gap between runs.
+---
+- name: windows_exporter on the Windows guests
+  hosts: guest_windows
+  gather_facts: true
+  vars:
+    windows_exporter_version: "0.25.1"
+    exporter_port: 9182
+    exporter_download_base: "https://github.com/prometheus-community/windows_exporter/releases/download"
+    windows_exporter_url: >-
+      {{ exporter_download_base }}/v{{ windows_exporter_version }}/windows_exporter-{{
+      windows_exporter_version }}-amd64.msi
+    windows_exporter_collectors: "cpu,cs,logical_disk,net,os,service,system,memory,tcp"
+    windows_exporter_installer: 'C:\Windows\Temp\windows_exporter.msi'
+
+  tasks:
+    - name: Look for an existing installation
+      ansible.windows.win_service:
+        name: windows_exporter
+      register: existing
+      failed_when: false
+      changed_when: false
+
+    - name: Download the installer
+      ansible.windows.win_get_url:
+        url: "{{ windows_exporter_url }}"
+        dest: "{{ windows_exporter_installer }}"
+      when: not existing.exists | default(false)
+
+    - name: Install windows_exporter
+      ansible.windows.win_package:
+        path: "{{ windows_exporter_installer }}"
+        state: present
+        arguments: >-
+          ENABLED_COLLECTORS="{{ windows_exporter_collectors }}"
+          LISTEN_ADDR="{{ ansible_host }}"
+          LISTEN_PORT="{{ exporter_port }}"
+      notify: Restart windows_exporter
+
+    - name: Allow the scrape from mgmt-01 only
+      community.windows.win_firewall_rule:
+        name: "Prometheus windows_exporter"
+        localport: "{{ exporter_port }}"
+        action: allow
+        direction: in
+        protocol: tcp
+        remoteip: "{{ prometheus_address | default('any') }}"
+        state: present
+        enabled: true
+
+    - name: Make sure the service is running
+      ansible.windows.win_service:
+        name: windows_exporter
+        start_mode: auto
+        state: started
+
+    - name: Confirm the exporter answers
+      ansible.windows.win_uri:
+        url: "http://{{ ansible_host }}:{{ exporter_port }}/metrics"
+        status_code: 200
+      register: probe
+      retries: 3
+      delay: 2
+      until: probe is succeeded
+
+  handlers:
+    - name: Restart windows_exporter
+      ansible.windows.win_service:
+        name: windows_exporter
+        state: restarted

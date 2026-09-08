@@ -1,0 +1,134 @@
+# node_exporter on the Linux guests.
+#
+# Deliberately small: a pinned tarball, a system user with no shell, a systemd
+# unit bound to the guest's own management address, and nothing else. The
+# exporter is a *read* surface, so it runs unprivileged and listens on the
+# management address only - the estate has no reverse proxy in front of it.
+---
+- name: node_exporter on the Linux guests
+  hosts: guest_linux
+  become: true
+  gather_facts: true
+  vars:
+    node_exporter_version: "1.8.2"
+    exporter_port: 9100
+    exporter_download_base: "https://github.com/prometheus/node_exporter/releases/download"
+    node_exporter_url: >-
+      {{ exporter_download_base }}/v{{ node_exporter_version }}/node_exporter-{{
+      node_exporter_version }}.linux-amd64.tar.gz
+    node_exporter_user: node_exporter
+    # `systemd` needs the unit collector for GuestServiceDown to be
+    # corroborated by the exporter; `processes` is left off, it is expensive.
+    node_exporter_collectors:
+      - systemd
+      - textfile
+    node_exporter_textfile_dir: /var/lib/node_exporter/textfile_collector
+    # Which address to listen on: the guest's own management address, which is
+    # what `infra onboard seed-guests` wrote into the Prometheus targets.
+    exporter_listen_address: "{{ ansible_host }}"
+
+  tasks:
+    - name: Create the unprivileged exporter account
+      ansible.builtin.user:
+        name: "{{ node_exporter_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+        home: /var/lib/node_exporter
+
+    - name: Create the textfile collector directory
+      ansible.builtin.file:
+        path: "{{ node_exporter_textfile_dir }}"
+        state: directory
+        owner: "{{ node_exporter_user }}"
+        group: "{{ node_exporter_user }}"
+        mode: "0755"
+
+    - name: Check the installed version
+      ansible.builtin.command: /usr/local/bin/node_exporter --version
+      register: installed
+      changed_when: false
+      failed_when: false
+
+    - name: Download and unpack node_exporter
+      when: node_exporter_version not in (installed.stderr | default('')) + (installed.stdout | default(''))
+      block:
+        - name: Unpack the release tarball
+          ansible.builtin.unarchive:
+            src: "{{ node_exporter_url }}"
+            dest: /tmp
+            remote_src: true
+            creates: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+
+        - name: Install the binary
+          ansible.builtin.copy:
+            src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+            dest: /usr/local/bin/node_exporter
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+          notify: Restart node_exporter
+
+    - name: Install the systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/node_exporter.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by ansible/playbooks/node_exporter.yml - do not edit by hand.
+          [Unit]
+          Description=Prometheus node_exporter
+          Documentation=https://github.com/prometheus/node_exporter
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          User={{ node_exporter_user }}
+          Group={{ node_exporter_user }}
+          Type=simple
+          ExecStart=/usr/local/bin/node_exporter \
+            --web.listen-address={{ exporter_listen_address }}:{{ exporter_port }} \
+            {% for collector in node_exporter_collectors %}--collector.{{ collector }} \
+            {% endfor %}--collector.textfile.directory={{ node_exporter_textfile_dir }}
+          Restart=on-failure
+          RestartSec=5
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          ReadWritePaths={{ node_exporter_textfile_dir }}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - Reload systemd
+        - Restart node_exporter
+
+    - name: Enable and start node_exporter
+      ansible.builtin.systemd:
+        name: node_exporter
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Confirm the exporter answers
+      ansible.builtin.uri:
+        url: "http://{{ exporter_listen_address }}:{{ exporter_port }}/metrics"
+        return_content: false
+        status_code: 200
+      register: probe
+      retries: 3
+      delay: 2
+      until: probe is succeeded
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart node_exporter
+      ansible.builtin.systemd:
+        name: node_exporter
+        state: restarted

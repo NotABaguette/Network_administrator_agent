@@ -726,6 +726,51 @@ def test_the_updates_alert_waits_thirty_days():
     assert rules["GuestUpdatesPending"]["for"] == "30d"
 
 
+# --------------------------------------------------------------------------
+# the daily digest's certificate section
+# --------------------------------------------------------------------------
+def test_the_daily_digest_reports_expiring_guest_certificates(tmp_path, linux_data):
+    """The duty reads the guest snapshots and recomputes the deadline itself."""
+    from infra_agent.agent import duties as duties_module
+    from infra_agent.agent.duties import Duties
+    from infra_agent.config import Settings
+    from infra_agent.models.common import SeedInventory, Snapshot
+    from infra_agent.store.snapshots import FileSnapshotStore
+
+    settings = Settings(data_dir=tmp_path / "data", seed_inventory=tmp_path / "seed.yaml")
+    snapshots = FileSnapshotStore(tmp_path / "snapshots")
+    snapshots.save(Snapshot(device="web-01", collector="guest", taken_at=NOW, data=linux_data))
+    snapshots.save(
+        Snapshot(device="sw-core-01", collector="cisco", taken_at=NOW, data={"vlans": []})
+    )
+    inventory = SeedInventory(
+        devices=[
+            linux_device("web-01"),
+            SeedDevice(
+                name="sw-core-01",
+                kind=DeviceKind.cisco_ios,
+                mgmt_ip="10.10.10.11",
+                credential_ref="sw-core-01",
+            ),
+        ]
+    )
+    duties = Duties(
+        settings=settings,
+        snapshots=snapshots,
+        inventory=lambda: inventory,
+        now=lambda: datetime(2026, 9, 16, 12, 0, tzinfo=UTC),
+    )
+
+    rows = duties.certificate_expiry()
+
+    # only the certificate inside 30 days, and the deadline is recomputed
+    assert [row["common_name"] for row in rows] == ["legacy.internal"]
+    assert rows[0]["device"] == "web-01"
+    assert rows[0]["days_to_expiry"] == pytest.approx(3.9, abs=0.1)
+    assert duties.digest_context()["certificate_expiry"] == rows
+    assert "certificates about to expire" in duties_module.DIGEST_TASK
+
+
 def test_paramiko_and_winrm_are_imported_lazily():
     """The core package must import on a box with no `devices` extra."""
     import ast
