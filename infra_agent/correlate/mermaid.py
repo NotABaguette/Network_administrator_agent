@@ -301,9 +301,7 @@ def _application_owner(graph: TopologyGraph, node: str, depth: int = 0) -> str |
         for owner, _edge in graph.in_edges(node, kind):
             if graph.node(owner).get("kind") in (str(NodeKind.vm), str(NodeKind.device)):
                 return owner
-            grandparent = (
-                _application_owner(graph, owner, depth + 1) if owner != node else None
-            )
+            grandparent = _application_owner(graph, owner, depth + 1) if owner != node else None
             if grandparent:
                 return grandparent
     return None
