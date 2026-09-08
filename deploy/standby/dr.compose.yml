@@ -1,0 +1,58 @@
+# Disaster recovery, run inside the stack - which is where the state is.
+#
+# The platform keeps everything it knows in the named volume `infra-data`
+# (deploy/docker-compose.yml mounts it at /app/data in every service). A host
+# `infra dr export` would read ./data instead: an empty directory that nothing
+# writes to, so the bundle would carry no plan store, no snapshots, no baseline
+# and no config history, and a host `infra dr import` would restore into a
+# directory the running stack never reads - including the FROZEN marker the
+# whole safety story depends on.
+#
+# So DR runs in a container that mounts the same volume, on the same network
+# (so `pg_dump` can reach the `postgres` service, which publishes no host port),
+# with the SSH key and the age key mounted read-only.
+#
+# ALWAYS used together with the main compose file, which is what defines the
+# project, the network and the volume:
+#
+#   docker compose --profile dr \
+#     -f deploy/docker-compose.yml -f deploy/standby/dr.compose.yml \
+#     run --rm dr infra dr export --to "$INFRA_DR_TARGET"
+#
+# `deploy/standby/sync.sh`, `failover.sh` and `failback.sh` do exactly that;
+# there is no reason to type it by hand except to read the output.
+#
+# Relative paths below are resolved against the FIRST compose file's directory
+# (deploy/), the same as in docker-compose.yml.
+
+services:
+  dr:
+    build:
+      context: ..
+      dockerfile: deploy/standby/Dockerfile.dr
+    env_file: .env
+    # Not started by `docker compose up`: this container exists for the minutes
+    # a night an export takes, and for the ten minutes of a failover.
+    profiles: ["dr"]
+    volumes:
+      - ../inventory:/app/inventory:ro
+      - ../secrets:/app/secrets:ro
+      - ${SOPS_AGE_KEY_FILE:-~/.config/sops/age/keys.txt}:/root/.config/sops/age/keys.txt:ro
+      # The platform's live state. The whole point of this file.
+      - infra-data:/app/data
+      # The push key and the pinned host key of the standby. Create both before
+      # the first run: Docker creates a *directory* for a bind source that does
+      # not exist, and an ssh key that is a directory fails in a way nobody
+      # enjoys debugging at 2am. sync.sh checks for them first.
+      - ${INFRA_DR_SSH_KEY:-~/.ssh/infra-dr}:/root/.ssh/id_ed25519:ro
+      - ${INFRA_DR_KNOWN_HOSTS:-~/.ssh/known_hosts}:/root/.ssh/known_hosts:ro
+      # Where bundles arrive on the standby, and where a local (NFS) target
+      # lives on the primary. Read-write because a local INFRA_DR_TARGET is
+      # written here; on the standby nothing writes to it during a failover.
+      - ${INFRA_DR_INBOX:-/srv/infra-dr}:/inbox
+    environment:
+      # Inside the container the inbox is always /inbox, whatever the host
+      # calls it, so the scripts can name one path in both places.
+      INFRA_DR_SSH_KNOWN_HOSTS: /root/.ssh/known_hosts
+    entrypoint: []
+    command: ["infra", "dr", "health"]

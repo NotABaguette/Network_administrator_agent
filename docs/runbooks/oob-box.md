@@ -111,23 +111,50 @@ curl -s localhost:9105/heartbeat.prom                      # wan_visible 1
 
 ### Two things to do on the main stack
 
-1. **Publish Alertmanager's gossip port.** In `deploy/docker-compose.yml` the
-   `alertmanager` service binds `127.0.0.1:9093` only; clustering needs 9094
-   reachable from the OOB box, and `--cluster.advertise-address` set to
-   `mgmt-01`'s management address. Without it the cluster silently stays at one
-   node each and silences are not shared. Verify with
+Neither side of a cluster can be configured from the other, so these two are on
+mgmt-01. Both are shipped ready to apply.
+
+1. **Publish Alertmanager's gossip port** with the override that comes with
+   this box, `deploy/oob/main-stack.override.yml`:
+
+   ```bash
+   # in deploy/.env on mgmt-01
+   MGMT_ADVERTISE_ADDR=10.0.10.10        # this host, as the OOB box reaches it
+   OOB_ALERTMANAGER_HOST=10.0.0.9        # the OOB box on the management VLAN
+
+   docker compose -f deploy/docker-compose.yml \
+     -f deploy/oob/main-stack.override.yml up -d alertmanager
+   ```
+
+   It adds `--cluster.listen-address`, `--cluster.advertise-address`,
+   `--cluster.peer` and publishes 9094 on **tcp and udp** — memberlist needs
+   both, in both directions, so the FortiGate policy between the management
+   VLAN and mgmt-01 needs both too. Verify with
    `curl -s localhost:9093/api/v2/status | jq '.cluster.peers | length'` — it
-   should say 2 on both sides.
+   should say 2 on both sides. Without this the two Alertmanagers are two
+   one-node clusters: every alert both can see is delivered twice, and a
+   silence set on one is ignored by the other.
+
+   Keep the `-f deploy/oob/main-stack.override.yml` in whatever brings the
+   stack up on mgmt-01 (a shell alias, a systemd unit, the operator's fingers);
+   a plain `docker compose up -d` afterwards drops the cluster flags again.
 
 2. **Scrape the OOB heartbeat**, so `OOBHeartbeatMissing` in
-   `infra_agent/monitoring/rules/dr.yaml` has a series to alert on. Add to
-   `deploy/prometheus/prometheus.yml`:
+   `infra_agent/monitoring/rules/dr.yaml` has a series to alert on. Prometheus
+   reads one configuration file, so this one is a paste rather than a drop-in:
+   copy the job in [`deploy/oob/prometheus-job.snippet.yml`](../../deploy/oob/prometheus-job.snippet.yml)
+   into `scrape_configs:` in `deploy/prometheus/prometheus.yml`, fix the
+   address, and reload:
 
-   ```yaml
-     - job_name: oob-heartbeat
-       metrics_path: /heartbeat.prom
-       static_configs: [{ targets: ["10.0.0.9:9105"] }]
+   ```bash
+   curl -X POST http://127.0.0.1:9090/-/reload
+   curl -s localhost:9090/api/v1/targets | jq '[.data.activeTargets[]
+     | select(.labels.job=="oob-heartbeat")]'
    ```
+
+   Until it exists, `OOBHeartbeatMissing` has nothing to fire on and
+   `OOBHeartbeatNeverSeen` (warning, after six hours) says exactly that instead
+   of paging every night about a box that may not be built yet.
 
    This one job is the difference between "the OOB box is watching us" and "the
    OOB box has been off since June and nobody noticed". It is the classic
@@ -147,7 +174,9 @@ From `deploy/oob/rules.yaml`, all carrying `vantage="oob"`:
 | `FirewallDownOOB`, `SwitchDownOOB`, `EsxiHostDownOOB`, `IloDownOOB` | The named device is unreachable from a vantage that does not depend on the platform. |
 | `OOBWanLegDown` | This box has lost its own second leg; the heartbeat has stopped on purpose. |
 
-And from the main stack, about this box: `OOBHeartbeatMissing`.
+And from the main stack, about this box: `OOBHeartbeatMissing` (critical, when
+a heartbeat series existed and stopped) and `OOBHeartbeatNeverSeen` (warning,
+when there has never been one — usually the scrape job above, missing).
 
 ## When it is down
 

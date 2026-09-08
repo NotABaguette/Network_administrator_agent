@@ -22,13 +22,30 @@ the owner's password manager and offline copy, because a bundle travels over
 the network and sits on a second machine, and one archive holding every
 platform credential in plaintext is a worse risk than the inconvenience.
 
+**Every `infra` command below runs inside the stack.** The platform's state is
+the Docker named volume `infra-data` (`/app/data` in the containers), not
+`./data` in the checkout: a host-side `infra dr export` would bundle an empty
+directory and a host-side `infra dr import` would restore where nothing reads -
+including the `FROZEN` marker, leaving a promoted platform *unfrozen*. Two
+prefixes, used throughout this runbook:
+
 ```bash
-infra dr health            # can this platform recover right now?
-infra dr list              # local bundles
-infra dr verify            # prove the newest one restores
-infra dr export --to ssh://infra@standby/srv/infra-dr
-infra dr import <bundle>   # onto empty ground; leaves the platform FROZEN
+# Read-only, against the running stack:
+C="docker compose -f deploy/docker-compose.yml"
+$C exec infra-agent infra dr health
+
+# DR itself (pg_dump, ssh, rsync, age live in this image only):
+DR="docker compose --profile dr -f deploy/docker-compose.yml \
+      -f deploy/standby/dr.compose.yml run --rm dr infra"
+$DR dr list                  # bundles in the local keep directory or the target
+$DR dr verify                # prove the newest one restores
+$DR dr export --to ssh://infra@standby/srv/infra-dr
+$DR dr import /inbox/<bundle>   # onto empty ground; leaves the platform FROZEN
 ```
+
+`INFRA_DR_CLI="uv run infra"` in the environment makes the scripts in
+`deploy/standby/` use a host CLI instead, for an installation without compose;
+then `INFRA_DATA_DIR` must point at the real state directory.
 
 ## What "frozen" means for the agent
 
@@ -81,16 +98,23 @@ platform is merely slow — two live mgmt-01s is a worse incident than none, and
 # 2. The two things the bundle does not carry:
 cp deploy/.env.example deploy/.env && $EDITOR deploy/.env   # from the password manager
 install -m600 ~/keys.txt ~/.config/sops/age/keys.txt        # from the offline copy
-# 3. The newest bundle from the standby:
-scp infra@standby:/srv/infra-dr/infra-dr-*.tar.gz .
-infra dr verify infra-dr-mgmt-01-<stamp>.tar.gz             # never restore an unverified bundle
-infra dr import infra-dr-mgmt-01-<stamp>.tar.gz
-# 4. The databases, once Postgres is up:
-docker compose -f deploy/docker-compose.yml up -d postgres
-pg_restore -d netbox data/dr-restore/postgres/netbox.dump
-pg_restore -d infra  data/dr-restore/postgres/infra.dump
-# 5. The rest:
-docker compose -f deploy/docker-compose.yml up -d
+# 3. The newest bundle from the standby, into the inbox this host mounts at /inbox:
+sudo install -d -m 700 /srv/infra-dr
+scp infra@standby:/srv/infra-dr/infra-dr-*.tar.gz* /srv/infra-dr/
+DR="docker compose --profile dr -f deploy/docker-compose.yml \
+      -f deploy/standby/dr.compose.yml run --rm dr infra"
+$DR dr verify /inbox/infra-dr-mgmt-01-<stamp>.tar.gz     # never restore an unverified bundle
+$DR dr import /inbox/infra-dr-mgmt-01-<stamp>.tar.gz     # into the infra-data volume
+# 4. Everything up. The import left the platform FROZEN; it stays that way.
+C="docker compose -f deploy/docker-compose.yml"
+$C up -d
+$C exec infra-agent test -f /app/data/FROZEN && echo "frozen, as it should be"
+# 5. The databases. The dumps are staged inside the volume, which the postgres
+#    container cannot see, so they go in over stdin:
+$C exec -T infra-agent cat /app/data/dr-restore/postgres/netbox.dump |
+  $C exec -T postgres pg_restore -U "${POSTGRES_USER:-infra}" -d netbox --clean --if-exists
+$C exec -T infra-agent cat /app/data/dr-restore/postgres/infra.dump |
+  $C exec -T postgres pg_restore -U "${POSTGRES_USER:-infra}" -d infra --clean --if-exists
 ```
 
 ### Steps — fail over to the standby
@@ -104,12 +128,16 @@ nothing and reports every device as unreachable.
 ### Verification
 
 ```bash
-infra dr health        # every check green except heartbeat if the agent is not up yet
-infra collect          # one read-only round
-infra graph build
-infra drift            # what changed while nobody was watching - read this properly
-infra change list --state awaiting_approval   # plans that were mid-flight
+C="docker compose -f deploy/docker-compose.yml"
+$C exec infra-agent infra dr health   # green except heartbeat if the agent is not up yet
+$C exec infra-agent infra collect     # one read-only round
+$C exec infra-agent infra graph build
+$C exec infra-agent infra drift       # what changed while nobody watched - read this properly
+$C exec infra-agent infra change list --state awaiting_approval   # plans mid-flight
 ```
+
+Run these *through the stack*, not on the host: on the host they read an empty
+`./data`, report a healthy platform with no devices, and prove nothing.
 
 Look specifically for a plan in `executing` or `verifying`: a change that was
 in flight when the platform died was **not rolled back**, because the thing that
@@ -266,7 +294,57 @@ curl -s <oob>:9093/api/v2/status | jq '.cluster.peers | length'   # 2
 
 ---
 
-## Appendix A — the agent-based backup contract
+## Appendix A — the backup contracts the collector reads
+
+### A1. ghettoVCB on an ESXi host
+
+`infra_agent/collectors/backups.py` reads two things over SSH: the ghettoVCB
+logs and the backup tree itself. Both have a layout, and the collector cannot
+guess one it was never told about — so this is the layout, and the cron line
+that produces it:
+
+```sh
+# In ghettoVCB.conf on the host:
+VM_BACKUP_VOLUME=/vmfs/volumes/backup          # == INFRA_DR_BACKUP_ROOT
+VM_BACKUP_ROTATION_COUNT=3
+
+# In the host's crontab (/var/spool/cron/crontabs/root; re-add it after a
+# reboot or an upgrade, ESXi does not persist crontab edits by itself):
+0 2 * * * /vmfs/volumes/backup/ghettoVCB.sh \
+    -f /vmfs/volumes/backup/vms.txt \
+    -l /vmfs/volumes/backup/ghettoVCB-logs/ghettoVCB-$(date +\%F_\%H-\%M-\%S).log
+```
+
+| What | Where | Setting |
+|---|---|---|
+| Backup root | `/vmfs/volumes/backup` | `INFRA_DR_BACKUP_ROOT`, or the device tag `backup-root:<path>` |
+| Restore points | `<root>/<vm>/<vm>-<YYYY-MM-DD_HH-MM-SS>/` | ghettoVCB's own layout under `VM_BACKUP_VOLUME` |
+| Logs | `<root>/ghettoVCB-logs/ghettoVCB-*.log` | the `-l` argument above |
+| Timezone | UTC | `INFRA_DR_BACKUP_TIMEZONE`, or the device tag `backup-tz:<zone>` |
+
+Three details that cost a real backup each if they are wrong:
+
+* **The `-l` path.** ghettoVCB's default is `/tmp`, which an ESXi host clears
+  on reboot. The collector looks in `<root>/ghettoVCB-logs`, then `<root>`,
+  then `/tmp`, and a `backup-logs:<path>` device tag overrides all three — but
+  only the first survives a reboot, so use it.
+* **The timezone.** ESXi is UTC out of the box and the collector reads log
+  stamps and restore-point directory names in UTC unless told otherwise. A host
+  somebody set to local time skews every `BackupMissing` threshold by its
+  offset — up to twelve hours early or, worse, twelve hours blind. Either leave
+  the host on UTC or tag it `backup-tz:Europe/Berlin`.
+* **The VM list.** A VM tagged `backup:daily` that is not in `vms.txt` is the
+  most likely backup failure on this estate, and it produces no log line at
+  all. The collector publishes
+  `infra_backup_last_success_timestamp_seconds{vm=...} = 0` for it, so
+  `BackupMissing` fires on "never" exactly as it does on "not lately".
+
+The collector also carries the `CONFIG - VM_BACKUP_VOLUME` and
+`CONFIG - BACKUP_LOG_OUTPUT` lines out of the newest log into the snapshot
+(`job.config`), which is the fastest way to see what the host thinks it is
+doing versus what the settings say.
+
+### A2. The agent-based backup contract
 
 The platform monitors backups it does not take. For guests running restic,
 borg, or a shell script, the contract is one file:
@@ -327,6 +405,41 @@ postgres/infra.dump   pg_dump --format=custom
 postgres/netbox.dump
 grafana/*.json        dashboards, when Grafana answered
 ```
+
+With `INFRA_DR_AGE_RECIPIENT` set the bundle is
+`infra-dr-<host>-<stamp>.tar.gz.age`, encrypted to the same age recipient SOPS
+uses, and the plaintext is not kept: an encrypted bundle is the bundle, on the
+standby and on mgmt-01 both. `infra dr verify` and `infra dr import` decrypt it
+transparently when the key is present, so nothing about the procedures above
+changes - and the weekly verify proves the key still opens them, which is the
+failure mode that quietly turns every bundle since a key rotation into noise.
+
+### A bundle is credential-equivalent
+
+Treat one exactly as you would treat a switch's `running-config` on a USB
+stick, because that is what is in it:
+
+* `configs.bundle` is the config git history — raw running-configs, which carry
+  SNMP communities in cleartext, reversible Cisco type-7 keys, `username ...
+  secret` lines and FortiOS `ENC` blobs. These configs never pass through the
+  redaction gateway; that is deliberate (ADR 0004) and it is why the git
+  repository lives on mgmt-01 and not on a hosted remote.
+* `postgres/netbox.dump` carries NetBox API tokens (including the platform's
+  own) and Django password hashes.
+* `data/` carries the plan store — approval **token hashes**, never tokens —
+  and the agent state database.
+
+What the platform does about it: the bundle and its `.sha256` sidecar are
+written `0600`, `data/dr` is `0700`, the push is `rsync --chmod=F600,D700` with
+strict host-key checking, and the shipped copy is age-encrypted when a
+recipient is configured. What you must do about it: keep the standby inbox
+`0700`, do not copy a bundle to a laptop "to look at it", and treat a bundle
+that arrives **without its `.sha256` sidecar as suspect** — the manifest hashes
+every member, but only the sidecar covers the manifest itself, so a missing
+sidecar is the one shape of tampering the per-file hashes cannot see.
+`infra dr import` refuses a bundle whose sidecar is missing; `infra dr verify`
+says so and carries on, because verifying a suspect bundle is exactly what you
+want to be able to do.
 
 Not included, on purpose:
 

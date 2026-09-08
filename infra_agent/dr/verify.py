@@ -26,7 +26,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from infra_agent.dr import archive
+from infra_agent.dr import archive, crypt
 from infra_agent.dr.errors import DRError
 from infra_agent.dr.manifest import (
     CHECKSUM_SUFFIX,
@@ -109,8 +109,21 @@ def verify(
     workdir: Path | None = None,
     git_runner: GitRunner | None = None,
     keep: bool = False,
+    settings: Any = None,
+    age_runner: Any = None,
+    require_checksum: bool = False,
 ) -> VerifyReport:
-    """Verify one bundle. Never raises for a bad bundle; that is what the report is."""
+    """Verify one bundle. Never raises for a bad bundle; that is what the report is.
+
+    An age-encrypted bundle (`...tar.gz.age`, what the standby receives when
+    `INFRA_DR_AGE_RECIPIENT` is set) is decrypted into the scratch directory
+    first, so the standby verifies with the same command as the primary.
+
+    `require_checksum` makes a missing `.sha256` sidecar a failure rather than
+    a note. `infra dr import` sets it: the sidecar is the only thing covering
+    the manifest itself, so a tamperer who deletes it and rewrites the manifest
+    to match their edited member would otherwise pass every check.
+    """
     bundle = Path(bundle)
     report = VerifyReport(bundle=bundle.name)
     if not bundle.exists():
@@ -122,7 +135,20 @@ def verify(
     scratch = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="infra-dr-verify-"))
     scratch.mkdir(parents=True, exist_ok=True)
     try:
-        report.checks.append(_check_checksum(bundle))
+        # The sidecar covers the file as it travelled, so it is checked before
+        # anything is decrypted: on the standby that file is the `.age` one.
+        report.checks.append(_check_checksum(bundle, required=require_checksum))
+        try:
+            bundle, was_encrypted = crypt.ensure_plaintext(
+                bundle, scratch / "plain", settings, runner=age_runner
+            )
+        except DRError as exc:
+            report.checks.append(CheckResult(name="decrypt", ok=False, detail=str(exc)))
+            return report
+        if was_encrypted:
+            report.checks.append(
+                CheckResult(name="decrypt", ok=True, detail="age-encrypted; decrypted to verify")
+            )
         root = scratch / "bundle"
         try:
             archive.extract(bundle, root)
@@ -156,13 +182,17 @@ def verify(
             shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _check_checksum(bundle: Path) -> CheckResult:
+def _check_checksum(bundle: Path, *, required: bool = False) -> CheckResult:
     sidecar = bundle.with_name(bundle.name + CHECKSUM_SUFFIX)
     if not sidecar.exists():
         return CheckResult(
             name="checksum",
-            ok=True,
-            detail="no .sha256 sidecar next to the bundle; per-file hashes still apply",
+            ok=not required,
+            detail=(
+                "no .sha256 sidecar next to the bundle. The manifest hashes every member, "
+                "but only the sidecar covers the manifest: treat a bundle that arrived "
+                "without one as suspect, not merely untidy"
+            ),
         )
     expected = sidecar.read_text().split()[0] if sidecar.read_text().split() else ""
     actual = sha256_file(bundle)
@@ -266,7 +296,16 @@ def _check_config_repo(root: Path, clone_dir: Path, runner: GitRunner) -> CheckR
     path = root / CONFIG_BUNDLE
     if not path.exists():
         return CheckResult(name="config_repo", ok=False, detail=f"no {CONFIG_BUNDLE} in the bundle")
-    code, output = runner(["git", "bundle", "verify", str(path)])
+    # `git bundle verify` insists on being run *inside* a repository, and the
+    # place this runs in production - /app in the container, /srv on the
+    # standby - is not one. Without this scratch repository the weekly duty
+    # fails every Saturday with "need a repository to verify a bundle", which
+    # is the alert that means "you have no backup" firing for no reason.
+    scratch = clone_dir.parent / "verify-repo"
+    code, output = runner(["git", "init", "--quiet", str(scratch)])
+    if code != 0:
+        return CheckResult(name="config_repo", ok=False, detail=f"git init failed: {_tail(output)}")
+    code, output = runner(["git", "-C", str(scratch), "bundle", "verify", str(path)])
     if code != 0:
         return CheckResult(name="config_repo", ok=False, detail=_tail(output))
     code, output = runner(["git", "clone", "--quiet", str(path), str(clone_dir)])
@@ -397,7 +436,7 @@ def verify_and_record(
 
     from infra_agent.dr import state
 
-    report = verify(bundle, git_runner=git_runner)
+    report = verify(bundle, git_runner=git_runner, settings=settings)
     failures = report.failures()
     state.update(
         settings,

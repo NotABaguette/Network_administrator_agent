@@ -25,6 +25,21 @@ is exactly what a restic config looks like - cannot be copied into a snapshot
 that the model may later read. The full contract is in
 ``docs/runbooks/dr-mgmt-01.md``.
 
+**The ghettoVCB layout this collector assumes** (Appendix A of
+``docs/runbooks/dr-mgmt-01.md`` has the cron line to copy):
+
+* ``VM_BACKUP_VOLUME=<root>`` in ``ghettoVCB.conf``, so restore points land as
+  ``<root>/<vm>/<vm>-<YYYY-MM-DD_HH-MM-SS>/``. ``<root>`` is
+  ``INFRA_DR_BACKUP_ROOT`` or the device tag ``backup-root:<path>``.
+* Logs in ``<root>/ghettoVCB-logs/``, which is what
+  ``ghettoVCB.sh -f vms.txt -l <root>/ghettoVCB-logs/ghettoVCB-$(date +%F_%H-%M-%S).log``
+  produces. ghettoVCB's own default is ``/tmp``, so ``<root>`` and ``/tmp`` are
+  tried as well, and a device tag ``backup-logs:<path>`` overrides all three.
+* Timestamps are read in the host's timezone: UTC unless
+  ``INFRA_DR_BACKUP_TIMEZONE`` or a ``backup-tz:<zone>`` device tag says
+  otherwise. ESXi is UTC out of the box; a host somebody set to local time
+  would otherwise skew every ``BackupMissing`` threshold by its offset.
+
 Schedules come from the VM's own annotation, the same place the `esxi`
 collector reads `expect:off` from: a VM tagged ``backup:daily`` is expected to
 have a backup less than 26 hours old, ``backup:weekly`` less than eight days,
@@ -45,7 +60,7 @@ import posixpath
 import re
 import shlex
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +71,11 @@ from infra_agent.monitoring import metrics
 from infra_agent.store.snapshots import FileSnapshotStore
 
 log = logging.getLogger(__name__)
+
+#: Per-device memory of the label tuples published, so a VM that is
+#: unregistered, renamed, or re-tagged from backup:daily to backup:weekly loses
+#: its old series instead of alerting on a value that can never move again.
+_SERIES = metrics.DeviceSeries()
 
 #: (command) -> stdout. Injectable, so every parser below is tested offline.
 Runner = Callable[[str], str]
@@ -83,6 +103,10 @@ SCHEDULE_TAGS = {
 #: repository URL, which is where restic keeps credentials - is dropped.
 AGENT_FIELDS = ("tool", "status", "schedule", "snapshots", "error")
 
+#: ghettoVCB's own default log directory when the cron line has no `-l`.
+GHETTOVCB_DEFAULT_LOG_DIR = "/tmp"
+LOG_SUBDIR = "ghettoVCB-logs"
+
 #: `2026-09-07 02:00:01 -- info: ...`
 LOG_LINE = re.compile(r"^(?P<at>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+--\s+(?P<body>.*)$")
 SUCCESS = re.compile(r"Successfully completed backup for (?P<vm>.+?)!")
@@ -93,30 +117,65 @@ FAILURE = re.compile(
 INITIATE = re.compile(r"Initiate backup for (?P<vm>.+?)\s*$")
 DURATION = re.compile(r"Backup Duration:\s+(?P<value>[0-9.]+)\s+(?P<unit>Minutes|Seconds)")
 FINAL_STATUS = re.compile(r"Final status:\s*(?P<text>.+?)\s*#*\s*$")
+#: ghettoVCB refuses a VM that already carries a snapshot, and says so in a
+#: line that is not a failure by its own wording. It is one by ours: that VM
+#: was in the job list and did not get backed up.
+SKIPPED = re.compile(
+    r"ERROR:\s*Snapshot found for (?P<vm>.+?)[,.]\s*backup will not take place", re.IGNORECASE
+)
+#: ghettoVCB echoes its configuration into the log: where it writes and where
+#: the restore points go. Worth carrying into the snapshot - it is the only
+#: place the host says what the collector is meant to be reading.
+CONFIG_LINE = re.compile(r"CONFIG\s*-\s*(?P<key>[A-Z_]+)\s*=\s*(?P<value>.*?)\s*$")
+CONFIG_KEYS = ("VM_BACKUP_VOLUME", "BACKUP_LOG_OUTPUT", "VM_BACKUP_ROTATION_COUNT")
+#: A run whose own summary says this did not do what it was asked to.
+FINAL_STATUS_BAD = ("error", "fail")
 #: ghettoVCB restore points are `<vm>-<YYYY-MM-DD_HH-MM-SS>`.
 RESTORE_POINT = re.compile(r"^(?P<vm>.+)-(?P<stamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})$")
 LOG_NAME = re.compile(r"^ghettoVCB.*\.log$", re.IGNORECASE)
 
 
-def parse_log_time(text: str) -> datetime | None:
+def timezone_of(name: str | None) -> tzinfo:
+    """A zone name into a tzinfo, falling back to UTC rather than failing.
+
+    A typo in `backup-tz:` must not stop the collector: it degrades to the
+    ESXi default, which is what the host most likely is anyway.
+    """
+    if not name or name.upper() == "UTC":
+        return UTC
     try:
-        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - an unknown zone is a configuration typo
+        log.warning("unknown backup timezone %r; reading backup times as UTC", name)
+        return UTC
+
+
+def parse_log_time(text: str, tz: tzinfo = UTC) -> datetime | None:
+    """A ghettoVCB log stamp. The host writes local time; we store UTC."""
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz).astimezone(UTC)
     except ValueError:
         return None
 
 
-def parse_restore_point(name: str) -> tuple[str, datetime] | None:
+def parse_restore_point(name: str, tz: tzinfo = UTC) -> tuple[str, datetime] | None:
     match = RESTORE_POINT.match(name)
     if match is None:
         return None
     try:
-        when = datetime.strptime(match.group("stamp"), "%Y-%m-%d_%H-%M-%S").replace(tzinfo=UTC)
+        when = (
+            datetime.strptime(match.group("stamp"), "%Y-%m-%d_%H-%M-%S")
+            .replace(tzinfo=tz)
+            .astimezone(UTC)
+        )
     except ValueError:
         return None
     return match.group("vm"), when
 
 
-def parse_ghettovcb_log(text: str) -> dict[str, Any]:
+def parse_ghettovcb_log(text: str, tz: tzinfo = UTC) -> dict[str, Any]:
     """One ghettoVCB run: per-VM outcome, duration and the run's final status.
 
     The log is the only place that distinguishes "no backup was attempted" from
@@ -128,16 +187,33 @@ def parse_ghettovcb_log(text: str) -> dict[str, Any]:
     finished: datetime | None = None
     final_status: str | None = None
     current: str | None = None
+    config: dict[str, str] = {}
 
     for raw in text.splitlines():
         match = LOG_LINE.match(raw.strip())
         if match is None:
             continue
-        when = parse_log_time(match.group("at"))
+        when = parse_log_time(match.group("at"), tz)
         body = match.group("body")
         if when is not None:
             started = started or when
             finished = when
+
+        setting = CONFIG_LINE.search(body)
+        if setting and setting.group("key") in CONFIG_KEYS:
+            config[setting.group("key")] = setting.group("value")
+            continue
+
+        skipped = SKIPPED.search(body)
+        if skipped:
+            # "backup will not take place" is not a backup, whatever the log
+            # calls it. Without this the run is reported ok and the VM keeps
+            # yesterday's timestamp until BackupMissing catches up 26h later.
+            name = skipped.group("vm").strip()
+            row = vms.setdefault(name, {"vm": name})
+            row.update({"status": "failed", "finished_at": when, "error": body.strip()[:200]})
+            current = name
+            continue
 
         initiate = INITIATE.search(body)
         if initiate:
@@ -177,11 +253,12 @@ def parse_ghettovcb_log(text: str) -> dict[str, Any]:
         "started_at": started,
         "finished_at": finished,
         "final_status": final_status,
+        "config": config,
         "vms": [vms[name] for name in sorted(vms)],
     }
 
 
-def parse_du(text: str) -> list[dict[str, Any]]:
+def parse_du(text: str, tz: tzinfo = UTC) -> list[dict[str, Any]]:
     """`du -sk <root>/*/*` output into restore points with sizes.
 
     Sizes are in kibibytes, which is what `du -sk` reports on ESXi's busybox as
@@ -193,7 +270,7 @@ def parse_du(text: str) -> list[dict[str, Any]]:
         if len(parts) != 2 or not parts[0].isdigit():
             continue
         size_kb, path = int(parts[0]), parts[1].strip()
-        parsed = parse_restore_point(posixpath.basename(path.rstrip("/")))
+        parsed = parse_restore_point(posixpath.basename(path.rstrip("/")), tz)
         if parsed is None:
             continue
         vm, when = parsed
@@ -253,14 +330,23 @@ def schedule_of(annotation: Any) -> str:
     return SCHEDULE_UNSPECIFIED
 
 
-def backup_root(device: SeedDevice, settings: Settings) -> str:
-    """The device tag wins over the setting; a per-host NFS mount is normal."""
+def tag_value(device: SeedDevice, prefix: str) -> str | None:
     for tag in device.tags:
-        if tag.startswith("backup-root:"):
+        if tag.startswith(prefix):
             value = tag.split(":", 1)[1].strip()
             if value:
                 return value
-    return settings.dr_backup_root
+    return None
+
+
+def backup_root(device: SeedDevice, settings: Settings) -> str:
+    """The device tag wins over the setting; a per-host NFS mount is normal."""
+    return tag_value(device, "backup-root:") or settings.dr_backup_root
+
+
+def backup_timezone(device: SeedDevice, settings: Settings) -> tzinfo:
+    """The zone the host writes its log stamps and directory names in."""
+    return timezone_of(tag_value(device, "backup-tz:") or settings.dr_backup_timezone)
 
 
 class BackupsCollector(Collector):
@@ -317,8 +403,10 @@ class BackupsCollector(Collector):
     # -- collection ---------------------------------------------------------
     def collect(self, device: SeedDevice, cred: Credential) -> dict[str, Any]:
         root = backup_root(device, self.settings)
+        tz = backup_timezone(device, self.settings)
         data: dict[str, Any] = {
             "root": root,
+            "timezone": str(tz),
             "checked_at": self._now(),
             "sources": [],
             "job": {},
@@ -339,13 +427,20 @@ class BackupsCollector(Collector):
             )
         else:
             run = self.runner(device, cred)
-            data["job"] = self._job(run, root, data["errors"])
+            data["job"] = self._job(run, device, root, tz, data["errors"])
+            # ghettoVCB echoes its own VM_BACKUP_VOLUME into the log. Believing
+            # the host over the setting is how a `backup-root:` that drifted -
+            # or was never set - stops silently reporting zero restore points.
+            volume = (data["job"].get("config") or {}).get("VM_BACKUP_VOLUME")
+            if volume and volume != root:
+                data["backup_volume"] = volume
+                log.info("%s: ghettoVCB writes to %s, not %s", device.name, volume, root)
             # Order matters: what is on disk is the evidence a restore would
             # use, and the log is the authority on top of it. A restore-point
             # directory is named for the moment the run STARTED, so letting it
             # win would move every success time back by however long the copy
             # took - and would report a success for a VM whose copy then failed.
-            points = self._from_datastore(run, root, data["errors"])
+            points = self._from_datastore(run, volume or root, tz, data["errors"])
             _merge(rows, points)
             _merge(rows, self._from_logs(data["job"]))
             remote = self._remote_agent_status(run, root, data["errors"])
@@ -364,27 +459,73 @@ class BackupsCollector(Collector):
             for name, schedule in schedules.items()
             if schedule in (SCHEDULE_DAILY, SCHEDULE_WEEKLY)
         )
+        # The schedule of every VM that is meant to have a backup, so
+        # `publish_metrics` can label one that has never had one. Names and
+        # tags only; nothing here is a secret.
+        data["schedules"] = {name: schedules[name] for name in data["expected"]}
         data["unprotected"] = sorted(set(data["expected"]) - set(rows))
         self.publish_metrics(device.name, data)
         return data
 
     # -- ghettoVCB ----------------------------------------------------------
     def log_dir(self, root: str) -> str:
-        return posixpath.join(root, "ghettoVCB-logs")
+        """The convention the runbook tells the owner to write into the cron line."""
+        return posixpath.join(root, LOG_SUBDIR)
 
-    def _job(self, run: Runner, root: str, errors: dict[str, str]) -> dict[str, Any]:
-        directory = self.log_dir(root)
-        try:
-            listing = run(f"ls -1 {shlex.quote(directory)}")
-        except Exception as exc:  # noqa: BLE001 - a missing log dir is a finding, not a crash
-            errors["logs"] = f"{type(exc).__name__}: {exc}"
-            return {}
-        names = sorted(
-            (line.strip() for line in listing.splitlines() if LOG_NAME.match(line.strip())),
-            reverse=True,
-        )[:MAX_LOGS]
+    def log_dirs(self, device: SeedDevice, root: str) -> list[str]:
+        """Where ghettoVCB logs might be, in the order worth trying.
+
+        The collector used to hard-code one directory that nothing told the
+        owner to create, so on a host running the stock cron line the newest
+        snapshot said "no ghettoVCB logs" for ever and only the datastore
+        listing drove the gauges. A `backup-logs:<path>` tag wins; then the
+        documented convention; then the backup root itself; then ghettoVCB's
+        own default, `/tmp`.
+        """
+        override = tag_value(device, "backup-logs:")
+        candidates = [override] if override else []
+        candidates += [self.log_dir(root), root, GHETTOVCB_DEFAULT_LOG_DIR]
+        seen: list[str] = []
+        for candidate in candidates:
+            if candidate and candidate not in seen:
+                seen.append(candidate)
+        return seen
+
+    def _find_logs(
+        self, run: Runner, device: SeedDevice, root: str, errors: dict[str, str]
+    ) -> tuple[str, list[str]]:
+        """(directory, newest log names) from the first candidate that has any."""
+        looked: list[str] = []
+        for directory in self.log_dirs(device, root):
+            try:
+                listing = run(f"ls -1 {shlex.quote(directory)}")
+            except Exception as exc:  # noqa: BLE001 - a missing dir is a finding, not a crash
+                looked.append(f"{directory} ({type(exc).__name__})")
+                continue
+            names = sorted(
+                (line.strip() for line in listing.splitlines() if LOG_NAME.match(line.strip())),
+                reverse=True,
+            )[:MAX_LOGS]
+            if names:
+                return directory, names
+            looked.append(directory)
+        errors["logs"] = (
+            f"no ghettoVCB logs in {', '.join(looked)}; point the cron line at "
+            f"{self.log_dir(root)} with -l, or tag the host backup-logs:<path> "
+            "(docs/runbooks/dr-mgmt-01.md, Appendix A)"
+        )
+        return "", []
+
+    def _job(
+        self,
+        run: Runner,
+        device: SeedDevice,
+        root: str,
+        tz: tzinfo,
+        errors: dict[str, str],
+    ) -> dict[str, Any]:
+        directory, names = self._find_logs(run, device, root, errors)
         if not names:
-            errors["logs"] = f"no ghettoVCB logs in {directory}"
             return {}
         runs: list[dict[str, Any]] = []
         for name in names:
@@ -393,19 +534,26 @@ class BackupsCollector(Collector):
             except Exception as exc:  # noqa: BLE001
                 errors[f"log:{name}"] = f"{type(exc).__name__}: {exc}"
                 continue
-            parsed = parse_ghettovcb_log(text)
+            parsed = parse_ghettovcb_log(text, tz)
             parsed["log"] = name
             runs.append(parsed)
         if not runs:
             return {}
         newest = runs[0]
         failed = [vm["vm"] for vm in newest["vms"] if vm.get("status") == "failed"]
+        final = newest.get("final_status")
+        # The run's own summary is authority too: "Final status: ERROR: Only
+        # some of the VMs backed up" with no per-VM failure line parsed still
+        # means the job did not do what it was asked to.
+        final_bad = bool(final) and any(word in str(final).lower() for word in FINAL_STATUS_BAD)
         return {
             "log": newest["log"],
+            "log_dir": directory,
             "started_at": newest["started_at"],
             "finished_at": newest["finished_at"],
-            "final_status": newest["final_status"],
-            "ok": not failed,
+            "final_status": final,
+            "config": newest.get("config") or {},
+            "ok": not failed and not final_bad,
             "failed_vms": failed,
             "runs": runs,
         }
@@ -429,7 +577,7 @@ class BackupsCollector(Collector):
         return rows
 
     def _from_datastore(
-        self, run: Runner, root: str, errors: dict[str, str]
+        self, run: Runner, root: str, tz: tzinfo, errors: dict[str, str]
     ) -> list[dict[str, Any]]:
         """Restore points actually on disk: the ground truth behind the log."""
         try:
@@ -438,7 +586,7 @@ class BackupsCollector(Collector):
             errors["datastore"] = f"{type(exc).__name__}: {exc}"
             return []
         by_vm: dict[str, list[dict[str, Any]]] = {}
-        for point in parse_du(output):
+        for point in parse_du(output, tz):
             by_vm.setdefault(point["vm"], []).append(point)
         rows = []
         for vm, points in by_vm.items():
@@ -497,30 +645,110 @@ class BackupsCollector(Collector):
         return rows
 
     # -- metrics ------------------------------------------------------------
+    @staticmethod
+    def read_failed(data: dict[str, Any]) -> bool:
+        """Did anything this run was meant to read refuse to be read?
+
+        It decides two things, and both would otherwise be lies: whether an
+        expected VM with no row means "never backed up" or "we could not look",
+        and whether a series that is absent this run means the VM is gone.
+        """
+        errors = data.get("errors") or {}
+        return any(key in errors for key in ("ssh", "logs", "datastore")) or any(
+            key.startswith(("log:", "agent:")) for key in errors
+        )
+
+    @classmethod
+    def spared_gauges(cls, data: dict[str, Any]) -> list[Any]:
+        """Gauges whose source did not answer this run.
+
+        A sweep removes series a run did not publish, which is right for a VM
+        that was unregistered and wrong for a VM whose host refused the SSH
+        connection: there, "no row" means "not collected". When the read failed
+        the old series are kept and their staleness alerts keep firing, which
+        is the honest answer.
+        """
+        if not cls.read_failed(data):
+            return []
+        return [
+            metrics.BACKUP_LAST_SUCCESS,
+            metrics.BACKUP_LAST_SIZE_BYTES,
+            metrics.BACKUP_RESTORE_POINTS,
+        ]
+
     def publish_metrics(self, device_name: str, data: dict[str, Any]) -> None:
+        """Per-VM gauges, including for the VMs that have never been backed up.
+
+        Two shapes of silence used to hide here:
+
+        * A VM tagged `backup:daily` that ghettoVCB has never touched - the one
+          somebody forgot to add to `vms.txt`, which is exactly the VM most
+          likely to be missing - published no series at all, and
+          `time() - infra_backup_last_success_timestamp_seconds` needs a sample
+          to exist. It now publishes 0, which is "never", and BackupMissing
+          fires on it.
+        * A VM that was unregistered, renamed, or re-tagged from daily to
+          weekly kept its old labelset for ever, alerting on a value that could
+          never move again. The sweep drops it.
+        """
+        run = _SERIES.run(device_name)
         job = data.get("job") or {}
         last_run = job.get("finished_at") or job.get("started_at")
         if isinstance(last_run, datetime):
             metrics.BACKUP_JOB_LAST_RUN.labels(device=device_name).set(last_run.timestamp())
         if job:
             metrics.BACKUP_JOB_OK.labels(device=device_name).set(1 if job.get("ok") else 0)
+
+        published: set[str] = set()
         for row in data.get("vms") or []:
             vm = row.get("vm")
             if not vm:
                 continue
+            schedule = row.get("schedule") or SCHEDULE_UNSPECIFIED
             success = row.get("last_success_at")
             if isinstance(success, datetime):
-                metrics.BACKUP_LAST_SUCCESS.labels(
-                    device=device_name, vm=vm, schedule=row.get("schedule") or SCHEDULE_UNSPECIFIED
-                ).set(success.timestamp())
+                published.add(str(vm))
+                run.set(
+                    metrics.BACKUP_LAST_SUCCESS,
+                    success.timestamp(),
+                    device=device_name,
+                    vm=vm,
+                    schedule=schedule,
+                )
             if isinstance(row.get("bytes"), (int, float)):
-                metrics.BACKUP_LAST_SIZE_BYTES.labels(device=device_name, vm=vm).set(
-                    float(row["bytes"])
+                run.set(
+                    metrics.BACKUP_LAST_SIZE_BYTES,
+                    float(row["bytes"]),
+                    device=device_name,
+                    vm=vm,
                 )
             if isinstance(row.get("restore_points"), int):
-                metrics.BACKUP_RESTORE_POINTS.labels(device=device_name, vm=vm).set(
-                    row["restore_points"]
+                run.set(
+                    metrics.BACKUP_RESTORE_POINTS,
+                    row["restore_points"],
+                    device=device_name,
+                    vm=vm,
                 )
+
+        expected_schedules = data.get("schedules") or {}
+        blind = self.read_failed(data)
+        for vm in data.get("expected") or []:
+            if vm in published or blind:
+                # While blind, "no row" is not "never backed up": publishing 0
+                # here would reset a VM's last known success to the epoch and
+                # fire BackupMissing for the whole host on one refused SSH
+                # connection.
+                continue
+            # 0 is the Unix epoch: `time() - 0` is enormous, so the same
+            # expression that catches a stale backup catches "never".
+            run.set(
+                metrics.BACKUP_LAST_SUCCESS,
+                0.0,
+                device=device_name,
+                vm=vm,
+                schedule=expected_schedules.get(vm, SCHEDULE_UNSPECIFIED),
+            )
+        run.sweep(skip=self.spared_gauges(data))
 
 
 def _merge(rows: dict[str, dict[str, Any]], new: list[dict[str, Any]]) -> None:

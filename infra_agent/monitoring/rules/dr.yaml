@@ -11,11 +11,18 @@
 # `infra_dr_last_verify_ok` is the exception: it reads 1 until a verification
 # has actually failed, so DRVerifyFailed means a failure and DRVerifyStale
 # means nobody has checked.
+#
+# Every DR alert is gated on `infra_dr_configured == 1`. A fresh install with no
+# standby yet has nowhere to export to, the nightly duty skips deliberately, and
+# a permanently firing critical on day one teaches the owner to silence the
+# whole group - which is how the alerts that matter later get lost.
 groups:
   - name: infra-dr
     rules:
       - alert: DRExportStale
-        expr: time() - max(infra_dr_last_export_timestamp_seconds) > 36 * 3600
+        expr: |
+          (time() - max(infra_dr_last_export_timestamp_seconds) > 36 * 3600)
+          and (max(infra_dr_configured) == 1)
         for: 30m
         labels: { severity: critical }
         annotations:
@@ -23,7 +30,13 @@ groups:
           description: "The nightly `infra dr export` duty has not produced a bundle since the last two windows. Run `infra dr export` by hand and read `infra dr health`; if mgmt-01 dies now, the estate is rebuilt from the switches' own configs and the owner's memory. Runbook: docs/runbooks/dr-mgmt-01.md."
 
       - alert: DRVerifyFailed
-        expr: min(infra_dr_last_verify_ok) == 0
+        # `max` and the timestamp guard together: a process that has never run
+        # a verification reads 1, a process that has not armed its gauges at
+        # all would read 0, and "nobody has ever verified" is DRVerifyStale's
+        # sentence, not this one's.
+        expr: |
+          (max(infra_dr_last_verify_ok) == 0)
+          and (max(infra_dr_last_verify_timestamp_seconds) > 0)
         for: 15m
         labels: { severity: critical }
         annotations:
@@ -31,7 +44,9 @@ groups:
           description: "A bundle exists but does not restore: run `infra dr verify --json` for the failing check. Until it passes, treat the platform as having no backup. A checksum mismatch means the bundle was altered after the export - suspect the standby before suspecting the code."
 
       - alert: DRVerifyStale
-        expr: time() - max(infra_dr_last_verify_timestamp_seconds) > 14 * 24 * 3600
+        expr: |
+          (time() - max(infra_dr_last_verify_timestamp_seconds) > 14 * 24 * 3600)
+          and (max(infra_dr_configured) == 1)
         for: 1h
         labels: { severity: warning }
         annotations:
@@ -42,11 +57,12 @@ groups:
         expr: |
           (time() - max(infra_dr_standby_last_sync_timestamp_seconds) > 36 * 3600)
           and (max(infra_dr_last_export_timestamp_seconds) > 0)
+          and (max(infra_dr_configured) == 1)
         for: 30m
         labels: { severity: critical }
         annotations:
           summary: "The standby has not received a bundle in more than 36 hours"
-          description: "Exports are being produced but not landing on the standby: the SSH key, the standby VM or the link between them. A local bundle on a host that has just died is not a backup. Check `ssh -o BatchMode=yes <INFRA_DR_TARGET host> true` from mgmt-01."
+          description: "Exports are being produced but not landing on the standby: the SSH key, the standby VM or the link between them. A local bundle on a host that has just died is not a backup. The nightly duty records this as `push_error` in the message it sent and in `infra dr health`. Check the key with `rsync -n --archive -e 'ssh -o BatchMode=yes' /dev/null <target>` from mgmt-01 - the DR account is restricted to rsync, so a plain `ssh <host> true` fails even when the push works."
 
       # -- VM backups (infra_agent/collectors/backups.py) --------------------
       # The platform does not take VM backups (docs/architecture.md, "Known
@@ -54,13 +70,17 @@ groups:
       # owner tagged are alerted on: `backup:daily`, `backup:weekly`, or
       # nothing, because guessing that every VM needs a nightly backup produces
       # an alert nobody can act on.
+      # A VM that has NEVER been backed up publishes 0 here rather than no
+      # series at all (infra_agent/collectors/backups.py, publish_metrics), so
+      # this expression covers the VM most likely to be missing: the one nobody
+      # added to the ghettoVCB list.
       - alert: BackupMissing
         expr: time() - infra_backup_last_success_timestamp_seconds{schedule="daily"} > 26 * 3600
         for: 30m
         labels: { severity: critical }
         annotations:
           summary: "{{ $labels.vm }} has no successful backup in the last 26 hours"
-          description: "Tagged backup:daily on {{ $labels.device }}. Read the newest ghettoVCB log named in the backups snapshot: a failed snapshot usually means the datastore is full or the VM already carries one."
+          description: "Tagged backup:daily on {{ $labels.device }}. A timestamp of 0 means there has never been one - check that the VM is in the ghettoVCB VM list at all. Otherwise read the newest ghettoVCB log named in the backups snapshot: a failed snapshot usually means the datastore is full or the VM already carries one."
 
       - alert: BackupMissingWeekly
         expr: time() - infra_backup_last_success_timestamp_seconds{schedule="weekly"} > 8 * 24 * 3600
@@ -68,7 +88,7 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "{{ $labels.vm }} has no successful backup in the last 8 days"
-          description: "Tagged backup:weekly on {{ $labels.device }}."
+          description: "Tagged backup:weekly on {{ $labels.device }}. A timestamp of 0 means there has never been one."
 
       - alert: BackupJobMissing
         expr: time() - infra_backup_job_last_run_timestamp_seconds > 26 * 3600
@@ -92,12 +112,25 @@ groups:
       # or the site is dark - which is exactly when nothing else can tell you.
       # This needs a scrape job for the OOB heartbeat exporter in
       # deploy/prometheus/prometheus.yml; docs/runbooks/oob-box.md has it.
+      # Two alerts, because "the box that was reporting has stopped" and "no
+      # OOB box has ever reported" are different sentences. The scrape job for
+      # the OOB heartbeat exporter is an edit to deploy/prometheus/prometheus.yml
+      # (docs/runbooks/oob-box.md has it verbatim); until it is made, the second
+      # of these says so at warning severity instead of paging every night.
       - alert: OOBHeartbeatMissing
         expr: |
           (time() - max(infra_oob_heartbeat_last_ok_timestamp_seconds) > 1800)
-          or absent(infra_oob_heartbeat_last_ok_timestamp_seconds)
+          and (max(infra_oob_heartbeat_last_ok_timestamp_seconds) > 0)
         for: 15m
         labels: { severity: critical }
         annotations:
           summary: "The out-of-band box has not reported a WAN-visible heartbeat in 30 minutes"
           description: "Either the OOB box is down or it cannot see the WAN. Until it is back, no Tier 2 change on the edge may be enabled (docs/risk-tiers.md): the OOB box is what gets the owner back in after a FortiGate change locks everyone out."
+
+      - alert: OOBHeartbeatNeverSeen
+        expr: absent(infra_oob_heartbeat_last_ok_timestamp_seconds)
+        for: 6h
+        labels: { severity: warning }
+        annotations:
+          summary: "No out-of-band heartbeat series has ever been scraped"
+          description: "Either the OOB box is not built yet, or the `oob-heartbeat` scrape job is missing from deploy/prometheus/prometheus.yml (docs/runbooks/oob-box.md). Until it exists, nothing tells the owner that the site itself has gone dark."

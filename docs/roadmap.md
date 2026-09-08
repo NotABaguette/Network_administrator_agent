@@ -27,6 +27,19 @@ enabled one at a time, and no Tier 2 edge change may be enabled until the
 out-of-band box is built and reporting
 ([`runbooks/oob-box.md`](runbooks/oob-box.md)).
 
+Two Phase 6 pieces are deliberately edits to the main stack rather than files
+that apply themselves, because the OOB box must not be able to change the
+platform's own deployment:
+
+* **Alertmanager clustering** - bring the stack up with
+  `-f deploy/oob/main-stack.override.yml` (it publishes 9094 tcp+udp and sets
+  the cluster flags). Without it the two Alertmanagers are two one-node
+  clusters: duplicate pages, unshared silences.
+* **The `oob-heartbeat` scrape job** - paste
+  `deploy/oob/prometheus-job.snippet.yml` into
+  `deploy/prometheus/prometheus.yml`. Until it exists, `OOBHeartbeatMissing`
+  has no series and `OOBHeartbeatNeverSeen` (warning) says so.
+
 ## Open items to confirm in Phase 0
 - ESXi license type per host; whether Essentials is on the table for backups.
 - Exact Catalyst models/IOS versions and iLO generation per host.

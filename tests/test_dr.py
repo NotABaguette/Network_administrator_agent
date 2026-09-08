@@ -30,7 +30,7 @@ from infra_agent.dr.export import DATA_EXCLUDE, build_bundle, export_bundle
 from infra_agent.dr.manifest import EXCLUSIONS, MANIFEST_NAME, Manifest, sha256_file
 from infra_agent.dr.restore import import_bundle
 from infra_agent.dr.sources import pg_env, scrub
-from infra_agent.dr.transfer import CommandResult, parse_target
+from infra_agent.dr.transfer import CommandResult, SshPolicy, parse_target
 from infra_agent.dr.verify import read_manifest, verify, verify_and_record
 from infra_agent.models.common import DeviceKind, SeedDevice, SeedInventory, Snapshot
 from infra_agent.store.snapshots import FileSnapshotStore
@@ -235,13 +235,20 @@ def test_the_freeze_marker_and_old_bundles_do_not_travel(estate, tmp_path):
     (estate.data_dir / "FROZEN").write_text("frozen\n")
     estate.dr_dir.mkdir(parents=True, exist_ok=True)
     (estate.dr_dir / "infra-dr-mgmt-01-20260907T021500Z.tar.gz").write_bytes(b"x" * 4096)
+    old = estate.data_dir / "pre-import" / "20260901T000000Z" / "snapshots" / "esx-01" / "old.json"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_text("{}")
 
     result = make_bundle(estate, tmp_path / "out")
 
     paths = {entry.path for entry in result.manifest.files}
     assert not any(path.startswith("data/FROZEN") for path in paths)
     assert not any(path.startswith("data/dr/") for path in paths)
-    assert DATA_EXCLUDE == {"FROZEN", "dr", "dr-restore"}
+    assert not any(path.startswith("data/pre-import/") for path in paths), (
+        "an installation a --force import moved aside must not be nested inside "
+        "the next bundle: it doubles the archive and restores twice"
+    )
+    assert DATA_EXCLUDE == {"FROZEN", "dr", "dr-restore", "pre-import"}
 
 
 def test_the_config_repo_travels_as_a_bundle_not_as_a_copy_of_the_working_tree(estate, tmp_path):
@@ -747,12 +754,17 @@ def test_a_remote_export_also_keeps_a_local_copy_for_the_weekly_verify(estate, t
     assert dr_state.load(estate).last_push_at == NOW
 
 
-def test_rsync_missing_falls_back_to_scp(tmp_path):
+def test_rsync_missing_falls_back_to_scp_when_the_key_has_a_shell(tmp_path):
     runner = FakeRunner(answers={"rsync": CommandResult(("rsync",), 127, "", "not found")})
     bundle = tmp_path / "infra-dr-mgmt-01-20260908T021500Z.tar.gz"
     bundle.write_bytes(b"x")
 
-    transfer.push(bundle, parse_target("ssh://infra@standby/srv/dr"), runner=runner)
+    transfer.push(
+        bundle,
+        parse_target("ssh://infra@standby/srv/dr"),
+        runner=runner,
+        policy=SshPolicy(restricted=False),
+    )
 
     assert runner.ran("scp")
     assert "-B" in runner.ran("scp")[0]
@@ -825,7 +837,11 @@ def test_remote_pruning_deletes_named_files_and_never_a_glob():
     runner = FakeRunner(answers={"ls -1": CommandResult(("ssh",), 0, listing, "")})
 
     removed = transfer.prune_remote(
-        parse_target("ssh://infra@standby/srv/infra-dr"), 14, runner=runner, now=NOW
+        parse_target("ssh://infra@standby/srv/infra-dr"),
+        14,
+        runner=runner,
+        now=NOW,
+        policy=SshPolicy(restricted=False),
     )
 
     assert removed == sorted(names_for([40, 90]))
@@ -969,8 +985,19 @@ def test_an_incomplete_export_reaches_the_owner(estate, tmp_path, monkeypatch):
     assert any("incomplete" in text for text, _critical in notifier.messages)
 
 
-def test_a_failed_export_pages_the_owner_rather_than_failing_silently(estate, monkeypatch):
+def test_a_push_that_fails_still_records_and_prunes_the_local_bundle(estate, monkeypatch):
+    """The standby being unreachable must not turn into "there is no backup".
+
+    With the bookkeeping behind the push, a standby that is down for a
+    fortnight means no recorded export (DRExportStale, critical, nightly) and
+    no pruning - so every bundle, Postgres dumps included, piles up on the
+    platform's own data volume until it fills and the collectors stop being
+    able to write. The DR mechanism becomes the outage.
+    """
     estate.dr_target = "ssh://infra@standby/srv/infra-dr"
+    old = names_for([40])[0]
+    estate.dr_dir.mkdir(parents=True, exist_ok=True)
+    (estate.dr_dir / old).write_bytes(b"x")
     duties, notifier = duties_for(estate)
     monkeypatch.setattr("infra_agent.dr.export.pg_dump_to_file", FakePgDump())
     monkeypatch.setattr(
@@ -979,6 +1006,27 @@ def test_a_failed_export_pages_the_owner_rather_than_failing_silently(estate, mo
             tuple(argv), 255, "", "Permission denied (publickey)"
         ),
     )
+
+    answer = duties.dr_export()
+
+    assert answer["ok"] is False and answer["pushed"] is False
+    recorded = dr_state.load(estate)
+    assert recorded.last_export_at == NOW, "DRExportStale would fire on a working export"
+    assert recorded.last_push_at is None, "StandbyStale is the alert that should fire"
+    assert not (estate.dr_dir / old).exists(), "retention still applied"
+    text, critical = notifier.messages[-1]
+    assert "not shipped" in text
+    assert critical is False, "a nightly critical page is how an owner learns to ignore DR alerts"
+
+
+def test_an_export_that_cannot_run_at_all_pages_the_owner(estate, monkeypatch):
+    estate.dr_target = "ssh://infra@standby/srv/infra-dr"
+    duties, notifier = duties_for(estate)
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("no space left on device")
+
+    monkeypatch.setattr("infra_agent.dr.export.export_bundle", explode)
 
     answer = duties.dr_export()
 
@@ -1088,3 +1136,510 @@ def test_a_config_repo_outside_data_dir_is_still_bundled_and_still_not_copied_tw
     assert "configs.bundle" in paths
     assert not any(path.startswith("data/elsewhere") for path in paths)
     assert verify(result.bundle).ok
+
+
+# -- the production cwd is not a git checkout ---------------------------------
+
+
+def test_verify_works_from_a_directory_that_is_not_a_git_repository(estate, tmp_path, monkeypatch):
+    """`git bundle verify` insists on being run inside a repository, and the
+    place the weekly duty runs is /app in a container that holds no repo. The
+    check has to bring its own."""
+    result = make_bundle(estate, tmp_path / "out")
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+
+    report = verify(result.bundle)
+
+    config = next(check for check in report.checks if check.name == "config_repo")
+    assert config.ok, config.detail
+    assert "fsck clean" in config.detail
+    assert report.ok
+
+
+def test_import_works_from_a_directory_that_is_not_a_git_repository(estate, tmp_path, monkeypatch):
+    result = make_bundle(estate, tmp_path / "out")
+    restored = Settings(
+        data_dir=tmp_path / "restored" / "data",
+        secrets_dir=tmp_path / "restored" / "secrets",
+        seed_inventory=tmp_path / "restored" / "inventory" / "seed.yaml",
+    )
+    outside = tmp_path / "somewhere-else"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+
+    report = import_bundle(result.bundle, restored)
+
+    assert (restored.config_repo / ".git").exists()
+    assert report.frozen
+
+
+# -- a bundle is credential-equivalent ----------------------------------------
+
+
+def mode_of(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def test_the_bundle_and_its_sidecar_are_not_world_readable(estate, tmp_path):
+    """configs.bundle carries raw running-configs (SNMP communities, type-7
+    keys, FortiOS ENC blobs) and the pg dump carries NetBox tokens. 0644 makes
+    that readable by every account on the box, and rsync would carry the mode
+    to the standby."""
+    result = make_bundle(estate, tmp_path / "out")
+
+    assert mode_of(result.bundle) == 0o600
+    assert mode_of(result.checksum) == 0o600
+    assert mode_of(tmp_path / "out") == 0o700
+
+
+def test_the_push_pins_the_host_key_and_sets_the_mode_on_the_far_end(estate, tmp_path):
+    runner = FakeRunner()
+    export_bundle(
+        estate,
+        to="ssh://infra@standby/srv/infra-dr",
+        now=NOW,
+        host="mgmt-01",
+        pg_dumper=FakePgDump(),
+        grafana=fake_grafana(),
+        runner=runner,
+        keep_dir=tmp_path / "local",
+    )
+
+    rsync = " ".join(runner.ran("rsync")[0])
+    assert "--chmod=F600,D700" in rsync
+    assert "StrictHostKeyChecking=yes" in rsync
+    assert "accept-new" not in rsync, "trusting whatever answers on the management VLAN"
+
+
+def test_a_configured_known_hosts_file_is_the_one_that_is_used():
+    policy = transfer.SshPolicy(known_hosts=Path("/root/.ssh/known_hosts"))
+
+    assert "UserKnownHostsFile=/root/.ssh/known_hosts" in policy.options()
+    assert "StrictHostKeyChecking=yes" in policy.options()
+
+
+# -- the standby key is restricted to rsync -----------------------------------
+
+
+def test_a_restricted_key_means_rsync_and_nothing_else(estate, tmp_path):
+    """The README's authorized_keys entry forces rrsync: every session runs
+    rsync whatever the client asked for, so `ssh host mkdir -p` does not create
+    a directory - it starts an rsync server, reads EOF and exits non-zero. Code
+    that assumes a shell there fails every single night."""
+    runner = FakeRunner()
+
+    result = export_bundle(
+        estate,
+        to="ssh://infra@standby/srv/infra-dr",
+        now=NOW,
+        host="mgmt-01",
+        pg_dumper=FakePgDump(),
+        grafana=fake_grafana(),
+        runner=runner,
+        keep_dir=tmp_path / "local",
+    )
+
+    assert result.pushed_to == "infra@standby:/srv/infra-dr"
+    assert [call[0] for call in runner.calls] == ["rsync"]
+    assert not runner.ran("ssh"), "a restricted key cannot run mkdir, ls or rm"
+
+
+def test_a_restricted_target_is_pruned_by_the_standby_not_by_us():
+    runner = FakeRunner()
+
+    removed = transfer.prune(
+        parse_target("ssh://infra@standby/srv/infra-dr"), 14, runner=runner, now=NOW
+    )
+
+    assert removed == []
+    assert runner.calls == [], "deploy/standby/prune.sh does this, from the standby's cron"
+
+
+def test_asking_a_restricted_key_for_a_shell_says_what_to_change():
+    with pytest.raises(DRError, match="restricted"):
+        transfer.ensure_remote_dir(parse_target("ssh://infra@standby/srv/dr"), runner=FakeRunner())
+
+
+# -- encryption of the copy that leaves the building --------------------------
+
+
+@dataclass
+class FakeAge:
+    """`age` without age: a header, the recipient, then the plaintext."""
+
+    calls: list[list[str]] = field(default_factory=list)
+    fail: bool = False
+
+    def __call__(self, argv: Any) -> tuple[int, str]:
+        argv = list(argv)
+        self.calls.append(argv)
+        if self.fail:
+            return 1, "age: error: no identity matched any of the recipients"
+        if argv[1] == "-r":
+            recipient, dest, src = argv[2], Path(argv[4]), Path(argv[5])
+            dest.write_bytes(
+                b"age-encryption.org/v1\n" + recipient.encode() + b"\n" + src.read_bytes()
+            )
+            return 0, ""
+        dest, src = Path(argv[5]), Path(argv[6])
+        dest.write_bytes(src.read_bytes().split(b"\n", 2)[2])
+        return 0, ""
+
+
+def encrypting(estate: Settings, tmp_path: Path) -> Settings:
+    identity = tmp_path / "keys.txt"
+    identity.write_text("AGE-SECRET-KEY-1TEST\n")
+    estate.dr_age_recipient = "age1testrecipient"
+    estate.dr_age_identity = identity
+    return estate
+
+
+def test_the_copy_that_travels_is_encrypted_when_a_recipient_is_configured(estate, tmp_path):
+    age = FakeAge()
+    runner = FakeRunner()
+    encrypting(estate, tmp_path)
+
+    result = export_bundle(
+        estate,
+        to="ssh://infra@standby/srv/infra-dr",
+        now=NOW,
+        host="mgmt-01",
+        pg_dumper=FakePgDump(),
+        grafana=fake_grafana(),
+        runner=runner,
+        age_runner=age,
+        keep_dir=tmp_path / "local",
+    )
+
+    assert result.encrypted_copy is not None
+    assert result.encrypted_copy.name.endswith(".tar.gz.age")
+    assert mode_of(result.encrypted_copy) == 0o600
+    pushed = runner.ran("rsync")[0]
+    assert any(part.endswith(".tar.gz.age") for part in pushed)
+    assert not any(part.endswith(".tar.gz") for part in pushed), (
+        "the plaintext bundle must not travel when a recipient is configured"
+    )
+    assert result.bundle == result.encrypted_copy
+    assert not list((tmp_path / "local").glob("*.tar.gz")), (
+        "a plaintext copy of every running-config must not sit on the volume for a fortnight"
+    )
+    assert dr_state.load(estate).last_export_bundle.endswith(".age")
+
+
+def test_an_encrypted_bundle_verifies_and_imports_with_the_key(estate, tmp_path):
+    age = FakeAge()
+    encrypting(estate, tmp_path)
+    export_bundle(
+        estate,
+        to=str(tmp_path / "standby"),
+        now=NOW,
+        host="mgmt-01",
+        pg_dumper=FakePgDump(),
+        grafana=fake_grafana(),
+        age_runner=age,
+    )
+    encrypted = next((tmp_path / "standby").glob("*.tar.gz.age"))
+    restored = Settings(
+        data_dir=tmp_path / "restored" / "data",
+        secrets_dir=tmp_path / "restored" / "secrets",
+        seed_inventory=tmp_path / "restored" / "inventory" / "seed.yaml",
+        dr_age_identity=estate.dr_age_identity,
+    )
+
+    report = verify(encrypted, settings=estate, age_runner=age)
+    imported = import_bundle(encrypted, restored, age_runner=age)
+
+    assert report.ok, [c.line() for c in report.failures()]
+    assert (restored.data_dir / "plans.db").exists()
+    assert imported.frozen
+
+
+def test_an_encrypted_bundle_without_the_key_says_so_rather_than_half_restoring(estate, tmp_path):
+    age = FakeAge()
+    encrypting(estate, tmp_path)
+    export_bundle(
+        estate,
+        to=str(tmp_path / "standby"),
+        now=NOW,
+        host="mgmt-01",
+        pg_dumper=FakePgDump(),
+        grafana=fake_grafana(),
+        age_runner=age,
+    )
+    encrypted = next((tmp_path / "standby").glob("*.tar.gz.age"))
+
+    report = verify(encrypted, settings=estate, age_runner=FakeAge(fail=True))
+
+    assert not report.ok
+    assert any(check.name == "decrypt" and not check.ok for check in report.checks)
+
+
+# -- tamper detection: the sidecar covers the manifest ------------------------
+
+
+def test_import_refuses_a_bundle_whose_sidecar_is_missing(estate, tmp_path):
+    """The manifest hashes every member; only the sidecar covers the manifest.
+    A tamperer who deletes it and rewrites manifest plus member consistently
+    passes every other check."""
+    result = make_bundle(estate, tmp_path / "out")
+    result.checksum.unlink()
+    restored = Settings(
+        data_dir=tmp_path / "restored" / "data",
+        secrets_dir=tmp_path / "restored" / "secrets",
+        seed_inventory=tmp_path / "restored" / "inventory" / "seed.yaml",
+    )
+
+    with pytest.raises(DRError, match="checksum"):
+        import_bundle(result.bundle, restored)
+
+    assert not restored.data_dir.exists(), "nothing was written before the refusal"
+
+
+def test_verify_flags_a_missing_sidecar_but_still_checks_the_bundle(estate, tmp_path):
+    result = make_bundle(estate, tmp_path / "out")
+    result.checksum.unlink()
+
+    report = verify(result.bundle)
+
+    checksum = next(check for check in report.checks if check.name == "checksum")
+    assert checksum.ok, "verifying a suspect bundle is exactly what you want to be able to do"
+    assert "suspect" in checksum.detail
+    assert report.ok
+
+
+# -- a restore always ends frozen ---------------------------------------------
+
+
+def test_a_step_that_fails_still_leaves_the_platform_frozen(estate, tmp_path, monkeypatch):
+    """The compose stack mounts ../secrets read-only, so restoring secrets in
+    the container raises OSError. A half-restored, unfrozen platform is the
+    worst of both worlds."""
+    result = make_bundle(estate, tmp_path / "out")
+    restored = Settings(
+        data_dir=tmp_path / "restored" / "data",
+        secrets_dir=tmp_path / "restored" / "secrets",
+        seed_inventory=tmp_path / "restored" / "inventory" / "seed.yaml",
+    )
+
+    def read_only(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr("infra_agent.dr.restore._restore_secrets", read_only)
+
+    report = import_bundle(result.bundle, restored)
+
+    assert (restored.data_dir / "FROZEN").exists()
+    assert report.frozen
+    assert (restored.data_dir / "plans.db").exists(), "the rest of the restore still happened"
+    assert any("Read-only file system" in warning for warning in report.warnings)
+
+
+def test_force_moves_the_previous_installation_aside_instead_of_merging(estate, tmp_path):
+    """A leftover plans.db-journal next to a freshly restored plans.db is
+    replayed by SQLite on the next open and corrupts the restored plan store."""
+    result = make_bundle(estate, tmp_path / "out")
+    restored = Settings(
+        data_dir=tmp_path / "restored" / "data",
+        secrets_dir=tmp_path / "restored" / "secrets",
+        seed_inventory=tmp_path / "restored" / "inventory" / "seed.yaml",
+    )
+    restored.data_dir.mkdir(parents=True)
+    (restored.data_dir / "plans.db-journal").write_bytes(b"a hot journal from another estate")
+    (restored.data_dir / "snapshots").mkdir()
+    (restored.data_dir / "snapshots" / "ghost.json").write_text("{}")
+
+    report = import_bundle(result.bundle, restored, force=True, now=NOW)
+
+    assert not (restored.data_dir / "plans.db-journal").exists()
+    assert not (restored.data_dir / "snapshots" / "ghost.json").exists()
+    aside = restored.data_dir / "pre-import" / "20260908T021500Z"
+    assert (aside / "plans.db-journal").exists(), "evidence is moved, never deleted"
+    assert (aside / "snapshots" / "ghost.json").exists()
+    assert (restored.data_dir / "FROZEN").exists()
+    assert any("pre-import" in warning for warning in report.warnings)
+
+
+# -- SQLite consistency -------------------------------------------------------
+
+
+def test_a_writer_mid_transaction_does_not_produce_a_torn_plan_store(estate, tmp_path):
+    """The Telegram bot may be writing an approval at 02:15. A file copy of a
+    database plus a separate copy of its journal can produce a pair that do not
+    belong together; the online backup API cannot."""
+    import sqlite3
+
+    conn = sqlite3.connect(estate.data_dir / "plans.db")
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        "INSERT INTO plans (id, state, tier, created_at, body) VALUES (?,?,?,?,?)",
+        ("half-written", "draft", 1, NOW.isoformat(), "{}"),
+    )
+    try:
+        result = make_bundle(estate, tmp_path / "out")
+    finally:
+        conn.rollback()
+        conn.close()
+
+    report = verify(result.bundle)
+
+    plans = next(check for check in report.checks if check.name == "plans_db")
+    assert plans.ok, plans.detail
+    names = set(tarfile.open(result.bundle).getnames())
+    assert not any(name.endswith("-journal") or name.endswith("-wal") for name in names)
+
+
+# -- a local standby target ---------------------------------------------------
+
+
+def test_the_weekly_duty_verifies_the_newest_bundle_on_a_local_target(estate, tmp_path):
+    """An NFS export from the second ESXi host is a legitimate standby. The
+    bundle is written there and data_dir/dr stays empty; a duty that only
+    looked in data_dir/dr would page 'no DR bundle' every Saturday."""
+    estate.dr_target = str(tmp_path / "nfs-standby")
+    duties, notifier = duties_for(estate)
+    make_bundle(estate, tmp_path / "nfs-standby")
+
+    answer = duties.dr_verify()
+
+    assert answer["ok"] is True
+    assert dr_state.load(estate).last_verify_ok is True
+    assert not any("no DR bundle" in text for text, _critical in notifier.messages)
+
+
+# -- the name a bundle carries ------------------------------------------------
+
+
+def test_the_manifest_host_is_the_vm_name_not_a_container_id(estate, tmp_path, monkeypatch):
+    """Inside compose, gethostname() is a 12-hex container id, and the field an
+    operator reads at 3am becomes noise that changes on every deploy."""
+    monkeypatch.setattr("infra_agent.dr.export.socket.gethostname", lambda: "3f2a9c1b0e4d")
+
+    result = build_bundle(
+        estate, dest_dir=tmp_path / "out", now=NOW, pg_dumper=FakePgDump(), grafana=fake_grafana()
+    )
+
+    assert result.manifest.host == estate.mgmt_vm_name
+    assert result.bundle.name == "infra-dr-mgmt-01-20260908T021500Z.tar.gz"
+
+
+def test_a_real_hostname_is_left_alone(estate, tmp_path, monkeypatch):
+    monkeypatch.setattr("infra_agent.dr.export.socket.gethostname", lambda: "mgmt-01.lab")
+
+    result = build_bundle(
+        estate, dest_dir=tmp_path / "out", now=NOW, pg_dumper=FakePgDump(), grafana=fake_grafana()
+    )
+
+    assert result.manifest.host == "mgmt-01.lab"
+
+
+# -- the DR gauges answer the same way in every process -----------------------
+
+
+def test_a_process_that_only_imports_the_metrics_module_does_not_claim_a_failed_verify():
+    """prometheus_client's default for a Gauge is 0, and 0 on
+    `infra_dr_last_verify_ok` is DRVerifyFailed - critical, "your backup does
+    not restore". The agent serves /metrics through make_asgi_app() rather than
+    start_metrics_server, so the gauges have to be armed at import."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from prometheus_client import generate_latest\n"
+            "import infra_agent.monitoring.metrics  # noqa: F401\n"
+            "print(generate_latest().decode())",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "infra_dr_last_verify_ok 1.0" in proc.stdout
+    assert "infra_dr_last_verify_ok 0.0" not in proc.stdout
+    assert "infra_dr_configured 0.0" in proc.stdout, "no target configured in a bare process"
+
+
+def test_the_gauges_are_armed_whichever_module_is_imported_first():
+    """`infra_agent.dr.state` imports the metrics module, so arming at import
+    time has to survive being reached through a half-built dr package - which
+    is what happens in the CLI, where `infra dr ...` imports dr first."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from infra_agent.dr import state  # noqa: F401\n"
+            "from prometheus_client import generate_latest\n"
+            "print(generate_latest().decode())",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "infra_dr_last_verify_ok 1.0" in proc.stdout
+    assert "could not arm" not in proc.stderr
+
+
+def test_the_agent_metrics_endpoint_reports_the_recorded_dr_state(estate):
+    """Prometheus scrapes infra-agent:9102/metrics too, and a DR gauge that
+    reads 0 there fires the alert whatever the collectors say."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from infra_agent.agent.webhook import build_app
+    from infra_agent.dr import state as module
+
+    estate.dr_target = "ssh://infra@standby/srv/infra-dr"
+    dr_state.save(
+        dr_state.DRState(
+            last_export_at=NOW,
+            last_export_bundle="infra-dr-mgmt-01-20260908T021500Z.tar.gz",
+            last_verify_at=NOW,
+            last_verify_ok=False,
+        ),
+        estate,
+    )
+    module.arm_metrics(estate)
+    try:
+        with TestClient(build_app(object(), settings=estate)) as client:
+            body = client.get("/metrics").text
+    finally:
+        module.arm_metrics(None)
+
+    exported = next(
+        line for line in body.splitlines() if line.startswith("infra_dr_last_export_timestamp")
+    )
+    assert float(exported.split()[1]) == NOW.timestamp()
+    assert "infra_dr_last_verify_ok 0.0" in body
+    assert "infra_dr_configured 1.0" in body
+
+
+def test_the_weekly_duty_verifies_the_encrypted_bundle_it_actually_has(
+    estate, tmp_path, monkeypatch
+):
+    """With a recipient configured the only bundle on disk is the `.age` one.
+    Verifying it every week is what proves the age key still opens it - the
+    failure this mechanism is most likely to have, and the one that turns every
+    bundle since the last key rotation into an archive of noise."""
+    age = FakeAge()
+    monkeypatch.setattr("infra_agent.dr.crypt._run", age)
+    encrypting(estate, tmp_path)
+    estate.dr_target = str(tmp_path / "nfs-standby")
+    duties, notifier = duties_for(estate)
+    monkeypatch.setattr("infra_agent.dr.export.pg_dump_to_file", FakePgDump())
+
+    exported = duties.dr_export()
+    verified = duties.dr_verify()
+
+    assert exported["ok"] is True
+    assert exported["bundle"].endswith(".tar.gz.age")
+    assert verified["ok"] is True, verified
+    assert any(argv[1] == "-d" for argv in age.calls), "the key was exercised, not assumed"
+    assert not any("no DR bundle" in text for text, _critical in notifier.messages)

@@ -382,7 +382,13 @@ def dr_export(
     console.print(f"[green]wrote[/] {result.bundle}")
     if result.pushed_to:
         console.print(f"[green]pushed to[/] {result.pushed_to}")
-    if not result.ok:
+    if result.push_error:
+        # The bundle exists, is pruned and is recorded; only the copy to the
+        # standby failed. Still an error exit: `deploy/standby/sync.sh` and any
+        # cron wrapper read this, and a backup that never leaves the machine it
+        # is a backup of is not one.
+        console.print(f"[red]not shipped[/]: {result.push_error}")
+    if not result.ok or result.push_error:
         raise typer.Exit(code=1)
 
 
@@ -402,15 +408,17 @@ def dr_verify(
     """
     from pathlib import Path as _Path
 
+    from infra_agent.dr.export import verify_source
     from infra_agent.dr.transfer import newest_bundle
     from infra_agent.dr.verify import verify, verify_and_record
 
     settings = _dr_settings()
-    target = _Path(bundle) if bundle else newest_bundle(settings.dr_dir)
+    where = verify_source(settings)
+    target = _Path(bundle) if bundle else newest_bundle(where)
     if target is None:
-        console.print(f"[red]no bundle[/] in {settings.dr_dir}; run `infra dr export` first")
+        console.print(f"[red]no bundle[/] in {where}; run `infra dr export` first")
         raise typer.Exit(code=2)
-    report = verify_and_record(target, settings) if record else verify(target)
+    report = verify_and_record(target, settings) if record else verify(target, settings=settings)
     if as_json:
         console.print_json(data=report.llm_view())
     else:
@@ -483,10 +491,11 @@ def dr_list(
     """Bundles in a directory, newest first."""
     from pathlib import Path as _Path
 
+    from infra_agent.dr.export import verify_source
     from infra_agent.dr.transfer import local_bundles
 
     settings = _dr_settings()
-    where = _Path(directory) if directory else settings.dr_dir
+    where = _Path(directory) if directory else verify_source(settings)
     found = local_bundles(where)
     if not found:
         console.print(f"[yellow]no bundles[/] in {where}")

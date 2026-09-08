@@ -59,11 +59,23 @@ class FakeSecretsStore:
 
 
 class BrokenSecretsStore(FakeSecretsStore):
+    """Decryption is broken. Nothing in the health report may need it."""
+
     def available(self) -> bool:
         return True
 
     def read(self, name: str) -> dict[str, Any]:
         raise RuntimeError("sops: failed to decrypt: no matching age key for sk-ant-secret")
+
+    def keys(self, name: str) -> list[str]:
+        raise RuntimeError("sops: failed to decrypt: no matching age key for sk-ant-secret")
+
+
+class UnavailableSecretsStore(FakeSecretsStore):
+    """No sops binary, or no age key: nothing on this host can be decrypted."""
+
+    def available(self) -> bool:
+        return False
 
 
 @pytest.fixture
@@ -106,8 +118,18 @@ def healthy(tmp_path: Path, monkeypatch) -> Settings:
     )
     ConfigGitStore(settings.config_repo).write("sw-core-01", "running-config", "hostname x\n")
     settings.secrets_dir.mkdir(parents=True, exist_ok=True)
-    (settings.secrets_dir / "devices.enc.yaml").write_text("sops:\n  age: []\n")
-    (settings.secrets_dir / "platform.enc.yaml").write_text("sops:\n  age: []\n")
+    # SOPS-shaped: the mapping keys stay in cleartext, every value is an ENC
+    # blob, and the `sops` block is the metadata rather than a secret.
+    (settings.secrets_dir / "devices.enc.yaml").write_text(
+        "esx-01:\n    password: ENC[AES256_GCM,data:aa,type:str]\n"
+        "sw-core-01:\n    password: ENC[AES256_GCM,data:bb,type:str]\n"
+        "sops:\n    age: []\n"
+    )
+    (settings.secrets_dir / "platform.enc.yaml").write_text(
+        "anthropic_api_key: ENC[AES256_GCM,data:cc,type:str]\n"
+        "heartbeat_url: ENC[AES256_GCM,data:dd,type:str]\n"
+        "sops:\n    age: []\n"
+    )
 
     dr_state.save(
         dr_state.DRState(
@@ -267,15 +289,38 @@ def test_a_healthy_config_repo_reports_its_commit_count(healthy):
     assert "2 commits" in check.detail  # init + one config write
 
 
-def test_secrets_that_will_not_decrypt_are_the_whole_ballgame(healthy, monkeypatch):
-    """Every device credential and the API key are behind this. If it fails,
-    the platform is a museum piece with a nice graph."""
-    monkeypatch.setattr("infra_agent.onboarding.secrets.SecretsStore", BrokenSecretsStore)
+def test_a_platform_that_cannot_open_its_own_secrets_is_the_whole_ballgame(healthy, monkeypatch):
+    """Every device credential and the API key are behind this. If sops or the
+    age key is gone, the platform is a museum piece with a nice graph."""
+    monkeypatch.setattr("infra_agent.onboarding.secrets.SecretsStore", UnavailableSecretsStore)
 
     check = report(healthy).get("secrets")
 
     assert check is not None and not check.ok
-    assert "decryption failed" in check.detail
+    assert "age key" in check.detail
+
+
+def test_a_plaintext_file_in_the_secrets_directory_is_a_finding(healthy):
+    (healthy.secrets_dir / "devices.enc.yaml").write_text("esx-01:\n  password: hunter2\n")
+
+    check = report(healthy).get("secrets")
+
+    assert check is not None and not check.ok
+    assert "not a SOPS document" in check.detail
+
+
+def test_the_digest_never_decrypts_a_secret_just_to_count_them(healthy, monkeypatch):
+    """`infra dr health` runs in the daily digest. Shelling out to `sops
+    --decrypt` for every file would pull every device password and the
+    Anthropic and Telegram keys into the agent process to produce the sentence
+    "devices: 2 keys". SOPS leaves the mapping keys in cleartext; that is where
+    the count comes from."""
+    monkeypatch.setattr("infra_agent.onboarding.secrets.SecretsStore", BrokenSecretsStore)
+
+    check = report(healthy).get("secrets")
+
+    assert check is not None and check.ok, "counting keys must not need a decryption"
+    assert "devices: 2 keys" in check.detail
 
 
 def test_a_secrets_failure_never_quotes_what_failed_to_decrypt(healthy, monkeypatch):

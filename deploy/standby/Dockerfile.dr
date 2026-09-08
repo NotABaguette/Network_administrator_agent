@@ -1,0 +1,36 @@
+# The platform image plus the four tools disaster recovery needs.
+#
+# `deploy/Dockerfile` deliberately carries only git, curl and sops, because
+# nothing the platform does at runtime needs more. Disaster recovery does:
+#
+#   postgresql-client   pg_dump of the infra and netbox databases
+#   openssh-client      key auth to the standby
+#   rsync               the push itself, with --chmod and resume
+#   age                 encrypting the copy that leaves the building
+#
+# Building a second image rather than adding four packages to the one everything
+# else runs keeps the attack surface of the always-on containers where it was:
+# the agent that talks to the Claude API has no ssh client in it, and this image
+# only exists for the minutes a night the export takes.
+#
+# It is otherwise identical to deploy/Dockerfile. If that file ever grows these
+# packages, delete this one and point `dr.compose.yml` at the main image - the
+# scripts do not care which of the two they got.
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl ca-certificates postgresql-client openssh-client rsync age \
+    && curl -fsSL https://github.com/getsops/sops/releases/download/v3.9.1/sops-v3.9.1.linux.amd64 -o /usr/local/bin/sops \
+    && chmod +x /usr/local/bin/sops \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /usr/local/bin/uv
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE ./
+COPY infra_agent ./infra_agent
+RUN uv pip install --system ".[all]"
+ENV INFRA_DATA_DIR=/app/data INFRA_SECRETS_DIR=/app/secrets INFRA_SEED_INVENTORY=/app/inventory/seed.yaml
+# SSH is only ever used with an explicit key and BatchMode; this keeps the
+# client from trying anything else, including an agent that is not there.
+RUN mkdir -p /etc/ssh/ssh_config.d \
+    && printf 'Host *\n    IdentityFile /root/.ssh/id_ed25519\n    IdentitiesOnly yes\n    BatchMode yes\n' \
+    > /etc/ssh/ssh_config.d/infra-dr.conf
+ENTRYPOINT []

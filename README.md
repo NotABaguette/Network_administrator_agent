@@ -72,15 +72,26 @@ The estate has backups because this platform watches them; the platform has
 one because of [`infra_agent/dr/`](infra_agent/dr/).
 
 ```bash
-infra dr health                                    # could this platform recover right now?
-infra dr export --to ssh://infra@standby/srv/infra-dr
-infra dr verify                                    # prove the newest bundle restores
-infra dr import <bundle>                           # onto empty ground; leaves it FROZEN
+# The platform's state is the compose volume `infra-data`, not ./data, so DR
+# runs inside the stack (deploy/standby/dr.compose.yml adds pg_dump, ssh, rsync
+# and age, which the always-on image deliberately does not carry):
+DR="docker compose --profile dr -f deploy/docker-compose.yml \
+      -f deploy/standby/dr.compose.yml run --rm dr infra"
+
+$DR dr health                  # could this platform recover right now?
+$DR dr export --to ssh://infra@standby/srv/infra-dr
+$DR dr verify                  # prove the newest bundle restores
+$DR dr import /inbox/<bundle>  # onto empty ground; leaves the platform FROZEN
+
+deploy/standby/sync.sh         # the same, from cron, with the pre-flight checks
 ```
 
 A nightly duty ships a dated, checksummed bundle to a cold standby on a second
 ESXi host and a weekly one verifies it. `deploy/.env` and the age private key
-are deliberately not in the bundle; the manifest says why. The runbooks are
+are deliberately not in the bundle; the manifest says why. A bundle is
+otherwise credential-equivalent - it carries the raw device configs and the
+NetBox database - so it is written 0600, pushed with a pinned host key, and
+age-encrypted when `INFRA_DR_AGE_RECIPIENT` is set. The runbooks are
 [`docs/runbooks/dr-mgmt-01.md`](docs/runbooks/dr-mgmt-01.md),
 [`restore-test.md`](docs/runbooks/restore-test.md),
 [`oob-box.md`](docs/runbooks/oob-box.md) and

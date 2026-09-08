@@ -20,11 +20,25 @@ Budget 90 minutes the first time, 30 once it is familiar.
 Write down the start time. Do not tell the agent to freeze; the primary keeps
 running normally throughout. Nothing here touches it.
 
+**Every `infra` command in this runbook runs inside a stack**, because the
+platform's state is the `infra-data` volume and not `./data` (see
+`deploy/standby/README.md`, "Where the state actually is"). Run them on the
+host and each one answers about an empty directory: the restore appears to work
+and proves nothing, which is the worst possible outcome for this test. Two
+prefixes, one for each machine:
+
+```bash
+C="docker compose -f deploy/docker-compose.yml"                    # the running stack
+DR="docker compose --profile dr -f deploy/docker-compose.yml \
+      -f deploy/standby/dr.compose.yml run --rm dr infra"          # DR tooling
+```
+
 ## 1. Pick a bundle and verify it where it lives (5 min)
 
 ```bash
-infra dr list
-infra dr verify --json | tee /tmp/restore-test-verify.json
+# on the primary
+$DR dr list
+$DR dr verify --json | tee /tmp/restore-test-verify.json
 ```
 
 Use a bundle from the **standby**, not a fresh local one. The question is
@@ -32,9 +46,15 @@ whether what arrived over the wire is restorable, and a bundle that was never
 transferred does not answer it.
 
 ```bash
-scp infra@standby:/srv/infra-dr/infra-dr-*.tar.gz /tmp/rt/
-sha256sum -c /tmp/rt/infra-dr-*.tar.gz.sha256
+sudo install -d -m 700 /srv/infra-dr-test        # on the scratch VM
+scp infra@standby:/srv/infra-dr/infra-dr-*.tar.gz* /srv/infra-dr-test/
+sha256sum -c /srv/infra-dr-test/infra-dr-*.sha256
 ```
+
+A bundle that arrived **without its sidecar** is a finding, not an
+inconvenience: the manifest hashes every member but only the sidecar covers the
+manifest, so a missing one is the single shape of tampering the per-file hashes
+cannot see. `infra dr import` refuses it.
 
 **Record:** which checks passed, which components the manifest reports as
 incomplete, and the bundle's age.
@@ -52,14 +72,24 @@ delete it when you are done.
 
 ## 3. Restore, and count what you had to fetch by hand (20 min)
 
+On the scratch VM, with `INFRA_DR_INBOX=/srv/infra-dr-test` in `deploy/.env`
+(that is what `dr.compose.yml` mounts at `/inbox`):
+
 ```bash
-infra dr verify /tmp/rt/infra-dr-<stamp>.tar.gz
-infra dr import /tmp/rt/infra-dr-<stamp>.tar.gz
+$DR dr verify /inbox/infra-dr-<stamp>.tar.gz
+$DR dr import /inbox/infra-dr-<stamp>.tar.gz
 ```
 
 The import refuses a non-empty `data_dir` and leaves the platform frozen. Both
 are correct; do not `--force` past the first one on a scratch VM that should be
-empty anyway — if it complains, you built the VM wrong.
+empty anyway — if it complains, you built the VM wrong. (`--force` would not
+lose anything either: it moves what is there into `data/pre-import/<stamp>/`.
+But on a scratch VM it means you restored on top of something.)
+
+An age-encrypted bundle (`...tar.gz.age`) needs no different command — verify
+and import decrypt it with the key from step 3. If they cannot, you have found
+the most important possible failure of this test: **you have backups nobody can
+read**. Stop and fix that before anything else.
 
 Now the interesting part. The bundle deliberately excludes two things:
 
@@ -76,22 +106,27 @@ both in the owner's password manager with a note pointing at this runbook.
 ## 4. Bring it up and prove the parts (15 min)
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d postgres
-pg_restore -d netbox data/dr-restore/postgres/netbox.dump
-pg_restore -d infra  data/dr-restore/postgres/infra.dump
-docker compose -f deploy/docker-compose.yml up -d
+$C up -d postgres
+# The dumps are staged inside the volume, which the postgres container cannot
+# see, so they go in over stdin:
+$C exec -T infra-agent cat /app/data/dr-restore/postgres/netbox.dump |
+  $C exec -T postgres pg_restore -U "${POSTGRES_USER:-infra}" -d netbox --clean --if-exists
+$C exec -T infra-agent cat /app/data/dr-restore/postgres/infra.dump |
+  $C exec -T postgres pg_restore -U "${POSTGRES_USER:-infra}" -d infra --clean --if-exists
+$C up -d
 
-infra dr health --json | tee /tmp/restore-test-health.json
+$C exec infra-agent test -f /app/data/FROZEN && echo "frozen, as a restore must be"
+$C exec infra-agent infra dr health --json | tee /tmp/restore-test-health.json
 ```
 
 Then prove each part by hand, because `dr health` is code and this test exists
 to check the code:
 
 ```bash
-infra change list                       # the plan store carries the real history
-infra baseline show                     # the accepted baseline came back
-git -C data/configs log --oneline | head   # config history, not just a tip commit
-infra graph build && infra graph impact esx-01
+$C exec infra-agent infra change list      # the plan store carries the real history
+$C exec infra-agent infra baseline show    # the accepted baseline came back
+$C exec infra-agent git -C /app/data/configs log --oneline | head   # real history
+$C exec infra-agent infra graph build && $C exec infra-agent infra graph impact esx-01
 sops -d secrets/devices.enc.yaml | head -3   # the age key really does open them
 ```
 
@@ -103,9 +138,10 @@ turns every bundle since into an archive of noise.
 
 ```bash
 # on the scratch VM
-infra graph build && infra graph impact fw-01 > /tmp/restored-impact.txt
+$C exec infra-agent infra graph build
+$C exec -T infra-agent infra graph impact fw-01 > /tmp/restored-impact.txt
 # on the primary
-infra graph impact fw-01 > /tmp/primary-impact.txt
+$C exec -T infra-agent infra graph impact fw-01 > /tmp/primary-impact.txt
 diff /tmp/primary-impact.txt /tmp/restored-impact.txt
 ```
 
@@ -120,8 +156,8 @@ the management VLAN, or better, run it against **one** device by temporarily
 allowing its address in that device's management ACL.
 
 ```bash
-infra collect --device sw-core-01     # read-only credential, one device
-infra drift --device sw-core-01
+$C exec infra-agent infra collect --device sw-core-01   # read-only credential, one device
+$C exec infra-agent infra drift --device sw-core-01
 ```
 
 What you are proving: the restored *credentials* work. Everything up to here
@@ -134,7 +170,9 @@ Remove the ACL entry afterwards. Write it down now so you do not forget.
 ## 7. Tear down and write it up (10 min)
 
 ```bash
-docker compose -f deploy/docker-compose.yml down -v
+$C down -v          # -v: the restored infra-data volume goes too. On the scratch
+                    # VM only - never type this on the primary.
+rm -rf /srv/infra-dr-test
 # power off and delete the scratch VM; remove the temporary ACL entry
 ```
 

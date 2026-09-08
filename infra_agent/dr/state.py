@@ -91,6 +91,46 @@ def update(settings: Settings | None = None, **fields: object) -> DRState:
     return state
 
 
+#: Gauge name -> what it reads, and what it reads when nothing is known. The
+#: "never" conventions live here because two modules depend on them: a
+#: timestamp that has never been recorded is 0, so `time() - <gauge>` is
+#: enormous and the staleness alert fires; `last_verify_ok` is 1 until a
+#: verification has actually failed, so DRVerifyFailed means a failure rather
+#: than "nobody has run one" (that is DRVerifyStale).
+GAUGE_DEFAULTS = {
+    "last_export": 0.0,
+    "last_export_bytes": 0.0,
+    "last_push": 0.0,
+    "last_verify": 0.0,
+    "last_verify_ok": 1.0,
+    "configured": 0.0,
+}
+
+
+def gauge_value(name: str, settings: Settings | None = None) -> float:
+    """One DR gauge, read from `dr-state.json` at scrape time.
+
+    Called from `infra_agent.monitoring.metrics` through a lazy import, so the
+    gauges can be armed while this module is still being imported - which is
+    what happens whenever something imports `infra_agent.dr` before it imports
+    the metrics module.
+    """
+    if name == "configured":
+        return _configured(settings)
+    current = load(settings)
+    if name == "last_export":
+        return _stamp(current.last_export_at)
+    if name == "last_export_bytes":
+        return float(current.last_export_bytes or 0)
+    if name == "last_push":
+        return _stamp(current.last_push_at)
+    if name == "last_verify":
+        return _stamp(current.last_verify_at)
+    if name == "last_verify_ok":
+        return _verify_ok(current)
+    raise KeyError(f"no DR gauge called {name!r}")
+
+
 def publish_metrics(state: DRState | None = None, settings: Settings | None = None) -> None:
     """Mirror the state file into the DR gauges once.
 
@@ -103,6 +143,7 @@ def publish_metrics(state: DRState | None = None, settings: Settings | None = No
     metrics.DR_STANDBY_LAST_SYNC.set(_stamp(state.last_push_at))
     metrics.DR_LAST_VERIFY.set(_stamp(state.last_verify_at))
     metrics.DR_LAST_VERIFY_OK.set(_verify_ok(state))
+    metrics.DR_CONFIGURED.set(_configured(settings))
 
 
 def arm_metrics(settings: Settings | None = None) -> None:
@@ -122,11 +163,15 @@ def arm_metrics(settings: Settings | None = None) -> None:
       failed, so `DRVerifyFailed` means "a verification failed", not "nobody
       has run one". That second case is `DRVerifyStale`.
     """
-    metrics.DR_LAST_EXPORT.set_function(lambda: _stamp(load(settings).last_export_at))
-    metrics.DR_BUNDLE_BYTES.set_function(lambda: float(load(settings).last_export_bytes or 0))
-    metrics.DR_STANDBY_LAST_SYNC.set_function(lambda: _stamp(load(settings).last_push_at))
-    metrics.DR_LAST_VERIFY.set_function(lambda: _stamp(load(settings).last_verify_at))
-    metrics.DR_LAST_VERIFY_OK.set_function(lambda: _verify_ok(load(settings)))
+    for gauge, name in metrics.DR_GAUGES:
+        gauge.set_function(_reader(name, settings))
+
+
+def _reader(name: str, settings: Settings | None):
+    def read() -> float:
+        return gauge_value(name, settings)
+
+    return read
 
 
 def _stamp(value: datetime | None) -> float:
@@ -135,3 +180,17 @@ def _stamp(value: datetime | None) -> float:
 
 def _verify_ok(state: DRState) -> float:
     return 0.0 if state.last_verify_ok is False else 1.0
+
+
+def _configured(settings: Settings | None) -> float:
+    """1 when this platform has somewhere to export to.
+
+    Read at scrape time rather than at start-up so a target added to
+    `deploy/.env` takes effect on the next restart of anything, and so the
+    gauge is honest in a process that never loaded the settings.
+    """
+    try:
+        current = settings or get_settings()
+        return 1.0 if current.dr_target else 0.0
+    except Exception:  # noqa: BLE001 - unreadable settings are not "configured"
+        return 0.0

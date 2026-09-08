@@ -13,7 +13,16 @@ Two rules make this safe to run on a machine somebody is panicking on:
 
 Manifest integrity is not optional. `--force` overrides the empty-directory
 refusal, never a checksum mismatch: a bundle that does not hash to its own
-manifest is not a backup, and restoring it would be restoring an unknown.
+manifest is not a backup, and restoring it would be restoring an unknown. Nor
+does `--force` mean "merge": the old `data_dir` is moved aside whole, because
+files the bundle does not contain - a stale `plans.db-journal` from the last
+crash, snapshots of an estate this is not - survive a merge and are read as if
+they had been restored.
+
+The freeze marker is written **before** the first file is restored and again
+after the last one, whatever happened in between. A restore that stopped
+half-way because the secrets mount is read-only must not leave a platform that
+is restored enough to act and not frozen.
 
 Postgres dumps and Grafana dashboards are staged rather than applied. Loading
 them needs a running server, which on a cold standby comes up after this step;
@@ -28,10 +37,12 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from infra_agent.config import Settings, get_settings
-from infra_agent.dr import archive
+from infra_agent.dr import archive, crypt
 from infra_agent.dr.errors import DRError
 from infra_agent.dr.manifest import (
     CONFIG_BUNDLE,
@@ -47,6 +58,8 @@ log = logging.getLogger(__name__)
 
 RESTORE_STAGING = "dr-restore"
 FREEZE_MARKER = "FROZEN"
+#: Where `--force` puts whatever was in data_dir before the restore.
+PRE_IMPORT_DIR = "pre-import"
 
 #: Checks that must pass before anything is written, whatever --force says.
 INTEGRITY_CHECKS = ("checksum", "extract", "manifest", "files")
@@ -92,38 +105,153 @@ def import_bundle(
     *,
     force: bool = False,
     git_runner: GitRunner | None = None,
+    now: datetime | None = None,
+    age_runner: Any = None,
 ) -> ImportReport:
     settings = settings or get_settings()
     bundle = Path(bundle)
     report = ImportReport(bundle=bundle.name)
 
-    checked = verify(bundle, git_runner=git_runner)
-    report.verification = checked
-    fatal = [c for c in checked.checks if c.name in INTEGRITY_CHECKS and not c.ok]
-    if fatal:
-        raise DRError(
-            "refusing to import a bundle that does not match its own manifest: "
-            + "; ".join(f"{c.name}: {c.detail}" for c in fatal)
-        )
-    report.warnings = [f"{c.name}: {c.detail}" for c in checked.failures()]
-
-    if not data_dir_is_empty(settings.data_dir) and not force:
-        raise DRError(
-            f"{settings.data_dir} is not empty. An import over a live installation mixes two "
-            "estates; move it aside, or re-run with --force if you meant to overwrite it."
-        )
-
     with tempfile.TemporaryDirectory(prefix="infra-dr-import-") as tmp:
-        root = archive.extract(bundle, Path(tmp) / "bundle")
-        _restore_data(root, settings, report)
-        _restore_config_repo(root, settings, report, git_runner or _git)
-        _restore_secrets(root, settings, report, force=force)
-        _restore_inventory(root, settings, report, force=force)
-        _stage(root / POSTGRES_DIR, settings.data_dir / RESTORE_STAGING / "postgres", report)
-        _stage(root / GRAFANA_DIR, settings.data_dir / RESTORE_STAGING / "grafana", report)
+        scratch = Path(tmp)
+        # Verify the file as it arrived: for an encrypted bundle that is the
+        # `.age` one, and its sidecar is the only thing covering the manifest.
+        checked = verify(
+            bundle,
+            git_runner=git_runner,
+            settings=settings,
+            require_checksum=True,
+            age_runner=age_runner,
+        )
+        report.verification = checked
+        fatal = [c for c in checked.checks if c.name in INTEGRITY_CHECKS and not c.ok]
+        if fatal:
+            raise DRError(
+                "refusing to import a bundle that does not match its own manifest: "
+                + "; ".join(f"{c.name}: {c.detail}" for c in fatal)
+            )
+        report.warnings += [f"{c.name}: {c.detail}" for c in checked.failures()]
 
-    report.frozen = _freeze(settings)
+        plain, was_encrypted = crypt.ensure_plaintext(
+            bundle, scratch / "plain", settings, runner=age_runner
+        )
+        if was_encrypted:
+            report.warnings.append("bundle: decrypted with the age key before restoring")
+        if _within(plain, settings.data_dir):
+            # `infra dr import data/dr/<bundle> --force` would otherwise read
+            # from a directory this function is about to empty.
+            safe = scratch / "source"
+            safe.mkdir(parents=True, exist_ok=True)
+            plain = Path(shutil.copy2(plain, safe / plain.name))
+
+        if not data_dir_is_empty(settings.data_dir) and not force:
+            raise DRError(
+                f"{settings.data_dir} is not empty. An import over a live installation mixes "
+                "two estates; move it aside, or re-run with --force if you meant to "
+                "overwrite it."
+            )
+        if force:
+            moved = _move_aside(settings.data_dir, now or datetime.now(UTC))
+            if moved is not None:
+                report.warnings.append(
+                    f"data: the previous installation was moved aside into "
+                    f"{PRE_IMPORT_DIR}/{moved.name}, not deleted"
+                )
+
+        # Freeze first. Everything below can fail - a read-only secrets mount,
+        # a full disk, a git that is not installed - and the one thing that
+        # must be true afterwards either way is that nothing automates against
+        # a half-restored platform.
+        report.frozen = _freeze(settings)
+        try:
+            root = archive.extract(plain, scratch / "bundle")
+            _step(report, "data", lambda: _restore_data(root, settings, report))
+            _step(
+                report,
+                "config_repo",
+                lambda: _restore_config_repo(root, settings, report, git_runner or _git),
+            )
+            _step(
+                report,
+                "secrets",
+                lambda: _restore_secrets(root, settings, report, force=force),
+            )
+            _step(
+                report,
+                "inventory",
+                lambda: _restore_inventory(root, settings, report, force=force),
+            )
+            _step(
+                report,
+                "postgres",
+                lambda: _stage(
+                    root / POSTGRES_DIR,
+                    settings.data_dir / RESTORE_STAGING / "postgres",
+                    report,
+                ),
+            )
+            _step(
+                report,
+                "grafana",
+                lambda: _stage(
+                    root / GRAFANA_DIR, settings.data_dir / RESTORE_STAGING / "grafana", report
+                ),
+            )
+        finally:
+            report.frozen = _freeze(settings) or report.frozen
     return report
+
+
+def _step(report: ImportReport, name: str, action: Callable[[], None]) -> None:
+    """Run one restore step; an OS-level refusal is a warning, not an abort.
+
+    The compose stack mounts `../secrets:/app/secrets:ro`, so restoring secrets
+    inside the container raises `OSError: Read-only file system`. That is a
+    thing for the operator to do by hand - it is not a reason to abandon a
+    restore whose data, config history and inventory are already in place.
+    """
+    try:
+        action()
+    except OSError as exc:
+        log.warning("restore step %s failed: %s", name, exc)
+        report.warnings.append(f"{name}: {type(exc).__name__}: {exc.strerror or exc}")
+
+
+def _within(path: Path, directory: Path) -> bool:
+    try:
+        path.resolve().relative_to(directory.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _move_aside(data_dir: Path, now: datetime) -> Path | None:
+    """Empty the data directory into `pre-import/<stamp>/`, keeping everything.
+
+    Not a rename of `data_dir` itself: in the compose stack that path is the
+    mount point of the `infra-data` volume, and renaming a mount point fails
+    with EBUSY. Moving the contents works the same way in a container and on a
+    bare host.
+
+    Nothing is deleted. Whatever the platform accumulated since the bundle was
+    made - the plan store, the snapshots, an old rollback journal - is the only
+    record of the outage, and `pre-import/` is excluded from future exports so
+    it cannot end up nested inside tomorrow's bundle.
+    """
+    if data_dir_is_empty(data_dir):
+        return None
+    destination = data_dir / PRE_IMPORT_DIR / now.strftime("%Y%m%dT%H%M%SZ")
+    suffix = 1
+    while destination.exists():
+        suffix += 1
+        destination = destination.with_name(f"{destination.name}-{suffix}")
+    destination.mkdir(parents=True)
+    for entry in sorted(data_dir.iterdir()):
+        if entry.name == PRE_IMPORT_DIR:
+            continue
+        shutil.move(str(entry), str(destination / entry.name))
+    log.warning("moved the previous contents of %s aside into %s", data_dir, destination)
+    return destination
 
 
 def _restore_data(root: Path, settings: Settings, report: ImportReport) -> None:

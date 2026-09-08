@@ -92,6 +92,39 @@ class Settings(BaseSettings):
         description="Local directory where agent-based guest backups publish "
         "status.json (see docs/runbooks/dr-mgmt-01.md)",
     )
+    dr_backup_timezone: str = Field(
+        default="UTC",
+        description="Timezone ESXi hosts write ghettoVCB log stamps and restore-point "
+        "directory names in. ESXi is UTC out of the box; a host that was set to local "
+        "time skews every BackupMissing threshold by its offset. A device tag "
+        "`backup-tz:<zone>` overrides it per host",
+    )
+    dr_ssh_restricted: bool = Field(
+        default=True,
+        description="The DR account on the standby is locked to a forced rsync command "
+        "(rrsync), so the export pushes with rsync only: no remote mkdir, ls or rm. "
+        "Retention on the standby is then the standby's own cron "
+        "(deploy/standby/prune.sh). Set false only when that account has a real shell",
+    )
+    dr_ssh_known_hosts: Path | None = Field(
+        default=None,
+        description="known_hosts file pinning the standby's host key. Host key checking is "
+        "strict either way; this points it at a file the platform controls instead of "
+        "the invoking user's ~/.ssh/known_hosts",
+    )
+    dr_age_recipient: str | None = Field(
+        default=None,
+        description="age public key the bundle is encrypted to before it is pushed. A "
+        "bundle carries raw device configs and the NetBox database, so the shipped copy "
+        "should be readable only by whoever holds the offline age key. Unset means the "
+        "bundle travels in the clear and the standby's file mode is the only protection",
+    )
+    dr_age_identity: Path | None = Field(
+        default=None,
+        description="age identity file used to decrypt a `.age` bundle on verify and "
+        "import. Defaults to the SOPS age key (SOPS_AGE_KEY_FILE or "
+        "~/.config/sops/age/keys.txt)",
+    )
 
     @property
     def config_repo(self) -> Path:

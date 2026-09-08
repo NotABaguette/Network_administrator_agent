@@ -8,6 +8,13 @@
 # So this script refuses to run while the primary answers on any of three
 # independent channels, and when it does run it leaves the platform FROZEN.
 #
+# Every `infra` step runs INSIDE the stack (deploy/standby/dr.compose.yml), on
+# the `infra-data` volume the containers actually read. A host-side import
+# would restore into a ./data directory nothing reads and write the FROZEN
+# marker where nothing looks for it - and the promoted agent would come up
+# unfrozen, on stale state, willing to change the estate. Before printing
+# PROMOTED this script checks the marker where the running agent reads it.
+#
 #   ./failover.sh --primary 10.0.10.10                  # pre-flight + restore
 #   ./failover.sh --primary 10.0.10.10 --bundle <file>  # a specific bundle
 #   ./failover.sh --primary 10.0.10.10 --i-have-confirmed-the-primary-is-down
@@ -22,12 +29,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_FILE="${REPO_ROOT}/deploy/docker-compose.yml"
-INFRA="${INFRA_CLI:-infra}"
-BUNDLE_DIR="${INFRA_DR_INBOX:-/srv/infra-dr}"
+DR_COMPOSE_FILE="${SCRIPT_DIR}/dr.compose.yml"
 PRIMARY=""
 BUNDLE=""
 OVERRIDE=0
 FLIP_HOOK="${SCRIPT_DIR}/flip-address.sh"
+
+cd "$REPO_ROOT"
 
 log() { printf '%s failover: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() {
@@ -50,7 +58,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h | --help)
-      sed -n '2,18p' "${BASH_SOURCE[0]}"
+      sed -n '2,26p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *) die "unknown argument: $1" 3 ;;
@@ -59,6 +67,35 @@ done
 
 [ -n "$PRIMARY" ] || die "--primary <ip-or-host> is required: it is what the pre-flight checks" 3
 [ -f "$COMPOSE_FILE" ] || die "no compose file at ${COMPOSE_FILE}" 3
+[ -f "$DR_COMPOSE_FILE" ] || die "no DR overlay at ${DR_COMPOSE_FILE}" 3
+
+# deploy/.env first: every compose invocation below reads it, and it is
+# deliberately NOT in the bundle (it holds every platform password in
+# plaintext). Failing here beats failing half way through a restore.
+if [ ! -f "${REPO_ROOT}/deploy/.env" ]; then
+  die "deploy/.env is missing. It is deliberately NOT in the bundle (it holds every
+platform password in plaintext). Recreate it from deploy/.env.example and the
+owner's password manager, then re-run." 3
+fi
+# shellcheck disable=SC1091
+set -a && . "${REPO_ROOT}/deploy/.env" && set +a
+
+if [ ! -f "${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}" ]; then
+  die "no age key on this host. The bundle's secrets are encrypted and useless
+without it - and if the bundle itself is age-encrypted, so is all of it.
+Restore the key from the owner's offline copy and re-run." 3
+fi
+
+BUNDLE_DIR="${INFRA_DR_INBOX:-/srv/infra-dr}"
+COMPOSE=(docker compose -f "$COMPOSE_FILE")
+if [ -n "${INFRA_DR_CLI:-}" ]; then
+  read -ra INFRA <<<"$INFRA_DR_CLI"
+  INBOX_IN_CLI="$BUNDLE_DIR"
+else
+  INFRA=(docker compose --profile dr -f "$COMPOSE_FILE" -f "$DR_COMPOSE_FILE" run --rm dr infra)
+  # dr.compose.yml mounts $INFRA_DR_INBOX at /inbox inside the container.
+  INBOX_IN_CLI="/inbox"
+fi
 
 # ---------------------------------------------------------------------------
 # Pre-flight. Three channels, because each one fails on its own for reasons
@@ -82,6 +119,9 @@ else
   log "  agent /healthz: silent"
 fi
 
+# accept-new here on purpose: this is a liveness probe, not a data channel,
+# and a host key we have never seen must not be reported as "the primary is
+# silent" - that reads as permission to fail over.
 if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
   "${INFRA_PRIMARY_SSH_USER:-root}@${PRIMARY}" true >/dev/null 2>&1; then
   log "  SSH: ANSWERS"
@@ -105,38 +145,32 @@ fi
 [ "$reachable" -eq 0 ] && log "  primary is silent on all three channels"
 
 # ---------------------------------------------------------------------------
-# Restore
+# Restore, into the volume the stack reads
 # ---------------------------------------------------------------------------
 if [ -z "$BUNDLE" ]; then
-  BUNDLE="$(find "$BUNDLE_DIR" -maxdepth 1 -name 'infra-dr-*.tar.gz' -print 2>/dev/null |
-    sort | tail -n 1)"
+  # Plain and age-encrypted bundles; never a .sha256 sidecar.
+  BUNDLE="$(find "$BUNDLE_DIR" -maxdepth 1 -name 'infra-dr-*.tar.gz*' \
+    ! -name '*.sha256' 2>/dev/null | sort | tail -n 1)"
 fi
 [ -n "$BUNDLE" ] || die "no bundle in ${BUNDLE_DIR}; nothing to restore from" 2
-log "restoring from $(basename "$BUNDLE")"
+BUNDLE_NAME="$(basename "$BUNDLE")"
+BUNDLE_PATH="${INBOX_IN_CLI%/}/${BUNDLE_NAME}"
+log "restoring from ${BUNDLE_NAME}"
 
 log "verifying before restoring - a bundle that does not verify is not a backup"
-"$INFRA" dr verify "$BUNDLE" || die "the bundle failed verification; do not restore it" 2
+"${INFRA[@]}" dr verify "$BUNDLE_PATH" || die "the bundle failed verification; do not restore it" 2
 
 # --force because the standby has been started at least once for testing, so
-# its data_dir is rarely pristine. The manifest checksums are still enforced.
-"$INFRA" dr import "$BUNDLE" --force || die "import failed" 2
-
-if [ ! -f "${REPO_ROOT}/deploy/.env" ]; then
-  die "deploy/.env is missing. It is deliberately NOT in the bundle (it holds every
-platform password in plaintext). Recreate it from deploy/.env.example and the
-owner's password manager, then re-run." 3
-fi
-
-if [ ! -f "${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}" ]; then
-  die "no age key on this host. The bundle's secrets are encrypted and useless
-without it; restore it from the owner's offline copy and re-run." 3
-fi
+# its data volume is rarely pristine. Whatever is in it is moved aside into
+# data/pre-import/<stamp>/ rather than merged or deleted. Manifest checksums
+# are still enforced, --force or not.
+"${INFRA[@]}" dr import "$BUNDLE_PATH" --force || die "import failed" 2
 
 # ---------------------------------------------------------------------------
-# Start, then take the address
+# Start, prove the freeze took, then take the address
 # ---------------------------------------------------------------------------
 log "starting the stack"
-docker compose -f "$COMPOSE_FILE" up -d
+"${COMPOSE[@]}" up -d
 
 log "waiting for the agent to answer"
 for _ in $(seq 1 60); do
@@ -146,6 +180,18 @@ for _ in $(seq 1 60); do
   fi
   sleep 5
 done
+
+# The single most important check in this file. If the marker is not where the
+# running agent reads it, this promotion produced a live, unfrozen platform on
+# restored state - exactly the thing the header refuses to allow.
+if ! "${COMPOSE[@]}" exec -T infra-agent test -f /app/data/FROZEN; then
+  log "the restored stack is NOT frozen: /app/data/FROZEN is missing inside the"
+  log "running agent. Stopping the stack rather than leaving an unfrozen agent"
+  log "loose on the estate."
+  "${COMPOSE[@]}" down || true
+  die "freeze marker missing after import; investigate before re-running" 2
+fi
+log "freeze marker confirmed inside the running agent"
 
 if [ -x "$FLIP_HOOK" ]; then
   log "flipping the management address / DNS record via $(basename "$FLIP_HOOK")"
@@ -160,11 +206,14 @@ fi
 
 log ""
 log "PROMOTED, and FROZEN. Nothing will change the estate until you say so."
-log "Next:"
-log "  1. infra dr health          # collectors, plan store, graph, secrets"
-log "  2. infra collect            # one round, read-only, against the real devices"
-log "  3. infra drift              # what changed while the primary was gone"
-log "  4. psql restore if you need NetBox history:"
-log "       pg_restore -d netbox data/dr-restore/postgres/netbox.dump"
-log "       pg_restore -d infra  data/dr-restore/postgres/infra.dump"
-log "  5. infra change unfreeze    # only when the above looks right"
+log "Next (all inside the stack - the state is in the infra-data volume):"
+log "  1. docker compose -f deploy/docker-compose.yml exec infra-agent infra dr health"
+log "  2. docker compose -f deploy/docker-compose.yml exec infra-agent infra collect"
+log "  3. docker compose -f deploy/docker-compose.yml exec infra-agent infra drift"
+log "  4. NetBox history, if you want it back (the dumps are staged in the volume):"
+log "       docker compose -f deploy/docker-compose.yml exec -T infra-agent \\"
+log "         cat /app/data/dr-restore/postgres/netbox.dump |"
+log "       docker compose -f deploy/docker-compose.yml exec -T postgres \\"
+log "         pg_restore -U \"\${POSTGRES_USER:-infra}\" -d netbox --clean --if-exists"
+log "  5. docker compose -f deploy/docker-compose.yml exec infra-agent infra change unfreeze"
+log "     (only when the four above look right)"

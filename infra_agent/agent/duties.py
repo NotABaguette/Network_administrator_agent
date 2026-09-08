@@ -628,12 +628,24 @@ class Duties:
             self.notifier.send(f"DR export failed: {type(exc).__name__}: {exc}", critical=True)
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         summary = result.summary()
-        if not result.ok:
-            self.notifier.send(
-                f"DR export incomplete ({result.bundle.name}): {'; '.join(result.warnings)}",
-                critical=False,
+        if result.push_error or not result.ok:
+            # The bundle exists, is pruned and is recorded whatever went wrong
+            # here; what failed is a part of it or the copy to the standby.
+            # `StandbyStale` and `DRVerifyFailed` escalate on their own, so this
+            # message informs rather than pages: a nightly critical for a
+            # standby that has been down a week is how an owner learns to
+            # ignore the DR alerts.
+            headline = (
+                f"DR bundle {result.bundle.name} was built but not shipped to the standby"
+                if result.push_error
+                else f"DR export incomplete ({result.bundle.name})"
             )
-        return {"ok": result.ok, **summary}
+            self.notifier.send(f"{headline}: {'; '.join(result.warnings)}", critical=False)
+        return {
+            "ok": result.ok and result.push_error is None,
+            "pushed": result.pushed_to is not None,
+            **summary,
+        }
 
     def dr_verify(self) -> dict[str, Any]:
         """Weekly: verify the newest local bundle and tell the owner either way.
@@ -642,12 +654,14 @@ class Duties:
         week and the quarterly restore test (docs/runbooks/restore-test.md)
         proves it the whole way into a scratch VM.
         """
+        from infra_agent.dr.export import verify_source
         from infra_agent.dr.transfer import newest_bundle
         from infra_agent.dr.verify import verify_and_record
 
-        bundle = newest_bundle(self.settings.dr_dir)
+        where = verify_source(self.settings)
+        bundle = newest_bundle(where)
         if bundle is None:
-            message = f"no DR bundle in {self.settings.dr_dir}; nothing to verify"
+            message = f"no DR bundle in {where}; nothing to verify"
             log.warning(message)
             self.notifier.send(message, critical=True)
             return {"ok": False, "error": message}

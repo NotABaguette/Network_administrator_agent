@@ -13,7 +13,10 @@ autonomous system making a bad situation worse while you read documentation.
 Three ways, all equivalent in effect and available in different disasters:
 
 ```bash
-infra change freeze                 # writes data_dir/FROZEN
+# In the compose deployment, run it where the state is - data_dir is the
+# infra-data volume, not ./data:
+docker compose -f deploy/docker-compose.yml exec infra-agent infra change freeze
+docker compose -f deploy/docker-compose.yml exec infra-agent test -f /app/data/FROZEN
 ```
 
 ```
@@ -109,8 +112,9 @@ would have rolled it back is the thing that stopped. Compare the device against
 # 2. Is the estate as you expect?
 infra collect
 infra graph build
-infra drift                    # exits 1 when there is drift; read every line
-infra dr health                # collectors, plan store, graph, secrets, DR
+C="docker compose -f deploy/docker-compose.yml"
+$C exec infra-agent infra drift      # exits 1 when there is drift; read every line
+$C exec infra-agent infra dr health  # collectors, plan store, graph, secrets, DR
 
 # 3. Only then:
 infra change unfreeze          # or /unfreeze in Telegram

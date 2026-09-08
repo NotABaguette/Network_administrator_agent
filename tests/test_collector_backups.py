@@ -538,3 +538,273 @@ def test_a_host_with_both_ghettovcb_and_shared_agent_files_names_both(tmp_path):
     data = coll.collect(HOST, KEYED)
 
     assert data["sources"] == ["ghettovcb", "agent-shared"]
+
+
+# -- the VM nobody added to the job list --------------------------------------
+
+
+def series(metric: Any) -> dict[tuple[str, ...], float]:
+    """Every labelset currently published for a gauge."""
+    return {labels: child._value.get() for labels, child in metric._metrics.items()}
+
+
+def test_a_vm_tagged_for_backup_that_has_never_had_one_publishes_a_firing_sample(tmp_path):
+    """The VM most likely to be missing is the one nobody added to vms.txt. It
+    produces no log line and no restore point, so a gauge that is only set from
+    rows would leave BackupMissing with nothing to fire on - and
+    `time() - <absent series>` is not an alert, it is silence."""
+    coll, _ssh = collector(tmp_path)
+    with_annotations(coll.snapshots, **{"web-01": "backup:daily", "dc-01": "backup:daily"})
+
+    coll.collect(HOST, KEYED)
+
+    assert ("esx-01", "dc-01", "daily") in series(metrics.BACKUP_LAST_SUCCESS)
+    assert gauge(metrics.BACKUP_LAST_SUCCESS, device="esx-01", vm="dc-01", schedule="daily") == 0.0
+    assert NOW.timestamp() - 0.0 > 26 * 3600, "0 is the epoch: BackupMissing fires on it"
+
+
+def test_a_weekly_vm_that_has_never_had_a_backup_carries_its_own_threshold(tmp_path):
+    coll, _ssh = collector(tmp_path)
+    with_annotations(coll.snapshots, **{"archive-01": "backup:weekly"})
+
+    coll.collect(HOST, KEYED)
+
+    assert (
+        gauge(metrics.BACKUP_LAST_SUCCESS, device="esx-01", vm="archive-01", schedule="weekly")
+        == 0.0
+    )
+
+
+def test_an_untagged_vm_never_gets_a_series_of_its_own(tmp_path):
+    """Guessing that every VM needs a nightly backup produces an alert nobody
+    can act on."""
+    coll, _ssh = collector(tmp_path)
+    with_annotations(coll.snapshots, **{"scratch-01": "", "lab-01": "backup:none"})
+
+    coll.collect(HOST, KEYED)
+
+    for vm in ("scratch-01", "lab-01"):
+        assert all(labels[1] != vm for labels in series(metrics.BACKUP_LAST_SUCCESS))
+
+
+# -- stale series -------------------------------------------------------------
+
+
+WEB_ONLY_LOG = """\
+2026-09-07 02:00:01 -- info: CONFIG - VM_BACKUP_VOLUME = /vmfs/volumes/backup/backups
+2026-09-07 02:00:02 -- info: Initiate backup for web-01
+2026-09-07 02:04:41 -- info: Successfully completed backup for web-01!
+2026-09-07 02:04:43 -- info: ###### Final status: All VMs backed up OK! ######
+"""
+WEB_ONLY_DU = "41961472\t/vmfs/volumes/backup/backups/web-01/web-01-2026-09-07_02-00-01\n"
+
+
+def web_only_ssh() -> FakeSsh:
+    """A host where db-01 has been unregistered: gone from the log and the tree."""
+    return FakeSsh(
+        listings={LOG_DIR: "ghettoVCB-2026-09-07_02-00-01.log\n"},
+        files={f"{LOG_DIR}/ghettoVCB-2026-09-07_02-00-01.log": WEB_ONLY_LOG},
+        du=WEB_ONLY_DU,
+    )
+
+
+def test_a_vm_that_is_gone_loses_its_series(tmp_path):
+    """prometheus_client keeps a labelset until it is removed. An unregistered
+    VM would otherwise alert for ever on a value that can never move again."""
+    coll, _ssh = collector(tmp_path)
+    with_annotations(coll.snapshots, **{"web-01": "backup:daily", "db-01": "backup:daily"})
+    coll.collect(HOST, KEYED)
+    assert ("esx-01", "db-01", "daily") in series(metrics.BACKUP_LAST_SUCCESS)
+
+    coll2, _ = collector(tmp_path, web_only_ssh())
+    with_annotations(coll2.snapshots, **{"web-01": "backup:daily"})
+    coll2.collect(HOST, KEYED)
+
+    published = series(metrics.BACKUP_LAST_SUCCESS)
+    assert all(labels[1] != "db-01" for labels in published)
+    assert published[("esx-01", "web-01", "daily")] > 0
+
+
+def test_a_re_tagged_vm_does_not_keep_its_old_schedule_series(tmp_path):
+    coll, _ssh = collector(tmp_path, web_only_ssh())
+    with_annotations(coll.snapshots, **{"web-01": "backup:daily"})
+    coll.collect(HOST, KEYED)
+
+    coll2, _ = collector(tmp_path, web_only_ssh())
+    with_annotations(coll2.snapshots, **{"web-01": "backup:weekly"})
+    coll2.collect(HOST, KEYED)
+
+    published = series(metrics.BACKUP_LAST_SUCCESS)
+    assert ("esx-01", "web-01", "daily") not in published, (
+        "the daily series would keep alerting on a threshold the VM no longer has"
+    )
+    assert published[("esx-01", "web-01", "weekly")] > 0
+
+
+def test_a_host_that_refused_the_connection_keeps_its_last_known_series(tmp_path):
+    """Absent rows mean "not collected", not "gone": sweeping here - or
+    publishing an epoch timestamp for every expected VM - would make one
+    refused SSH connection look like every VM on the host losing its backup at
+    once, and the alert that should fire (the collector is broken) is a
+    different one."""
+    coll, _ssh = collector(tmp_path)
+    with_annotations(coll.snapshots, **{"web-01": "backup:daily"})
+    coll.collect(HOST, KEYED)
+
+    coll2, _ = collector(tmp_path, FakeSsh(failures=("",)))
+    with_annotations(coll2.snapshots, **{"web-01": "backup:daily"})
+    coll2.collect(HOST, KEYED)
+
+    assert gauge(metrics.BACKUP_LAST_SUCCESS, device="esx-01", vm="web-01", schedule="daily")
+
+
+# -- a run that did not do what it was asked to -------------------------------
+
+
+SNAPSHOT_FOUND_LOG = """\
+2026-09-07 02:00:01 -- info: ============================== ghettoVCB LOG START ==============================
+2026-09-07 02:00:02 -- info: CONFIG - VM_BACKUP_VOLUME = /vmfs/volumes/backup
+2026-09-07 02:00:03 -- info: Initiate backup for web-01
+2026-09-07 02:04:41 -- info: Successfully completed backup for web-01!
+2026-09-07 02:04:42 -- info: ERROR: Snapshot found for db-01, backup will not take place
+2026-09-07 02:04:43 -- info: ###### Final status: ERROR: Only some of the VMs backed up! ######
+"""
+
+
+def test_a_vm_ghettovcb_refused_to_touch_is_a_failure_whatever_the_log_calls_it():
+    """ "backup will not take place" is not a backup. Counting it as one leaves
+    infra_backup_job_ok at 1 and the VM on yesterday's timestamp."""
+    parsed = parse_ghettovcb_log(SNAPSHOT_FOUND_LOG)
+
+    rows = {row["vm"]: row for row in parsed["vms"]}
+    assert rows["db-01"]["status"] == "failed"
+    assert "Snapshot found" in rows["db-01"]["error"]
+    assert rows["web-01"]["status"] == "ok"
+
+
+def test_the_runs_own_final_status_is_believed(tmp_path):
+    coll, _ = collector(
+        tmp_path,
+        default_ssh(
+            listings={LOG_DIR: "ghettoVCB-2026-09-07_02-00-01.log\n"},
+            files={f"{LOG_DIR}/ghettoVCB-2026-09-07_02-00-01.log": SNAPSHOT_FOUND_LOG},
+        ),
+    )
+
+    data = coll.collect(HOST, KEYED)
+
+    assert data["job"]["ok"] is False
+    assert "db-01" in data["job"]["failed_vms"]
+    assert gauge(metrics.BACKUP_JOB_OK, device="esx-01") == 0.0
+
+
+CLEAN_BUT_ERRORED = SNAPSHOT_FOUND_LOG.replace(
+    "2026-09-07 02:04:42 -- info: ERROR: Snapshot found for db-01, backup will not take place\n", ""
+)
+
+
+def test_a_run_whose_summary_says_error_is_not_ok_even_with_no_failed_vm_line(tmp_path):
+    coll, _ = collector(
+        tmp_path,
+        default_ssh(
+            listings={LOG_DIR: "ghettoVCB-2026-09-07_02-00-01.log\n"},
+            files={f"{LOG_DIR}/ghettoVCB-2026-09-07_02-00-01.log": CLEAN_BUT_ERRORED},
+        ),
+    )
+
+    data = coll.collect(HOST, KEYED)
+
+    assert data["job"]["failed_vms"] == []
+    assert data["job"]["ok"] is False
+
+
+# -- where the logs are, and what time the host thinks it is ------------------
+
+
+def test_logs_are_found_where_the_stock_cron_line_leaves_them(tmp_path):
+    """ghettoVCB's default -l is /tmp. A collector that only looked in
+    <root>/ghettoVCB-logs reported "no ghettoVCB logs" for ever on a host
+    running the stock line, and only the datastore listing drove the gauges."""
+    coll, ssh = collector(
+        tmp_path,
+        FakeSsh(
+            listings={"/tmp": "ghettoVCB-2026-09-07_02-00-01.log\n"},
+            files={
+                "/tmp/ghettoVCB-2026-09-07_02-00-01.log": fixture(
+                    "ghettoVCB-2026-09-07_02-00-01.log"
+                )
+            },
+        ),
+    )
+
+    data = coll.collect(HOST, KEYED)
+
+    assert data["job"]["log_dir"] == "/tmp"
+    assert "logs" not in data["errors"]
+
+
+def test_a_device_tag_points_the_collector_at_a_local_log_directory(tmp_path):
+    tagged = HOST.model_copy(update={"tags": ["backup-logs:/var/log/ghettovcb"]})
+    coll, _ = collector(
+        tmp_path,
+        FakeSsh(
+            listings={"/var/log/ghettovcb": "ghettoVCB-2026-09-07_02-00-01.log\n"},
+            files={
+                "/var/log/ghettovcb/ghettoVCB-2026-09-07_02-00-01.log": fixture(
+                    "ghettoVCB-2026-09-07_02-00-01.log"
+                )
+            },
+        ),
+    )
+
+    data = coll.collect(tagged, KEYED)
+
+    assert data["job"]["log_dir"] == "/var/log/ghettovcb"
+
+
+def test_no_logs_anywhere_names_every_place_it_looked(tmp_path):
+    coll, _ = collector(tmp_path, FakeSsh())
+
+    data = coll.collect(HOST, KEYED)
+
+    assert "ghettoVCB-logs" in data["errors"]["logs"]
+    assert "/tmp" in data["errors"]["logs"]
+    assert "backup-logs:" in data["errors"]["logs"]
+
+
+def test_the_collector_reports_what_the_host_says_it_is_doing(tmp_path):
+    """CONFIG - VM_BACKUP_VOLUME out of the log is the fastest way to see the
+    host and the settings disagreeing about where backups go."""
+    coll, _ = collector(tmp_path)
+
+    data = coll.collect(HOST, KEYED)
+
+    assert data["job"]["config"]["VM_BACKUP_VOLUME"] == "/vmfs/volumes/backup/backups"
+    assert data["backup_volume"] == "/vmfs/volumes/backup/backups"
+    assert "BACKUP_LOG_OUTPUT" in data["job"]["config"]
+
+
+def test_a_host_on_local_time_is_read_in_local_time(tmp_path):
+    """ESXi is UTC out of the box, but a host somebody set to local time skews
+    every BackupMissing threshold by its offset - up to twelve hours early, or
+    twelve hours blind."""
+    berlin = HOST.model_copy(update={"tags": ["backup-tz:Europe/Berlin"]})
+    coll, _ = collector(tmp_path)
+    with_annotations(coll.snapshots, **{"web-01": "backup:daily"})
+
+    data = coll.collect(berlin, KEYED)
+
+    row = next(row for row in data["vms"] if row["vm"] == "web-01")
+    # 02:04:41 written by a host on CEST (UTC+2) is 00:04:41 UTC.
+    assert row["last_success_at"] == datetime(2026, 9, 7, 0, 4, 41, tzinfo=UTC)
+    assert data["timezone"] == "Europe/Berlin"
+
+
+def test_an_unknown_timezone_degrades_to_utc_rather_than_failing(tmp_path):
+    nonsense = HOST.model_copy(update={"tags": ["backup-tz:Middle/Earth"]})
+    coll, _ = collector(tmp_path)
+
+    data = coll.collect(nonsense, KEYED)
+
+    assert data["timezone"] == "UTC"
+    assert data["vms"], "a typo in a tag must not stop the collector"

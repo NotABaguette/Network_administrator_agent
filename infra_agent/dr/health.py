@@ -232,7 +232,15 @@ def _config_repo(settings: Settings, runner: GitRunner) -> HealthCheck:
 
 
 def _secrets(settings: Settings) -> HealthCheck:
-    """Can the platform still open its own secrets? Names and counts only."""
+    """Can the platform still open its own secrets? Names and counts only.
+
+    Deliberately without decrypting anything. The digest runs this every
+    morning, and `sops --decrypt` on every file would pull every device
+    password and the Anthropic and Telegram keys into this process to produce
+    the sentence "devices: 14 keys". SOPS leaves the mapping keys in cleartext,
+    so the count comes from the encrypted file itself; that the age key is
+    present and sops is installed is what says the files can be opened.
+    """
     try:
         from infra_agent.onboarding.secrets import SecretsStore
 
@@ -243,21 +251,41 @@ def _secrets(settings: Settings) -> HealthCheck:
                 ok=False,
                 detail="sops or the age key is missing; nothing can be decrypted on this host",
             )
-        files = sorted(p.name for p in settings.secrets_dir.glob("*.enc.yaml"))
         counts = {
-            name.removesuffix(".enc.yaml"): len(store.keys(name.removesuffix(".enc.yaml")))
-            for name in files
+            path.name.removesuffix(".enc.yaml"): _encrypted_key_count(path)
+            for path in sorted(settings.secrets_dir.glob("*.enc.yaml"))
         }
-    except Exception as exc:  # noqa: BLE001 - never leak what failed to decrypt
-        return HealthCheck(
-            name="secrets", ok=False, detail=f"decryption failed ({type(exc).__name__})"
-        )
+    except Exception as exc:  # noqa: BLE001 - never leak what failed to be read
+        return HealthCheck(name="secrets", ok=False, detail=f"unreadable ({type(exc).__name__})")
     if not counts:
         return HealthCheck(
             name="secrets", ok=False, detail=f"no *.enc.yaml in {settings.secrets_dir}"
         )
-    detail = ", ".join(f"{name}: {n} keys" for name, n in sorted(counts.items()))
+    unreadable = sorted(name for name, count in counts.items() if count is None)
+    if unreadable:
+        return HealthCheck(
+            name="secrets", ok=False, detail=f"not a SOPS document: {', '.join(unreadable)}"
+        )
+    detail = ", ".join(f"{name}: {count} keys" for name, count in sorted(counts.items()))
     return HealthCheck(name="secrets", ok=True, detail=detail)
+
+
+def _encrypted_key_count(path: Path) -> int | None:
+    """Top-level keys in a SOPS file, without decrypting it.
+
+    `sops` is the metadata block, not a secret. A file that does not parse, or
+    that has no `sops` block, is not a SOPS document and is reported as such -
+    a plaintext file in `secrets/` is a finding, not a count.
+    """
+    import yaml
+
+    try:
+        loaded = yaml.safe_load(path.read_text(errors="replace"))
+    except Exception:  # noqa: BLE001 - unparseable is the same answer as unencrypted
+        return None
+    if not isinstance(loaded, dict) or "sops" not in loaded:
+        return None
+    return len([key for key in loaded if key != "sops"])
 
 
 def _heartbeat(now: datetime, override: float | None) -> HealthCheck:

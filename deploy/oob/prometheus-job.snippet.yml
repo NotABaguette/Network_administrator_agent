@@ -1,0 +1,32 @@
+# The one edit the OOB box needs in the MAIN stack's Prometheus configuration.
+#
+# Paste this job into `deploy/prometheus/prometheus.yml`, under
+# `scrape_configs:`, and reload (`curl -X POST localhost:9090/-/reload`).
+#
+# It cannot live in this directory as a drop-in: Prometheus reads one
+# configuration file, and the main file belongs to the platform's deployment
+# rather than to the OOB box. Until the job exists, the main Prometheus has no
+# series for the out-of-band heartbeat, so `OOBHeartbeatMissing` in
+# infra_agent/monitoring/rules/dr.yaml cannot fire and `OOBHeartbeatNeverSeen`
+# (warning) says exactly that instead.
+#
+# Why the MAIN side has to scrape it: the heartbeat exists to prove the site is
+# reachable from outside mgmt-01. An alert on it evaluated by the OOB box's own
+# Prometheus would go quiet at the same moment the box does, which is the one
+# moment it has to speak.
+
+- job_name: oob-heartbeat
+  # The busybox httpd in deploy/oob/docker-compose.yml, serving the heartbeat
+  # container's textfile metrics. Plain HTTP on the management VLAN.
+  static_configs:
+    - targets: ["10.0.0.9:9105"]
+      labels:
+        vantage: oob
+  # The box pings its dead-man service every 5 minutes; scraping faster than
+  # that only adds points between two identical values.
+  scrape_interval: 60s
+  # If the OOB box is unreachable the series goes stale and
+  # OOBHeartbeatMissing fires - which is the intended behaviour, and the reason
+  # this job must not have `honor_timestamps: false` or a long
+  # `scrape_timeout`: a slow failure here should look like a failure.
+  scrape_timeout: 10s
