@@ -408,7 +408,8 @@ def render_plan(plan: ChangePlan) -> str:
             "",
             "Tier 2: press Approve, then reply with the exact confirmation phrase "
             f"within {int(PHRASE_TIMEOUT.total_seconds() // 60)} minutes. "
-            "The phrase is not shown here.",
+            "The phrase follows in a separate message, or read it with "
+            "`infra change show`.",
         ]
     return "\n".join(lines)
 
@@ -631,12 +632,17 @@ class TelegramNotifier:
             return
         self._deliver(safe)
 
-    def send_approval_request(self, plan: ChangePlan, token: str) -> None:
+    def send_approval_request(
+        self, plan: ChangePlan, token: str, phrase: str | None = None
+    ) -> None:
         """Render the plan and offer Approve / Reject buttons.
 
         The token goes into :class:`PendingApprovals` only. It is not in the
         message, not in the callback data, and not in any log line. Approval
-        requests are actionable, so they bypass quiet hours.
+        requests are actionable, so they bypass quiet hours. A Tier 2
+        confirmation `phrase` is delivered to the owner in its own message,
+        after the plan, so it can be typed back once Approve is pressed; it is
+        never logged and never rendered inside the plan text.
         """
         self.pending.remember(
             plan.id, token, owner_id=self.owner_id, tier=plan.tier, now=datetime.now(UTC)
@@ -646,6 +652,11 @@ class TelegramNotifier:
         if markup is None:
             text += "\n\nApprove from the CLI: `infra change approve " + plan.id + "`"
         self._deliver(text, reply_markup=markup)
+        if phrase and plan.tier is Tier.WINDOW:
+            self._deliver(
+                f"Confirmation phrase for {plan.id} (press Approve, then reply with exactly "
+                f"this):\n{phrase}"
+            )
         log.info("approval request sent for %s (tier %s)", plan.id, int(plan.tier))
 
     def send_report(self, title: str, body_markdown: str) -> None:

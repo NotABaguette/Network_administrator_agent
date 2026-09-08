@@ -1249,3 +1249,40 @@ def test_build_application_with_a_real_token_installs_the_log_guards(
     assert "<REDACTED-TOKEN>" in caplog.text
     assert str(OWNER) not in caplog.text  # the owner id is a secret too
     assert application.bot_data["infra_bot"].owner_id == OWNER
+
+
+# --------------------------------------------------------------------------- #
+# tier 2 phrase delivery
+# --------------------------------------------------------------------------- #
+def test_tier2_phrase_is_delivered_separately_and_token_never_is(notifier, bot, store):
+    from datetime import UTC, datetime, timedelta
+
+    from infra_agent.change.plan import ChangePlan, MaintenanceWindow, Tier
+
+    now = datetime.now(UTC)
+    plan = ChangePlan(
+        title="wan1 maintenance",
+        action="fortigate.wan",
+        targets=["fw-01"],
+        tier=Tier.WINDOW,
+        confirmation_phrase="amber falcon river",
+        window=MaintenanceWindow(start=now - timedelta(minutes=1), end=now + timedelta(hours=1)),
+    )
+    plan.transition(ChangeState.dry_run)
+    token = store.request_approval(plan)
+
+    notifier.send_approval_request(plan, token, phrase="amber falcon river")
+
+    texts = "\n".join(bot.texts)
+    assert "amber falcon river" in texts
+    assert token not in texts
+    # the phrase rides its own message, after the plan with its keyboard
+    assert bot.sent[-1].reply_markup is None
+    assert "amber falcon river" in bot.sent[-1].text
+    assert "amber falcon river" not in bot.sent[0].text
+
+
+def test_tier1_request_without_phrase_sends_one_message(notifier, bot, store):
+    plan, token = make_plan(store)
+    notifier.send_approval_request(plan, token, phrase=None)
+    assert len(bot.sent) == 1

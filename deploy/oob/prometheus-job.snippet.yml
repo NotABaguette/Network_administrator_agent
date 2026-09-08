@@ -1,7 +1,8 @@
-# The one edit the OOB box needs in the MAIN stack's Prometheus configuration.
-#
-# Paste this job into `deploy/prometheus/prometheus.yml`, under
-# `scrape_configs:`, and reload (`curl -X POST localhost:9090/-/reload`).
+# Reference copy. The main stack's Prometheus already carries this job as
+# `oob-heartbeat` with file_sd on deploy/prometheus/targets/oob.json; to enable
+# it, write the OOB box into that file, e.g.
+#   [{"targets": ["10.0.0.9:9105"], "labels": {"vantage": "oob"}}]
+# and reload (`curl -X POST localhost:9090/-/reload`). Nothing needs pasting.
 #
 # It cannot live in this directory as a drop-in: Prometheus reads one
 # configuration file, and the main file belongs to the platform's deployment

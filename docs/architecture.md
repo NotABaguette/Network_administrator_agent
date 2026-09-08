@@ -60,7 +60,7 @@ configs to the local config git repo.
 | `esxi` | pyvmomi (read-only role), SSH only for host-config backup | Standard vSwitches speak CDP only and default to listen-only; CDP mode `both` is a prerequisite. Host event log is collected to know who powered off a VM. |
 | `fortigate` | FortiOS REST (read-only API user bound to mgmt-01's IP) + SNMPv3 | Policies parsed to rows. The 60F is small: one poller, 60 s minimum. Full config backup goes to git, never to the LLM. |
 | `cisco` | scrapli + ntc-templates + SNMPv3 | Classic IOS and IOS-XE have different parsers and rollback support. `show run` needs priv-15, so the read account is priv-15 with a command allowlist enforced in code. |
-| `guest` (later) | Ansible facts / WinRM, node/windows exporters | OS, packages, services, ports, certificates. |
+| `guest` | SSH (Linux) / WinRM (Windows) with fixed read-only command templates; node/windows exporters deployed by Ansible | OS, packages and pending updates, services, listening sockets and established connections (application dependency edges), disks, TLS certificates with expiry. Onboarded like devices or seeded from ESXi VM annotations (`infra onboard seed-guests`). |
 
 ### Correlation and topology graph (`infra_agent/correlate/`)
 A `networkx` graph persisted as JSON and rendered to `docs/topology/` as

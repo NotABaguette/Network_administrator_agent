@@ -69,7 +69,7 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 SYSTEM_PROMPT_PATH = PROMPTS_DIR / "system.md"
 
 #: Never handed to the model, whatever the registry happens to contain.
-FORBIDDEN_TOOLS = frozenset({"change.approve", "change.execute"})
+FORBIDDEN_TOOLS = frozenset({"change.approve", "change.execute", "change.rollback"})
 
 #: Server-side refusal fallbacks: a declined turn is retried on a fallback model
 #: inside the same call instead of ending the duty with nothing.

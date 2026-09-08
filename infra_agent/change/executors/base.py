@@ -22,7 +22,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -88,6 +88,21 @@ class Executor(ABC):
     @abstractmethod
     def rollback(self, ctx: ExecutionContext, applied: list[StepResult]) -> list[StepResult]:
         """Undo the applied steps in reverse order using their captured output."""
+
+
+class SupportsCommit(Protocol):
+    """Optional second phase for platforms whose change holds its own undo.
+
+    The change engine calls `commit(ctx)` only after EVERY device's post-checks
+    passed. The Cisco executor implements it: `apply` leaves a `configure
+    terminal revert timer` armed and `commit` issues `configure confirm` (and
+    `write memory` when the plan persists). Platforms whose change is permanent
+    the moment it is applied (FortiOS inverse operations, ESXi, guests) must NOT
+    define `commit`: the engine treats its absence as "already committed" and
+    then chooses the inverse-operation rollback path for that device.
+    """
+
+    def commit(self, ctx: ExecutionContext) -> list[CheckResult]: ...
 
 
 EXECUTORS: dict[str, type[Executor]] = {}

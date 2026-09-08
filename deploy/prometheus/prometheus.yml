@@ -62,6 +62,15 @@ scrape_configs:
       - target_label: __address__
         replacement: blackbox-exporter:9115
 
+  # Out-of-band box heartbeat (deploy/oob). Scraped from the MAIN side on purpose:
+  # the alert must keep speaking when the OOB box goes quiet. Inert until
+  # targets/oob.json names the box, e.g. [{"targets":["10.0.0.9:9105"],"labels":{"vantage":"oob"}}]
+  - job_name: oob-heartbeat
+    scrape_interval: 60s
+    scrape_timeout: 10s
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/oob.json"]
+
   - job_name: blackbox-https
     metrics_path: /probe
     params: { module: [https_2xx] }

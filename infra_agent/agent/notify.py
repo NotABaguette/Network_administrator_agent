@@ -13,10 +13,13 @@ class Notifier(Protocol):
     def send(self, text: str, *, critical: bool = False) -> None:
         """Plain message to the owner. `critical` may bypass quiet hours."""
 
-    def send_approval_request(self, plan: ChangePlan, token: str) -> None:
+    def send_approval_request(
+        self, plan: ChangePlan, token: str, phrase: str | None = None
+    ) -> None:
         """Present a Tier 1/2 plan with Approve / Reject controls. The token is
         for the human channel only and must never be echoed into any LLM-visible
-        payload or log."""
+        payload or log. `phrase` is the Tier 2 confirmation phrase the owner has
+        to type back; it is for the owner's eyes only and is never logged."""
 
     def send_report(self, title: str, body_markdown: str) -> None:
         """Digest, weekly or monthly report."""
@@ -33,12 +36,15 @@ class LogNotifier:
     def send(self, text: str, *, critical: bool = False) -> None:
         self.log.warning("[critical] %s" if critical else "%s", text)
 
-    def send_approval_request(self, plan: ChangePlan, token: str) -> None:
+    def send_approval_request(
+        self, plan: ChangePlan, token: str, phrase: str | None = None
+    ) -> None:
         self.log.warning(
-            "approval requested for %s (%s, tier %s); token delivered out of band",
+            "approval requested for %s (%s, tier %s); token%s delivered out of band",
             plan.id,
             plan.title,
             plan.tier.name,
+            " and confirmation phrase" if phrase else "",
         )
 
     def send_report(self, title: str, body_markdown: str) -> None:
