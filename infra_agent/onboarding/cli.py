@@ -76,6 +76,11 @@ def add_device(
     tags: str = typer.Option("", help="comma-separated tags, e.g. edge,mgmt-path"),
     legacy_ssh: bool = typer.Option(False, help="old 2960: legacy SSH KEX/ciphers"),
     token: bool = typer.Option(False, help="credential is an API token (FortiGate)"),
+    ssh_key: str = typer.Option(
+        "",
+        help="path to the SSH private key: how a Linux guest is authenticated, and "
+        "what the ESXi host-config backup needs. The password, if any, is its passphrase.",
+    ),
     skip_probe: bool = typer.Option(False),
 ) -> None:
     """Prompt locally for a credential, probe it, store it, add the device to the seed inventory."""
@@ -87,7 +92,10 @@ def add_device(
         cred = Credential(token=getpass("API token: "))
     else:
         username = typer.prompt("username")
-        cred = Credential(username=username, password=getpass("password: "))
+        prompt = "key passphrase (blank if the key has none): " if ssh_key else "password: "
+        cred = Credential(
+            username=username, password=getpass(prompt) or None, ssh_key_path=ssh_key or None
+        )
     device = SeedDevice(
         name=name,
         kind=kind,

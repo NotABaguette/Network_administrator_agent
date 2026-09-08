@@ -372,6 +372,59 @@ def test_seed_guests_lists_the_candidates_and_stops(cli_estate: Path):
     assert "ready" in result.stdout
 
 
+class FakeSecrets:
+    """Stands in for the SOPS store, which needs `sops` and an age key."""
+
+    stored: dict[str, dict[str, Any]] = {}
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def available(self) -> bool:
+        return True
+
+    def update(self, name: str, key: str, value: dict[str, Any]) -> None:
+        FakeSecrets.stored[f"{name}/{key}"] = value
+
+
+def test_add_device_records_the_ssh_key_a_guest_authenticates_with(cli_estate: Path, monkeypatch):
+    """The guest account template disables password authentication, so a
+    credential with no key path would be unusable the moment it is created."""
+    monkeypatch.setattr("infra_agent.onboarding.cli.SecretsStore", FakeSecrets)
+    monkeypatch.setattr("infra_agent.onboarding.cli.getpass", lambda prompt="": "")
+    FakeSecrets.stored.clear()
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "add-device",
+            "guest_linux",
+            "10.20.0.11",
+            "--name",
+            "web-01",
+            "--ssh-key",
+            "/home/infra/.ssh/infra-agent",
+            "--tags",
+            "vm:web-01,service:nginx",
+            "--skip-probe",
+        ],
+        input="infra-ro\n",
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert FakeSecrets.stored["devices/web-01"] == {
+        "username": "infra-ro",
+        "password": None,
+        "token": None,
+        "ssh_key_path": "/home/infra/.ssh/infra-agent",
+    }
+    device = SeedInventory.load(cli_estate / "seed.yaml").get("web-01")
+    assert device is not None
+    assert device.kind is DeviceKind.guest_linux
+    assert device.tags == ["vm:web-01", "service:nginx"]
+
+
 def test_seed_guests_says_what_to_do_when_nothing_is_tagged(tmp_path: Path, monkeypatch):
     seed = tmp_path / "seed.yaml"
     SeedInventory().save(seed)
