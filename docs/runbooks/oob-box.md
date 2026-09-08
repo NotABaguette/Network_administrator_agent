@@ -88,12 +88,18 @@ software, and it is the most valuable thing in this runbook.
 ```bash
 git clone <this repo> /opt/infra-agent && cd /opt/infra-agent
 cp deploy/oob/.env.example deploy/oob/.env
-$EDITOR deploy/oob/.env                       # addresses, heartbeat URL, chat id
+$EDITOR deploy/oob/.env                       # addresses and the heartbeat URL
+$EDITOR deploy/oob/alertmanager.yml           # chat_id: your Telegram chat
 install -m 0600 /dev/null deploy/oob/telegram_token
 $EDITOR deploy/oob/telegram_token             # the bot token, nothing else
 $EDITOR deploy/oob/targets/*.json             # your real addresses
 docker compose -f deploy/oob/docker-compose.yml up -d
 ```
+
+The chat id lives in `alertmanager.yml` rather than in `.env` because
+Alertmanager does not expand environment variables in its configuration. A
+chat id put in `.env` would look configured and page nobody, which on this box
+is the only failure that actually matters.
 
 Check it:
 

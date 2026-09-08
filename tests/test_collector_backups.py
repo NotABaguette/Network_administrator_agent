@@ -512,3 +512,29 @@ def test_the_collector_is_not_in_the_kind_registry(tmp_path):
     assert COLLECTORS.get(DeviceKind.esxi) is EsxiCollector
     assert BackupsCollector.name == "backups"
     assert BackupsCollector.interval_seconds == 3600
+
+
+def test_the_sources_field_names_only_what_actually_answered(tmp_path):
+    """`sources` is what the digest reads to say where a number came from; a
+    source listed because some other source produced rows is a lie."""
+    status_dir = tmp_path / "backup-status"
+    status_dir.mkdir()
+    (status_dir / "app-01.json").write_text(fixture("status-app-01.json"))
+    coll, _ = collector(tmp_path, FakeSsh(du=""), status_dir=status_dir)
+
+    data = coll.collect(HOST, KEYED)
+
+    assert data["sources"] == ["agent-local"]
+    assert "ghettovcb" not in data["sources"]
+
+
+def test_a_host_with_both_ghettovcb_and_shared_agent_files_names_both(tmp_path):
+    ssh = default_ssh(
+        listings={STATUS_DIR: "mail-01.json\n"},
+        files={f"{STATUS_DIR}/mail-01.json": fixture("status-mail-01.json")},
+    )
+    coll, _ = collector(tmp_path, ssh)
+
+    data = coll.collect(HOST, KEYED)
+
+    assert data["sources"] == ["ghettovcb", "agent-shared"]

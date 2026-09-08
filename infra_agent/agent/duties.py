@@ -616,7 +616,6 @@ class Duties:
         estate; an export changes nothing and is worth most precisely when
         somebody has just pulled the handle.
         """
-        from infra_agent.dr.errors import DRError
         from infra_agent.dr.export import export_bundle
 
         if not self.settings.dr_target:
@@ -624,10 +623,10 @@ class Duties:
             return {"ok": False, "skipped": "INFRA_DR_TARGET is not set"}
         try:
             result = export_bundle(self.settings, now=self._now())
-        except DRError as exc:
-            log.error("DR export failed: %s", exc)
-            self.notifier.send(f"DR export failed: {exc}", critical=True)
-            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - a backup that fails silently is no backup
+            log.exception("DR export failed")
+            self.notifier.send(f"DR export failed: {type(exc).__name__}: {exc}", critical=True)
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         summary = result.summary()
         if not result.ok:
             self.notifier.send(
@@ -652,7 +651,15 @@ class Duties:
             log.warning(message)
             self.notifier.send(message, critical=True)
             return {"ok": False, "error": message}
-        report = verify_and_record(bundle, self.settings, now=self._now())
+        try:
+            report = verify_and_record(bundle, self.settings, now=self._now())
+        except Exception as exc:  # noqa: BLE001 - the same rule as the export
+            log.exception("DR verification failed")
+            self.notifier.send(
+                f"DR verification of {bundle.name} failed: {type(exc).__name__}: {exc}",
+                critical=True,
+            )
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         self.notifier.send(report.headline(), critical=not report.ok)
         return report.llm_view()
 

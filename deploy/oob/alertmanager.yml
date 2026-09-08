@@ -30,8 +30,12 @@ route:
 receivers:
   - name: owner-telegram
     telegram_configs:
+      # Alertmanager does NOT expand environment variables in its configuration,
+      # so this file carries the chat id literally. Edit the line below; the bot
+      # token is the one thing that can come from outside, through
+      # `bot_token_file`, which is why it is a compose secret and this is not.
       - bot_token_file: /run/secrets/telegram_token
-        chat_id: ${TELEGRAM_CHAT_ID}
+        chat_id: 0000000000
         api_url: https://api.telegram.org
         parse_mode: HTML
         send_resolved: true

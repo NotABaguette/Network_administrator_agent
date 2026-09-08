@@ -1069,3 +1069,22 @@ def test_a_configured_database_that_will_not_dump_is_still_a_failure(estate, tmp
     postgres = result.manifest.component("postgres")
     assert postgres is not None and postgres.failed
     assert verify(result.bundle).ok is False
+
+
+def test_a_config_repo_outside_data_dir_is_still_bundled_and_still_not_copied_twice(
+    estate, tmp_path
+):
+    """INFRA_CONFIG_REPO_DIR may point anywhere. The exclusion is computed by
+    relative path, so a repo that is not under data_dir simply has nothing to
+    exclude - and must not silently stop being exported."""
+    outside = tmp_path / "elsewhere" / "configs"
+    estate.config_repo_dir = outside
+    ConfigGitStore(outside).write("fw-01", "config", "config system global\n")
+
+    result = make_bundle(estate, tmp_path / "out")
+
+    assert result.ok
+    paths = {entry.path for entry in result.manifest.files}
+    assert "configs.bundle" in paths
+    assert not any(path.startswith("data/elsewhere") for path in paths)
+    assert verify(result.bundle).ok

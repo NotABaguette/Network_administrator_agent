@@ -55,9 +55,9 @@ services:
       - "9093:9093"
       - "9094:9094"
       - "9094:9094/udp"
-    environment:
-      TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram_token
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+    # No environment block on purpose: Alertmanager does not expand environment
+    # variables in its config, so the chat id is written into alertmanager.yml
+    # and only the bot token comes from outside, through bot_token_file.
     secrets:
       - telegram_token
     restart: unless-stopped

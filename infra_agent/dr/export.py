@@ -110,7 +110,14 @@ def _copy_data_dir(data_dir: Path, dest: Path, config_repo: Path) -> ComponentSt
     """
     if not data_dir.exists():
         return ComponentStatus(name="data", ok=False, detail=f"{data_dir} does not exist")
-    repo = config_repo.resolve()
+    # Compare relative paths, not absolute ones: `data_dir` as configured and
+    # `config_repo.resolve()` differ the moment either side crosses a symlink,
+    # and then the repo is copied file by file into the bundle as well as being
+    # exported as a git bundle.
+    try:
+        repo_rel: Path | None = config_repo.resolve().relative_to(data_dir.resolve())
+    except ValueError:  # the repo lives outside data_dir; nothing to exclude
+        repo_rel = None
     copied = 0
     for path in sorted(data_dir.rglob("*")):
         if path.is_symlink() or not path.is_file():
@@ -118,7 +125,7 @@ def _copy_data_dir(data_dir: Path, dest: Path, config_repo: Path) -> ComponentSt
         rel = path.relative_to(data_dir)
         if rel.parts[0] in DATA_EXCLUDE:
             continue
-        if repo == path.parent or repo in path.parents:
+        if repo_rel is not None and repo_rel in rel.parents:
             continue
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
