@@ -290,10 +290,14 @@ def test_the_sudoers_allowlist_is_generated_from_the_collector_commands():
 
     for command in SUDO_COMMANDS:
         binary, _, arguments = command.partition(" ")
-        assert arguments in lines, command
+        assert arguments.replace("'", "") in lines, command
         assert f"/{binary} " in lines
     assert "infra-ro ALL=(root) NOPASSWD: INFRA_READ" in lines
     assert "ALL=(ALL)" not in lines and "NOPASSWD: ALL" not in lines
+    # sudo matches the argv the shell already expanded, so the collector's
+    # shell quoting must not survive into the sudoers file
+    assert "'" not in lines
+    assert "-name *.pem" in lines
 
 
 def test_the_linux_guest_account_is_unprivileged_and_key_only():

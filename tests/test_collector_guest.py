@@ -124,9 +124,12 @@ class FakeRunner:
         self.closed = True
 
 
+LETSENCRYPT_CERT = "/etc/letsencrypt/live/app.example.com/cert.pem"
+
+
 def linux_answers(**overrides: Any) -> dict[str, Any]:
     """A healthy Debian-family guest: nginx, postgres, one expiring certificate."""
-    cert_path = "/etc/letsencrypt/live/app.example.com/cert.pem"
+    cert_path = LETSENCRYPT_CERT
     answers: dict[str, Any] = {
         WHOAMI_COMMAND: "1001\n",
         SUDO_TEST_COMMAND: "",
@@ -147,8 +150,10 @@ def linux_answers(**overrides: Any) -> dict[str, Any]:
         f"sudo -n {CERT_FIND_COMMAND}": CommandResult(
             command=CERT_FIND_COMMAND, status=1, stdout=linux_fixture("find-certs")
         ),
+        # Let's Encrypt keeps `live/` root-only, so this one answers only to sudo
         f"sudo -n {CERT_READ_TEMPLATE.format(path=cert_path)}": linux_fixture("openssl-cert"),
-        f"sudo -n {CERT_READ_TEMPLATE.format(path='/etc/nginx/ssl/internal-ca-signed.crt')}": (
+        # ... while /etc/nginx is world-readable and answers unprivileged
+        CERT_READ_TEMPLATE.format(path="/etc/nginx/ssl/internal-ca-signed.crt"): (
             linux_fixture("openssl-cert-nosan")
         ),
         "timeout 5 openssl s_client -connect 127.0.0.1:443*": linux_fixture("openssl-s-client"),
@@ -358,6 +363,24 @@ def test_linux_certificates_from_files_and_from_the_live_listener(linux_data):
     served = by_source["127.0.0.1:443"]
     assert served["kind"] == "listener"
     assert served["port"] == 443 and served["process"] == "nginx"
+
+
+def test_a_world_readable_certificate_is_read_without_sudo():
+    """The sudoers allowlist can only name the paths it knows about, so a
+    certificate outside that glob must not be lost to a sudo refusal."""
+    runner = FakeRunner(linux_answers())
+    data = collect_linux(runner, linux_device(), now=NOW)
+
+    reads = [c for c in runner.commands if "openssl x509" in c]
+    nginx_read = CERT_READ_TEMPLATE.format(path="/etc/nginx/ssl/internal-ca-signed.crt")
+    assert nginx_read in reads  # tried unprivileged first, and answered
+    assert f"sudo -n {nginx_read}" not in reads  # so it never escalated
+    assert f"sudo -n {CERT_READ_TEMPLATE.format(path=LETSENCRYPT_CERT)}" in reads
+    assert {row["source"] for row in data["certificates"]} == {
+        LETSENCRYPT_CERT,
+        "/etc/nginx/ssl/internal-ca-signed.crt",
+        "127.0.0.1:443",
+    }
 
 
 def test_a_certificate_without_a_san_is_still_recorded(linux_data):

@@ -134,12 +134,18 @@ def sudoers_line(username: str) -> list[str]:
     socket, `find` and `openssl x509 -noout` only to read certificates under
     Let's Encrypt's root-only `live/` directory. `-noout` and the absence of
     `-out` mean the openssl entry cannot write a file.
+
+    sudo matches the argument vector the shell already expanded, so the shell
+    quoting in the collector's templates is stripped here: `-name '*.pem'`
+    reaches sudo as `-name *.pem`, and a sudoers entry that kept the quotes
+    would match nothing at all.
     """
     from infra_agent.collectors.guest import SUDO_COMMANDS
 
     commands: list[str] = []
     for command in SUDO_COMMANDS:
         binary, _, arguments = command.partition(" ")
+        arguments = arguments.replace("'", "")
         for path in BINARY_PATHS.get(binary, (f"/usr/bin/{binary}",)):
             commands.append(f"{path} {arguments}".strip())
     return [

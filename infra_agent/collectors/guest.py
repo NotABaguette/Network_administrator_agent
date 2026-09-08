@@ -1160,8 +1160,7 @@ def _linux_certificates(
     for path in paths[:MAX_CERTIFICATES]:
         if not _safe_cert_path(path):
             continue
-        result = session.run(CERT_READ_TEMPLATE.format(path=shlex.quote(path)), sudo=True)
-        parsed = parse_openssl_x509(result.stdout) if result.ok else None
+        parsed = _read_certificate(session, path)
         if parsed is None:
             continue
         rows.append(_with_days({**parsed, "source": path, "kind": "file"}, session.now))
@@ -1184,6 +1183,21 @@ def _linux_certificates(
             )
         )
     return rows
+
+
+def _read_certificate(session: LinuxSession, path: str) -> dict[str, Any] | None:
+    """The public fields of one certificate, unprivileged first.
+
+    Most certificates are world-readable (`/etc/nginx/ssl/...`) and only Let's
+    Encrypt's `live/` directory needs root. The sudoers allowlist can only name
+    the paths it knows about, so reading unprivileged first means a certificate
+    outside that glob is still collected instead of being lost to a sudo refusal.
+    """
+    command = CERT_READ_TEMPLATE.format(path=shlex.quote(path))
+    result = session.run(command)
+    if not result.ok:
+        result = session.run(command, sudo=True)
+    return parse_openssl_x509(result.stdout) if result.ok else None
 
 
 _CERT_PATH = re.compile(r"^/[A-Za-z0-9._/@+-]+$")
