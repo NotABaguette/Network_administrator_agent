@@ -10,6 +10,7 @@ observed state by more than one interval.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from infra_agent.collectors.base import COLLECTORS, Collector, get_collector, run_collector
 from infra_agent.config import get_settings
@@ -95,6 +96,34 @@ def _correlate_config_commits(device: str, commits: dict[str, str]) -> None:
         log.exception("config change correlation failed for %s", device)
 
 
+def run_backups_once() -> int:
+    """Backup freshness for every ESXi host. Returns the number of hosts read.
+
+    This runs on its own job rather than inside `run_once` because `COLLECTORS`
+    holds one collector per device kind and ESXi already has one. The `backups`
+    collector reads a different system - whatever actually takes the VM backups
+    - on a much slower cycle (hourly), and must not inherit the ESXi
+    collector's five-minute schedule, its snapshot series or its error counter.
+    """
+    from infra_agent.collectors.backups import BackupsCollector
+
+    settings, inv, secrets, store, _cfg = _context()
+    creds = secrets.read("devices") if secrets.available() else {}
+    collector = BackupsCollector(settings=settings, snapshots=store)
+    done = 0
+    for device in inv.by_kind(DeviceKind.esxi):
+        raw = creds.get(device.credential_ref)
+        if not raw:
+            log.warning("no credential for %s", device.name)
+            continue
+        try:
+            run_collector(collector, device, Credential.model_validate(raw), store)
+            done += 1
+        except Exception:
+            log.exception("backup collector failed for %s", device.name)
+    return done
+
+
 def _rebuild_graph() -> None:
     try:
         from infra_agent.correlate.service import build_and_persist
@@ -130,5 +159,25 @@ def run_forever() -> None:
             coalesce=True,
         )
         log.info("scheduled %s every %ds", ", ".join(sorted(k.value for k in kinds)), interval)
+    _schedule_backups(sched)
     run_once()
     sched.start()
+
+
+def _schedule_backups(sched: Any) -> None:
+    """Hourly backup-freshness job.
+
+    Backups are read on their own cadence: an hourly job against whatever takes
+    the VM backups, not another pass of the five-minute ESXi collector.
+    """
+    from infra_agent.collectors.backups import BackupsCollector
+
+    sched.add_job(
+        run_backups_once,
+        "interval",
+        seconds=BackupsCollector.interval_seconds,
+        id="collect-backups",
+        max_instances=1,
+        coalesce=True,
+    )
+    log.info("scheduled backups every %ds", BackupsCollector.interval_seconds)

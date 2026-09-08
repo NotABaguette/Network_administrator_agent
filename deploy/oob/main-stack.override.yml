@@ -1,0 +1,45 @@
+# The main stack's half of the Alertmanager cluster. Used ON mgmt-01.
+#
+# `--cluster.peer` on the out-of-band box alone is not enough to make one
+# cluster: the main Alertmanager has to listen for gossip and publish the port,
+# and memberlist needs 9094 on BOTH tcp and udp in both directions. Without
+# this file the two Alertmanagers are two one-node clusters that both page the
+# owner for the same alert and do not share silences - so a silence set at 2am
+# on the main side does not stop the OOB box paging about the same thing.
+#
+# It is a separate file because deploy/docker-compose.yml belongs to the
+# platform's deployment, not to the OOB box, and because a site with no OOB box
+# should not have a management-VLAN port published for a cluster with no peer.
+#
+#   # in deploy/.env
+#   MGMT_ADVERTISE_ADDR=10.0.10.10        # this host, as the OOB box reaches it
+#   OOB_ALERTMANAGER_HOST=10.0.0.9        # the OOB box on the management VLAN
+#
+#   docker compose -f deploy/docker-compose.yml \
+#     -f deploy/oob/main-stack.override.yml up -d
+#
+# Check it took:  curl -s localhost:9093/api/v2/status | jq .cluster
+#   -> "status": "ready" and two peers. One peer means gossip is not getting
+#      through: check the FortiGate policy between the management VLAN and this
+#      host for 9094/tcp AND 9094/udp.
+#
+# Relative paths resolve against deploy/ (the first compose file's directory),
+# the same as in docker-compose.yml.
+
+services:
+  alertmanager:
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --cluster.listen-address=0.0.0.0:9094
+      # The address the OOB box must be able to reach back on. Gossip carries
+      # it verbatim, so 127.0.0.1 here quietly produces a cluster of one.
+      - --cluster.advertise-address=${MGMT_ADVERTISE_ADDR:?set it in deploy/.env}:9094
+      - --cluster.peer=${OOB_ALERTMANAGER_HOST:?set it in deploy/.env}:9094
+      # An OOB box that is down for a day rejoins rather than being forgotten.
+      - --cluster.reconnect-timeout=6h
+    ports:
+      # 9093 stays bound to 127.0.0.1 by the base file: the API is not for the
+      # network. Only the cluster port is published, and only to the management
+      # VLAN in the FortiGate policy.
+      - "9094:9094"
+      - "9094:9094/udp"

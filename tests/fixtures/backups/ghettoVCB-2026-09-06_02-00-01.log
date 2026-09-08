@@ -1,0 +1,26 @@
+2026-09-06 02:00:01 -- info: ============================== ghettoVCB LOG START ==============================
+
+2026-09-06 02:00:01 -- info: CONFIG - VERSION = 2023_10_10_1
+2026-09-06 02:00:01 -- info: CONFIG - VM_BACKUP_VOLUME = /vmfs/volumes/backup/backups
+2026-09-06 02:00:01 -- info: CONFIG - VM_BACKUP_ROTATION_COUNT = 3
+2026-09-06 02:00:01 -- info:
+2026-09-06 02:00:02 -- info: Initiate backup for web-01
+2026-09-06 02:00:02 -- info: Creating Snapshot "ghettoVCB-snapshot-2026-09-06" for web-01
+2026-09-06 02:04:20 -- info: Removing snapshot from web-01 ...
+2026-09-06 02:04:22 -- info: Backup Duration: 4.33 Minutes
+2026-09-06 02:04:22 -- info: Successfully completed backup for web-01!
+2026-09-06 02:04:22 -- info:
+2026-09-06 02:04:22 -- info: Initiate backup for db-01
+2026-09-06 02:04:22 -- info: Creating Snapshot "ghettoVCB-snapshot-2026-09-06" for db-01
+2026-09-06 02:18:55 -- info: Removing snapshot from db-01 ...
+2026-09-06 02:18:58 -- info: Backup Duration: 14.60 Minutes
+2026-09-06 02:18:58 -- info: Successfully completed backup for db-01!
+2026-09-06 02:18:58 -- info:
+2026-09-06 02:18:58 -- info: Initiate backup for file-01
+2026-09-06 02:18:58 -- info: Creating Snapshot "ghettoVCB-snapshot-2026-09-06" for file-01
+2026-09-06 02:26:31 -- info: Removing snapshot from file-01 ...
+2026-09-06 02:26:33 -- info: Backup Duration: 7.55 Minutes
+2026-09-06 02:26:33 -- info: Successfully completed backup for file-01!
+2026-09-06 02:26:33 -- info:
+2026-09-06 02:26:33 -- info: ###### Final status: All VMs backed up OK! ######
+2026-09-06 02:26:33 -- info: ============================== ghettoVCB LOG END ================================

@@ -1,0 +1,14 @@
+[
+  {
+    "labels": { "role": "mgmt-agent", "vantage": "oob" },
+    "targets": ["http://10.0.10.10:9102/healthz"]
+  },
+  {
+    "labels": { "role": "mgmt-alertmanager", "vantage": "oob" },
+    "targets": ["http://10.0.10.10:9093/-/healthy"]
+  },
+  {
+    "labels": { "role": "mgmt-prometheus", "vantage": "oob" },
+    "targets": ["http://10.0.10.10:9090/-/healthy"]
+  }
+]

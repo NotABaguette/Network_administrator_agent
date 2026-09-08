@@ -1,0 +1,14 @@
+[
+  {
+    "labels": { "role": "wan-gateway", "uplink": "primary", "vantage": "oob" },
+    "targets": ["198.51.100.1"]
+  },
+  {
+    "labels": { "role": "wan-gateway", "uplink": "secondary", "vantage": "oob" },
+    "targets": ["203.0.113.1"]
+  },
+  {
+    "labels": { "role": "internet", "vantage": "oob" },
+    "targets": ["1.1.1.1", "9.9.9.9"]
+  }
+]

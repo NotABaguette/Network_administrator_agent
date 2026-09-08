@@ -21,6 +21,7 @@ netbox_app = typer.Typer(help="NetBox source of truth: bootstrap and sync")
 baseline_app = typer.Typer(help="The accepted baseline that drift is measured against")
 graph_app = typer.Typer(help="Topology graph: build, render, impact analysis")
 bot_app = typer.Typer(help="Telegram bot: owner channel and approvals")
+dr_app = typer.Typer(help="Disaster recovery: export, verify, import, platform health")
 app.add_typer(change_app, name="change")
 app.add_typer(agent_app, name="agent")
 app.add_typer(mcp_app, name="mcp")
@@ -28,6 +29,7 @@ app.add_typer(netbox_app, name="netbox")
 app.add_typer(baseline_app, name="baseline")
 app.add_typer(graph_app, name="graph")
 app.add_typer(bot_app, name="bot")
+app.add_typer(dr_app, name="dr")
 
 
 @app.callback()
@@ -532,6 +534,167 @@ def bot_run(
             "Run the bot inside the agent service for the full owner channel."
         )
     run_bot(store(), ask=ask, digest=digest, metrics_port=metrics_port)
+
+
+# --------------------------------------------------------------------------
+# Disaster recovery (infra_agent/dr/, docs/runbooks/dr-mgmt-01.md)
+# --------------------------------------------------------------------------
+def _dr_settings():
+    from infra_agent.config import get_settings
+
+    return get_settings()
+
+
+@dr_app.command("export")
+def dr_export(
+    to: str | None = typer.Option(
+        None,
+        "--to",
+        help="destination directory or ssh://user@host/path (default: INFRA_DR_TARGET)",
+    ),
+    host: str | None = typer.Option(None, help="override the hostname recorded in the manifest"),
+    prune: bool = typer.Option(True, help="apply INFRA_DR_RETENTION_DAYS after the export"),
+) -> None:
+    """Export data_dir, the config repo, secrets, inventory and the databases.
+
+    Produces a dated, checksummed tarball with a manifest. `deploy/.env` and the
+    age private key are deliberately not in it; the manifest says why.
+    """
+    from infra_agent.dr.export import export_bundle
+
+    settings = _dr_settings()
+    result = export_bundle(settings, to=to, host=host, prune=prune)
+    console.print_json(data=result.summary())
+    for warning in result.warnings:
+        console.print(f"[yellow]incomplete[/]: {warning}")
+    console.print(f"[green]wrote[/] {result.bundle}")
+    if result.pushed_to:
+        console.print(f"[green]pushed to[/] {result.pushed_to}")
+    if result.push_error:
+        # The bundle exists, is pruned and is recorded; only the copy to the
+        # standby failed. Still an error exit: `deploy/standby/sync.sh` and any
+        # cron wrapper read this, and a backup that never leaves the machine it
+        # is a backup of is not one.
+        console.print(f"[red]not shipped[/]: {result.push_error}")
+    if not result.ok or result.push_error:
+        raise typer.Exit(code=1)
+
+
+@dr_app.command("verify")
+def dr_verify(
+    bundle: str | None = typer.Argument(
+        None, help="bundle to verify (default: the newest local one)"
+    ),
+    as_json: bool = typer.Option(False, "--json", help="print the structured report"),
+    record: bool = typer.Option(
+        True, help="remember the outcome in dr-state.json and the DR gauges"
+    ),
+) -> None:
+    """Restore a bundle into a temp dir and prove every part of it loads.
+
+    Exits 1 when anything fails, so a scheduled run can alert on it.
+    """
+    from pathlib import Path as _Path
+
+    from infra_agent.dr.export import verify_source
+    from infra_agent.dr.transfer import newest_bundle
+    from infra_agent.dr.verify import verify, verify_and_record
+
+    settings = _dr_settings()
+    where = verify_source(settings)
+    target = _Path(bundle) if bundle else newest_bundle(where)
+    if target is None:
+        console.print(f"[red]no bundle[/] in {where}; run `infra dr export` first")
+        raise typer.Exit(code=2)
+    report = verify_and_record(target, settings) if record else verify(target, settings=settings)
+    if as_json:
+        console.print_json(data=report.llm_view())
+    else:
+        for check in report.checks:
+            colour = "green" if check.ok else "red"
+            console.print(f"[{colour}]{check.line()}[/]")
+        console.print(report.headline())
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@dr_app.command("import")
+def dr_import(
+    bundle: str,
+    force: bool = typer.Option(
+        False, "--force", help="overwrite a non-empty data_dir (never a bad checksum)"
+    ),
+) -> None:
+    """Restore a bundle in place. Refuses a non-empty data_dir unless --force.
+
+    The platform is left FROZEN: nothing automates against restored state until
+    a human has checked it and run `infra change unfreeze`.
+    """
+    from pathlib import Path as _Path
+
+    from infra_agent.dr.errors import DRError
+    from infra_agent.dr.restore import import_bundle
+
+    try:
+        report = import_bundle(_Path(bundle), _dr_settings(), force=force)
+    except DRError as exc:
+        console.print(f"[red]refused[/]: {exc}")
+        raise typer.Exit(code=2) from exc
+    console.print_json(data=report.summary())
+    for warning in report.warnings:
+        console.print(f"[yellow]note[/]: {warning}")
+    console.print(f"[green]{report.headline()}[/]")
+
+
+@dr_app.command("health")
+def dr_health(
+    as_json: bool = typer.Option(False, "--json", help="print the structured report"),
+) -> None:
+    """Could this platform recover right now? Local state only, no Prometheus.
+
+    Exits 1 when a check fails, so it works as a container healthcheck.
+    """
+    from infra_agent.dr.health import health_report
+
+    report = health_report(_dr_settings())
+    if as_json:
+        console.print_json(data=report.llm_view())
+    else:
+        for check in report.checks:
+            colour = "green" if check.ok else "red"
+            console.print(f"[{colour}]{check.line()}[/]")
+        if report.frozen:
+            console.print("[yellow]the platform is frozen[/] (break-glass marker or INFRA_FROZEN)")
+        console.print(report.headline())
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@dr_app.command("list")
+def dr_list(
+    directory: str | None = typer.Argument(
+        None, help="where to look (default: the local keep directory, data_dir/dr)"
+    ),
+) -> None:
+    """Bundles in a directory, newest first."""
+    from pathlib import Path as _Path
+
+    from infra_agent.dr.export import verify_source
+    from infra_agent.dr.transfer import local_bundles
+
+    settings = _dr_settings()
+    where = _Path(directory) if directory else verify_source(settings)
+    found = local_bundles(where)
+    if not found:
+        console.print(f"[yellow]no bundles[/] in {where}")
+        return
+    from rich.table import Table
+
+    table = Table("bundle", "bytes", "checksum")
+    for path in found:
+        sidecar = path.with_name(path.name + ".sha256")
+        table.add_row(path.name, str(path.stat().st_size), "yes" if sidecar.exists() else "missing")
+    console.print(table)
 
 
 @mcp_app.command("serve")

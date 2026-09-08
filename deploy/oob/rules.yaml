@@ -1,0 +1,95 @@
+# Alerts the out-of-band box raises from its own vantage point.
+#
+# These deliberately overlap with the main stack's rules. That is the whole
+# point: when both are up, the clustered Alertmanagers de-duplicate them and
+# the owner sees one message; when mgmt-01 is gone, these are the only ones
+# left, and they are the ones that say so.
+#
+# Every series here carries `vantage="oob"` from `external_labels`, so a
+# notification can never be mistaken for the main stack's opinion.
+groups:
+  - name: oob-vantage
+    rules:
+      # The one alert only this box can raise. `up` on the mgmt-agent probe
+      # going to 0 while the switches still answer ICMP means the management VM
+      # is down, not the site.
+      - alert: MgmtVmDown
+        expr: probe_success{role="mgmt-agent"} == 0
+        for: 3m
+        labels: { severity: critical, vantage: oob }
+        annotations:
+          summary: "mgmt-01 is not answering from the out-of-band box"
+          description: "The platform's own health endpoint is silent from a vantage that does not depend on it. If the switches below are still up, this is mgmt-01 alone: consider the standby (deploy/standby/README.md). Nothing is collecting, nothing is alerting from the main stack, and no ChangePlan can execute while it is down."
+
+      - alert: MgmtVmUnreachable
+        expr: probe_success{role="mgmt-vm"} == 0
+        for: 3m
+        labels: { severity: critical, vantage: oob }
+        annotations:
+          summary: "mgmt-01 does not answer ICMP from the out-of-band box"
+          description: "Worse than MgmtVmDown: the VM is not on the network at all. Check the host it runs on (esx-01) before assuming the VM is at fault."
+
+      - alert: PrimaryAlertmanagerDown
+        expr: probe_success{role="mgmt-alertmanager"} == 0
+        for: 5m
+        labels: { severity: critical, vantage: oob }
+        annotations:
+          summary: "The main Alertmanager is not answering"
+          description: "Alerts raised by the main Prometheus are going nowhere. This box's Alertmanager is now the only one that can page anybody, and its cluster peer is gone, so silences created here will not reach the main side until it is back."
+
+      # From the WAN leg. The main stack cannot tell "our uplink is down" from
+      # "we are down" - it is behind the same firewall as the uplink.
+      - alert: WanDown
+        expr: max(probe_success{job="blackbox-wan", role="internet"}) == 0
+        for: 2m
+        labels: { severity: critical, vantage: oob }
+        annotations:
+          summary: "No internet from the out-of-band box's WAN leg"
+          description: "Neither anycast resolver answers from a leg that does not go through the FortiGate's LAN path. If the site's ISP is genuinely down the dead-man heartbeat has also stopped, deliberately (deploy/oob/heartbeat.sh), and the external service is paging the owner."
+
+      - alert: WanGatewayDownOOB
+        expr: probe_success{job="blackbox-wan", role="wan-gateway"} == 0
+        for: 2m
+        labels: { severity: warning, vantage: oob }
+        annotations:
+          summary: "{{ $labels.uplink }} WAN gateway {{ $labels.instance }} is unreachable from the OOB box"
+          description: "One uplink. If both fire, the site has no path out and WanDown will follow."
+
+      - alert: FirewallDownOOB
+        expr: probe_success{role="firewall"} == 0
+        for: 2m
+        labels: { severity: critical, vantage: oob }
+        annotations:
+          summary: "The FortiGate does not answer from the out-of-band box"
+          description: "Every VLAN's default gateway. If a Tier 2 edge change was executing, this is the rollback trigger: the executor's post-check has already failed and it should have reverted. Check the console."
+
+      - alert: SwitchDownOOB
+        expr: probe_success{role="switch"} == 0
+        for: 3m
+        labels: { severity: critical, vantage: oob }
+        annotations:
+          summary: "Switch {{ $labels.instance }} does not answer from the out-of-band box"
+
+      - alert: EsxiHostDownOOB
+        expr: probe_success{role="esxi-host"} == 0
+        for: 3m
+        labels: { severity: critical, vantage: oob }
+        annotations:
+          summary: "ESXi host {{ $labels.instance }} does not answer from the out-of-band box"
+          description: "Check the matching iLO probe: an iLO that answers while the host does not means the machine has power and the hypervisor is the problem."
+
+      - alert: IloDownOOB
+        expr: probe_success{role="ilo"} == 0
+        for: 5m
+        labels: { severity: warning, vantage: oob }
+        annotations:
+          summary: "iLO {{ $labels.instance }} does not answer from the out-of-band box"
+          description: "The out-of-band path into a host is itself out. Fix it before scheduling anything that could take the host down."
+
+      - alert: OOBWanLegDown
+        expr: infra_oob_wan_visible == 0
+        for: 5m
+        labels: { severity: warning, vantage: oob }
+        annotations:
+          summary: "The out-of-band box cannot see the WAN"
+          description: "Its heartbeat has stopped on purpose, so the external dead-man service will page the owner shortly. Either the site is dark or this box's second leg (LTE dongle or WAN uplink port) is unplugged - docs/runbooks/oob-box.md."

@@ -650,11 +650,19 @@ def test_every_duty_is_scheduled(settings, snapshots):
     duties.register(scheduler)
 
     jobs = {kwargs["id"]: (func, trigger, kwargs) for func, trigger, kwargs in scheduler.jobs}
-    assert set(jobs) == {"daily-digest", "weekly-report", "firmware-inventory", "heartbeat"}
+    assert set(jobs) == {
+        "daily-digest",
+        "weekly-report",
+        "firmware-inventory",
+        "heartbeat",
+        "dr-export",
+        "dr-verify",
+    }
     assert jobs["heartbeat"][1] == "interval"
     assert jobs["heartbeat"][2]["minutes"] == 5
     assert jobs["daily-digest"][1] == "cron"
     assert jobs["weekly-report"][2]["day_of_week"] == "mon"
+    assert jobs["dr-verify"][2]["day_of_week"] == "sat"
 
 
 # -- the maintained baseline --------------------------------------------------

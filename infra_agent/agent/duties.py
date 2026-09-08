@@ -586,6 +586,7 @@ class Duties:
             "drift": self.drift(),
             "datastore_forecast": self.datastore_forecast(),
             "certificate_expiry": self.certificate_expiry(),
+            "platform_health": self.platform_health(),
         }
 
     def daily_digest(self) -> AgentRunResult:
@@ -616,6 +617,89 @@ class Duties:
         return self._run(
             FIRMWARE_TASK, "firmware_inventory", self.firmware_context(), "Firmware inventory"
         )
+
+    # -- disaster recovery --------------------------------------------------
+    def platform_health(self) -> dict[str, Any]:
+        """Can this platform still recover? Structured, secret-free, local-only.
+
+        Carried in the daily digest so a degraded administrator is noticed on
+        an ordinary morning rather than on the morning it matters.
+        """
+        try:
+            from infra_agent.dr.health import health_report
+
+            return health_report(self.settings, now=self._now()).llm_view()
+        except Exception as exc:
+            log.exception("platform health report failed")
+            return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    def dr_export(self) -> dict[str, Any]:
+        """Nightly: ship the platform state to the standby and prune by retention.
+
+        Runs even when the platform is frozen. A freeze stops changes to the
+        estate; an export changes nothing and is worth most precisely when
+        somebody has just pulled the handle.
+        """
+        from infra_agent.dr.export import export_bundle
+
+        if not self.settings.dr_target:
+            log.info("no INFRA_DR_TARGET configured; skipping the nightly DR export")
+            return {"ok": False, "skipped": "INFRA_DR_TARGET is not set"}
+        try:
+            result = export_bundle(self.settings, now=self._now())
+        except Exception as exc:  # noqa: BLE001 - a backup that fails silently is no backup
+            log.exception("DR export failed")
+            self.notifier.send(f"DR export failed: {type(exc).__name__}: {exc}", critical=True)
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        summary = result.summary()
+        if result.push_error or not result.ok:
+            # The bundle exists, is pruned and is recorded whatever went wrong
+            # here; what failed is a part of it or the copy to the standby.
+            # `StandbyStale` and `DRVerifyFailed` escalate on their own, so this
+            # message informs rather than pages: a nightly critical for a
+            # standby that has been down a week is how an owner learns to
+            # ignore the DR alerts.
+            headline = (
+                f"DR bundle {result.bundle.name} was built but not shipped to the standby"
+                if result.push_error
+                else f"DR export incomplete ({result.bundle.name})"
+            )
+            self.notifier.send(f"{headline}: {'; '.join(result.warnings)}", critical=False)
+        return {
+            "ok": result.ok and result.push_error is None,
+            "pushed": result.pushed_to is not None,
+            **summary,
+        }
+
+    def dr_verify(self) -> dict[str, Any]:
+        """Weekly: verify the newest local bundle and tell the owner either way.
+
+        A backup nobody restored is a rumour, so the schedule proves it once a
+        week and the quarterly restore test (docs/runbooks/restore-test.md)
+        proves it the whole way into a scratch VM.
+        """
+        from infra_agent.dr.export import verify_source
+        from infra_agent.dr.transfer import newest_bundle
+        from infra_agent.dr.verify import verify_and_record
+
+        where = verify_source(self.settings)
+        bundle = newest_bundle(where)
+        if bundle is None:
+            message = f"no DR bundle in {where}; nothing to verify"
+            log.warning(message)
+            self.notifier.send(message, critical=True)
+            return {"ok": False, "error": message}
+        try:
+            report = verify_and_record(bundle, self.settings, now=self._now())
+        except Exception as exc:  # noqa: BLE001 - the same rule as the export
+            log.exception("DR verification failed")
+            self.notifier.send(
+                f"DR verification of {bundle.name} failed: {type(exc).__name__}: {exc}",
+                critical=True,
+            )
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        self.notifier.send(report.headline(), critical=not report.ok)
+        return report.llm_view()
 
     def heartbeat(self) -> bool:
         """Dead-man ping. No model involved: this must work when everything else does not."""
@@ -664,6 +748,12 @@ class Duties:
             id="firmware-inventory",
         )
         scheduler.add_job(self.heartbeat, "interval", minutes=5, id="heartbeat")
+        # Disaster recovery: export in the quiet hours, verify before the week
+        # starts so a failed bundle has a working day to be fixed in.
+        scheduler.add_job(self.dr_export, "cron", hour=2, minute=15, id="dr-export")
+        scheduler.add_job(
+            self.dr_verify, "cron", day_of_week="sat", hour=5, minute=0, id="dr-verify"
+        )
         return scheduler
 
 

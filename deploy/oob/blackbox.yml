@@ -1,0 +1,26 @@
+# Probe modules for the out-of-band box. Shorter timeouts than the main stack:
+# this box exists to answer "is it down" quickly, and a slow answer during an
+# outage is the same as no answer.
+modules:
+  icmp:
+    prober: icmp
+    timeout: 3s
+    icmp:
+      preferred_ip_protocol: ip4
+
+  https_2xx:
+    prober: http
+    timeout: 8s
+    http:
+      preferred_ip_protocol: ip4
+      # 401/403 still prove the service is answering, which is the question.
+      valid_status_codes: [200, 204, 301, 302, 401, 403]
+      # Management UIs use self-signed certificates; this box is not the
+      # certificate monitor, it is the reachability monitor.
+      tls_config:
+        insecure_skip_verify: true
+
+  # For an LTE leg where ICMP is filtered by the carrier.
+  tcp_connect:
+    prober: tcp
+    timeout: 5s

@@ -1,0 +1,107 @@
+# Out-of-band monitoring box.
+#
+# A small machine on the management VLAN with a second leg on a WAN uplink or
+# an LTE dongle, running the smallest possible stack that can answer one
+# question: "is the site actually down, or is mgmt-01 lying to me?"
+#
+# It is deliberately NOT a second full platform. No NetBox, no Loki, no agent,
+# no credentials to any device. It probes, it alerts, and it pings the dead-man
+# service while it can see the WAN. Anything more and it becomes a second thing
+# to keep alive.
+#
+# Its Alertmanager is clustered with the main one (--cluster.peer), so a
+# silence created on either is honoured by both and the pair de-duplicates
+# alerts they both see. When mgmt-01 is gone the cluster is one node and this
+# box keeps alerting on its own.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose -f deploy/oob/docker-compose.yml up -d
+#
+# Hardware, cabling and the main-side scrape job: docs/runbooks/oob-box.md
+name: infra-oob
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # 30 days is plenty: this box answers "is it down now", the main
+      # Prometheus keeps the history.
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./rules.yaml:/etc/prometheus/rules/rules.yaml:ro
+      - ./targets:/etc/prometheus/targets:ro
+      - prometheus-data:/prometheus
+    ports: ["9090:9090"]
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --cluster.listen-address=0.0.0.0:9094
+      - --cluster.advertise-address=${OOB_ADVERTISE_ADDR}:9094
+      # The main Alertmanager on mgmt-01. Gossip is bidirectional once either
+      # side knows about the other, so only this side needs the peer set - and
+      # this is the side that survives.
+      - --cluster.peer=${MAIN_ALERTMANAGER_HOST}:9094
+      - --cluster.reconnect-timeout=6h
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "9093:9093"
+      - "9094:9094"
+      - "9094:9094/udp"
+    # No environment block on purpose: Alertmanager does not expand environment
+    # variables in its config, so the chat id is written into alertmanager.yml
+    # and only the bot token comes from outside, through bot_token_file.
+    secrets:
+      - telegram_token
+    restart: unless-stopped
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    # ICMP from a container needs either NET_RAW or unprivileged ping; this is
+    # the smaller of the two grants.
+    cap_add: ["NET_RAW"]
+    restart: unless-stopped
+
+  # The dead-man ping, but honest: it fires only while this box can see the
+  # WAN itself. A heartbeat sent from a box with no uplink says "the site is
+  # fine" at the exact moment it is not.
+  heartbeat:
+    image: alpine:3.20
+    command: ["/bin/sh", "/opt/heartbeat.sh"]
+    volumes:
+      - ./heartbeat.sh:/opt/heartbeat.sh:ro
+      - heartbeat-metrics:/metrics
+    environment:
+      HEARTBEAT_URL: ${OOB_HEARTBEAT_URL}
+      WAN_CHECK_HOSTS: ${WAN_CHECK_HOSTS:-1.1.1.1 9.9.9.9 8.8.8.8}
+      INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-300}
+    restart: unless-stopped
+
+  # Serves the heartbeat's textfile metrics so both this box's Prometheus and
+  # the main one can scrape them. busybox httpd is 1 MB and has no config.
+  heartbeat-metrics:
+    image: busybox:1.36
+    command: ["httpd", "-f", "-v", "-p", "9105", "-h", "/metrics"]
+    volumes:
+      - heartbeat-metrics:/metrics:ro
+    ports: ["9105:9105"]
+    restart: unless-stopped
+
+secrets:
+  telegram_token:
+    file: ./telegram_token
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  heartbeat-metrics:

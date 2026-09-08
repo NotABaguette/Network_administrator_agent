@@ -140,6 +140,8 @@ def test_the_scheduler_gets_every_duty(settings, monkeypatch):
         "weekly-report",
         "firmware-inventory",
         "heartbeat",
+        "dr-export",
+        "dr-verify",
     }
 
 

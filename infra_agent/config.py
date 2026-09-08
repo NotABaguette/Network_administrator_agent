@@ -63,6 +63,69 @@ class Settings(BaseSettings):
     # Metrics
     metrics_port: int = 9101
 
+    # Disaster recovery (infra_agent/dr/, docs/runbooks/dr-mgmt-01.md)
+    dr_target: str | None = Field(
+        default=None,
+        description="Where `infra dr export` ships bundles: a local directory, "
+        "ssh://user@host/path or user@host:/path. SSH targets must use key auth "
+        "(BatchMode); a password in this string would be a secret in a setting",
+    )
+    dr_retention_days: int = Field(
+        default=14, ge=1, description="Bundles older than this are pruned, except the newest one"
+    )
+    dr_grafana_url: str | None = Field(
+        default=None,
+        description="Grafana base URL for the dashboard export; the API token lives in "
+        "secrets/platform.enc.yaml under grafana_api_token",
+    )
+    dr_postgres_databases: list[str] = Field(
+        default_factory=lambda: ["infra", "netbox"],
+        description="Databases pg_dump'ed into the bundle",
+    )
+    dr_backup_root: str = Field(
+        default="/vmfs/volumes/backup",
+        description="Default path on an ESXi host holding ghettoVCB output; a device tag "
+        "`backup-root:<path>` overrides it per host",
+    )
+    dr_backup_status_dir: Path | None = Field(
+        default=None,
+        description="Local directory where agent-based guest backups publish "
+        "status.json (see docs/runbooks/dr-mgmt-01.md)",
+    )
+    dr_backup_timezone: str = Field(
+        default="UTC",
+        description="Timezone ESXi hosts write ghettoVCB log stamps and restore-point "
+        "directory names in. ESXi is UTC out of the box; a host that was set to local "
+        "time skews every BackupMissing threshold by its offset. A device tag "
+        "`backup-tz:<zone>` overrides it per host",
+    )
+    dr_ssh_restricted: bool = Field(
+        default=True,
+        description="The DR account on the standby is locked to a forced rsync command "
+        "(rrsync), so the export pushes with rsync only: no remote mkdir, ls or rm. "
+        "Retention on the standby is then the standby's own cron "
+        "(deploy/standby/prune.sh). Set false only when that account has a real shell",
+    )
+    dr_ssh_known_hosts: Path | None = Field(
+        default=None,
+        description="known_hosts file pinning the standby's host key. Host key checking is "
+        "strict either way; this points it at a file the platform controls instead of "
+        "the invoking user's ~/.ssh/known_hosts",
+    )
+    dr_age_recipient: str | None = Field(
+        default=None,
+        description="age public key the bundle is encrypted to before it is pushed. A "
+        "bundle carries raw device configs and the NetBox database, so the shipped copy "
+        "should be readable only by whoever holds the offline age key. Unset means the "
+        "bundle travels in the clear and the standby's file mode is the only protection",
+    )
+    dr_age_identity: Path | None = Field(
+        default=None,
+        description="age identity file used to decrypt a `.age` bundle on verify and "
+        "import. Defaults to the SOPS age key (SOPS_AGE_KEY_FILE or "
+        "~/.config/sops/age/keys.txt)",
+    )
+
     @property
     def config_repo(self) -> Path:
         return self.config_repo_dir or (self.data_dir / "configs")
@@ -78,6 +141,15 @@ class Settings(BaseSettings):
     @property
     def audit_log(self) -> Path:
         return self.egress_audit_log or (self.data_dir / "egress-audit.jsonl")
+
+    @property
+    def dr_dir(self) -> Path:
+        """Where DR bundles are built and kept locally before they are pushed."""
+        return self.data_dir / "dr"
+
+    @property
+    def dr_state_file(self) -> Path:
+        return self.data_dir / "dr-state.json"
 
 
 @lru_cache

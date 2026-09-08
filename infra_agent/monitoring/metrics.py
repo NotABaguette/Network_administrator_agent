@@ -57,9 +57,111 @@ UNAPPROVED_CONFIG_CHANGES = Counter(
     ["device"],
 )
 
+# -- Disaster recovery (infra_agent/dr/) ------------------------------------
+# Set from `data_dir/dr-state.json` so any process - the CLI, the collectors,
+# the agent - publishes the same answer; a per-process gauge would report
+# "never exported" in every container but the one that ran the export.
+DR_LAST_EXPORT = Gauge(
+    "infra_dr_last_export_timestamp_seconds", "Unix time of the last successful DR export"
+)
+DR_LAST_VERIFY = Gauge(
+    "infra_dr_last_verify_timestamp_seconds", "Unix time of the last DR bundle verification"
+)
+DR_LAST_VERIFY_OK = Gauge(
+    "infra_dr_last_verify_ok", "1 when the last DR bundle verification passed, 0 when it failed"
+)
+DR_STANDBY_LAST_SYNC = Gauge(
+    "infra_dr_standby_last_sync_timestamp_seconds",
+    "Unix time of the last bundle successfully pushed to the standby target",
+)
+DR_BUNDLE_BYTES = Gauge("infra_dr_last_export_bytes", "Size of the last DR bundle")
+#: (gauge, key) pairs, where the key is what `infra_agent.dr.state.gauge_value`
+#: understands. One list, so arming and publishing cannot drift apart.
+DR_CONFIGURED = Gauge(
+    "infra_dr_configured",
+    "1 when a DR target is configured (INFRA_DR_TARGET), 0 when the platform has "
+    "nowhere to export to. Every DR staleness alert is gated on this: a fresh "
+    "install with no standby yet should not page the owner every night about a "
+    "backup nobody has asked for",
+)
+
+# -- VM backups (infra_agent/collectors/backups.py) -------------------------
+# The platform does not take VM backups (docs/architecture.md "Known gap"); it
+# watches whichever solution the owner chose. `schedule` carries the VM's
+# backup:daily / backup:weekly tag so one gauge serves both alert thresholds.
+BACKUP_LAST_SUCCESS = Gauge(
+    "infra_backup_last_success_timestamp_seconds",
+    "Unix time of the last successful backup of a VM",
+    ["device", "vm", "schedule"],
+)
+BACKUP_LAST_SIZE_BYTES = Gauge(
+    "infra_backup_last_size_bytes", "Size of the newest restore point of a VM", ["device", "vm"]
+)
+BACKUP_RESTORE_POINTS = Gauge(
+    "infra_backup_restore_points", "Restore points retained for a VM", ["device", "vm"]
+)
+BACKUP_JOB_LAST_RUN = Gauge(
+    "infra_backup_job_last_run_timestamp_seconds",
+    "Unix time the backup job last ran on this host",
+    ["device"],
+)
+BACKUP_JOB_OK = Gauge(
+    "infra_backup_job_ok",
+    "1 when the last backup job run reported success for every VM it touched",
+    ["device"],
+)
+
+
+DR_GAUGES = (
+    (DR_LAST_EXPORT, "last_export"),
+    (DR_BUNDLE_BYTES, "last_export_bytes"),
+    (DR_STANDBY_LAST_SYNC, "last_push"),
+    (DR_LAST_VERIFY, "last_verify"),
+    (DR_LAST_VERIFY_OK, "last_verify_ok"),
+    (DR_CONFIGURED, "configured"),
+)
+
 
 def start_metrics_server(port: int) -> None:
     start_http_server(port)
+    _arm_dr_gauges()
+
+
+def _arm_dr_gauges() -> None:
+    """Point the DR gauges at `data_dir/dr-state.json`.
+
+    Every container that serves /metrics answers the same way about the last
+    export and the last verification, whichever one of them actually ran it.
+
+    Called once at the bottom of this module as well as from
+    `start_metrics_server`, because not every process serves metrics through
+    that function: the agent mounts `make_asgi_app()` on its FastAPI app, and
+    an unarmed `infra_dr_last_verify_ok` reads as prometheus_client's default
+    0 - which is `DRVerifyFailed`, critical, after every agent restart.
+
+    `infra_agent.dr.state` is imported inside the reader rather than here:
+    that module imports this one, so at import time it may be half-built, and
+    at scrape time it never is.
+    """
+    for gauge, name in DR_GAUGES:
+        gauge.set_function(_dr_reader(name))
+
+
+def _dr_reader(name: str):
+    def read() -> float:
+        try:
+            from infra_agent.dr import state
+
+            return state.gauge_value(name)
+        except Exception:  # noqa: BLE001 - metrics must never raise into a scrape
+            import logging
+
+            logging.getLogger(__name__).debug("could not read DR gauge %s", name, exc_info=True)
+            # "Never" for a timestamp is 0, so the staleness alert fires; for
+            # last_verify_ok it is 1, so DRVerifyFailed means a real failure.
+            return 1.0 if name == "last_verify_ok" else 0.0
+
+    return read
 
 
 # ---------------------------------------------------------------------------
@@ -255,3 +357,9 @@ class DeviceSeries:
 
     def forget(self, device: str) -> None:
         self.published.pop(device, None)
+
+
+# Arm at import so every process that touches this module - the collectors, the
+# agent's ASGI /metrics mount, the Telegram bot, the CLI - reports the same DR
+# state. It is a `set_function` on five gauges: no I/O until something scrapes.
+_arm_dr_gauges()
