@@ -90,8 +90,9 @@ def findings() -> dict[str, Any]:
 
 @tool("topology")
 def render(diagram: str = "physical", vlan: int | None = None) -> str:
-    """Mermaid text for a topology view: `physical`, `storage`, or `vlan` with a
-    vlan id."""
+    """Mermaid text for a topology view: `physical`, `storage`, `applications`
+    (services, the ports they listen on and what depends on them), or `vlan`
+    with a vlan id."""
     return _render(_graph(), diagram=diagram, vlan=vlan)
 
 

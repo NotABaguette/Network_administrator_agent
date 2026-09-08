@@ -1,0 +1,310 @@
+{
+ "os": {
+  "id": "ubuntu",
+  "name": "Ubuntu",
+  "version": "22.04",
+  "pretty_name": "Ubuntu 22.04.4 LTS",
+  "id_like": [
+   "debian"
+  ],
+  "family": "linux",
+  "kernel": "Linux 5.15.0-91-generic",
+  "arch": "x86_64",
+  "hostname": "web-01"
+ },
+ "uptime_seconds": 1044231.68,
+ "cpu": {
+  "count": 4
+ },
+ "memory": {
+  "total_bytes": 8322306048,
+  "available_bytes": 5343277056,
+  "swap_total_bytes": 2147479552
+ },
+ "packages": [
+  {
+   "name": "base-files",
+   "version": "12ubuntu4.4"
+  },
+  {
+   "name": "libssl3",
+   "version": "3.0.2-0ubuntu1.15"
+  },
+  {
+   "name": "nginx",
+   "version": "1.18.0-6ubuntu14.4"
+  },
+  {
+   "name": "nginx-common",
+   "version": "1.18.0-6ubuntu14.4"
+  },
+  {
+   "name": "openssh-server",
+   "version": "1:8.9p1-3ubuntu0.6"
+  },
+  {
+   "name": "openssl",
+   "version": "3.0.2-0ubuntu1.15"
+  },
+  {
+   "name": "postgresql-client-14",
+   "version": "14.11-0ubuntu0.22.04.1"
+  },
+  {
+   "name": "python3",
+   "version": "3.10.6-1~22.04"
+  }
+ ],
+ "updates": {
+  "pending": 3,
+  "source": "apt list --upgradable",
+  "packages": [
+   "libssl3",
+   "nginx",
+   "openssl"
+  ]
+ },
+ "services": [
+  {
+   "name": "cron.service",
+   "load": "loaded",
+   "active": "active",
+   "sub": "running",
+   "description": "Regular background program processing daemon",
+   "enabled": "enabled"
+  },
+  {
+   "name": "dbus.service",
+   "load": "loaded",
+   "active": "active",
+   "sub": "running",
+   "description": "D-Bus System Message Bus",
+   "enabled": "static"
+  },
+  {
+   "name": "nginx.service",
+   "load": "loaded",
+   "active": "failed",
+   "sub": "failed",
+   "description": "A high performance web server and a reverse proxy server",
+   "enabled": "enabled"
+  },
+  {
+   "name": "postgresql@14-main.service",
+   "load": "loaded",
+   "active": "active",
+   "sub": "running",
+   "description": "PostgreSQL Cluster 14-main",
+   "enabled": "enabled"
+  },
+  {
+   "name": "ssh.service",
+   "load": "loaded",
+   "active": "active",
+   "sub": "running",
+   "description": "OpenBSD Secure Shell server",
+   "enabled": "enabled"
+  },
+  {
+   "name": "systemd-journald.service",
+   "load": "loaded",
+   "active": "active",
+   "sub": "running",
+   "description": "Journal Service",
+   "enabled": "static"
+  },
+  {
+   "name": "unattended-upgrades.service",
+   "load": "loaded",
+   "active": "inactive",
+   "sub": "dead",
+   "description": "Unattended Upgrades Shutdown",
+   "enabled": "disabled"
+  }
+ ],
+ "listeners": [
+  {
+   "proto": "tcp",
+   "address": "0.0.0.0",
+   "port": 22,
+   "process": "sshd",
+   "pid": 901,
+   "state": "listen"
+  },
+  {
+   "proto": "tcp",
+   "address": "127.0.0.53%lo",
+   "port": 53,
+   "process": "systemd-resolve",
+   "pid": 612,
+   "state": "listen"
+  },
+  {
+   "proto": "tcp",
+   "address": "0.0.0.0",
+   "port": 80,
+   "process": "nginx",
+   "pid": 812,
+   "state": "listen"
+  },
+  {
+   "proto": "tcp",
+   "address": "0.0.0.0",
+   "port": 443,
+   "process": "nginx",
+   "pid": 812,
+   "state": "listen"
+  },
+  {
+   "proto": "tcp",
+   "address": "127.0.0.1",
+   "port": 5432,
+   "process": "postgres",
+   "pid": 1042,
+   "state": "listen"
+  },
+  {
+   "proto": "tcp",
+   "address": "::",
+   "port": 9100,
+   "process": "node_exporter",
+   "pid": 1310,
+   "state": "listen"
+  },
+  {
+   "proto": "udp",
+   "address": "127.0.0.53%lo",
+   "port": 53,
+   "process": "systemd-resolve",
+   "pid": 612,
+   "state": "unconn"
+  },
+  {
+   "proto": "udp",
+   "address": "0.0.0.0",
+   "port": 68,
+   "process": "dhclient",
+   "pid": 744,
+   "state": "unconn"
+  }
+ ],
+ "connections": [
+  {
+   "local_port": 44120,
+   "remote_ip": "10.10.10.50",
+   "remote_port": 8086,
+   "process": "telegraf",
+   "pid": 1201,
+   "connections": 1
+  },
+  {
+   "local_port": 51234,
+   "remote_ip": "10.20.0.31",
+   "remote_port": 5432,
+   "process": "gunicorn",
+   "pid": 990,
+   "connections": 2
+  },
+  {
+   "local_port": 52100,
+   "remote_ip": "10.20.0.31",
+   "remote_port": 8080,
+   "process": "nginx",
+   "pid": 812,
+   "connections": 1
+  },
+  {
+   "local_port": 39004,
+   "remote_ip": "203.0.113.44",
+   "remote_port": 443,
+   "process": "curl",
+   "pid": 2210,
+   "connections": 1
+  }
+ ],
+ "disks": [
+  {
+   "filesystem": "/dev/sda1",
+   "mount": "/",
+   "total_bytes": 62585438208,
+   "used_bytes": 50107252736,
+   "free_bytes": 9269411840,
+   "free_ratio": 0.1481
+  },
+  {
+   "filesystem": "/dev/sda15",
+   "mount": "/boot/efi",
+   "total_bytes": 109422592,
+   "used_bytes": 6330368,
+   "free_bytes": 103092224,
+   "free_ratio": 0.9421
+  },
+  {
+   "filesystem": "/dev/sdb1",
+   "mount": "/var/lib/postgresql",
+   "total_bytes": 105555197952,
+   "used_bytes": 94386126848,
+   "free_bytes": 5787549696,
+   "free_ratio": 0.0548
+  }
+ ],
+ "certificates": [
+  {
+   "subject": "CN=app.example.com",
+   "issuer": "C=US, O=Let's Encrypt, CN=R3",
+   "not_after": "2026-11-01T12:00:00+00:00",
+   "sans": [
+    "app.example.com",
+    "www.app.example.com"
+   ],
+   "source": "/etc/letsencrypt/live/app.example.com/cert.pem",
+   "kind": "file",
+   "days_to_expiry": 56
+  },
+  {
+   "subject": "C=GB, O=Example Ltd, CN=legacy.internal",
+   "issuer": "C=GB, O=Example Ltd, CN=Example Internal CA",
+   "not_after": "2026-09-20T09:30:00+00:00",
+   "sans": [],
+   "source": "/etc/nginx/ssl/internal-ca-signed.crt",
+   "kind": "file",
+   "days_to_expiry": 13
+  },
+  {
+   "subject": "CN=app.example.com",
+   "issuer": "C=US, O=Let's Encrypt, CN=R3",
+   "not_after": "2026-11-01T12:00:00+00:00",
+   "sans": [
+    "app.example.com",
+    "www.app.example.com"
+   ],
+   "source": "127.0.0.1:443",
+   "kind": "listener",
+   "port": 443,
+   "process": "nginx",
+   "days_to_expiry": 56
+  }
+ ],
+ "tagged_services": [
+  {
+   "service": "nginx",
+   "unit": "nginx.service",
+   "found": true,
+   "state": "failed",
+   "active": false,
+   "enabled": "enabled"
+  },
+  {
+   "service": "postgresql",
+   "unit": "postgresql@14-main.service",
+   "found": true,
+   "state": "active",
+   "active": true,
+   "enabled": "enabled"
+  }
+ ],
+ "privileged": false,
+ "sudo": true,
+ "warnings": [],
+ "errors": {}
+}

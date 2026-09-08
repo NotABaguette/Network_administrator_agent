@@ -1,0 +1,5 @@
+[{"Name":"Dhcp","DisplayName":"DHCP Client","Status":"Running","StartType":"Automatic"},
+ {"Name":"MSSQLSERVER","DisplayName":"SQL Server (MSSQLSERVER)","Status":"Running","StartType":"Automatic"},
+ {"Name":"Spooler","DisplayName":"Print Spooler","Status":"Stopped","StartType":"Disabled"},
+ {"Name":"W3SVC","DisplayName":"World Wide Web Publishing Service","Status":"Stopped","StartType":"Automatic"},
+ {"Name":"WinRM","DisplayName":"Windows Remote Management (WS-Management)","Status":"Running","StartType":"Automatic"}]

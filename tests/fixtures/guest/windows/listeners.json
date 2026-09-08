@@ -1,0 +1,5 @@
+[{"LocalAddress":"0.0.0.0","LocalPort":135,"ProcessId":880,"Process":"svchost"},
+ {"LocalAddress":"0.0.0.0","LocalPort":443,"ProcessId":4,"Process":"System"},
+ {"LocalAddress":"0.0.0.0","LocalPort":3389,"ProcessId":1020,"Process":"svchost"},
+ {"LocalAddress":"::","LocalPort":5986,"ProcessId":4,"Process":"System"},
+ {"LocalAddress":"127.0.0.1","LocalPort":1433,"ProcessId":2240,"Process":"sqlservr"}]

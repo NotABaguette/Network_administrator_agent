@@ -80,9 +80,30 @@ class AffectedObject(BaseModel):
         return f"{self.label} ({self.kind}) {verb}: {self.reason}{flag}"
 
 
+class AffectedService(BaseModel):
+    """An application that stops working, or loses something it depends on.
+
+    Built from the guest layer (`infra_agent/correlate/guest.py`). `down` is a
+    service on an object that is failing; `loses_dependency` is a service
+    somewhere else that had an established connection to one.
+    """
+
+    id: str
+    label: str
+    guest: str | None = None
+    effect: Literal["down", "loses_dependency"] = "down"
+    reason: str
+    mgmt_path: bool = False
+
+    def line(self) -> str:
+        flag = " [mgmt path]" if self.mgmt_path else ""
+        verb = "goes down" if self.effect == "down" else "loses a dependency"
+        return f"{self.label} (service) {verb}: {self.reason}{flag}"
+
+
 class ImpactReport(BaseModel):
-    """`summary` is what the tier engine consumes; the two lists are what the
-    owner reads."""
+    """`summary` is what the tier engine consumes; the lists are what the owner
+    reads."""
 
     object_id: str
     kind: str
@@ -91,14 +112,24 @@ class ImpactReport(BaseModel):
     summary: ImpactSummary = Field(default_factory=ImpactSummary)
     loses_connectivity: list[AffectedObject] = Field(default_factory=list)
     loses_redundancy: list[AffectedObject] = Field(default_factory=list)
+    affected_services: list[AffectedService] = Field(default_factory=list)
 
     @property
     def affected(self) -> list[AffectedObject]:
         return self.loses_connectivity + self.loses_redundancy
 
     def describe(self) -> list[str]:
-        """Human-readable list of affected objects, connectivity losses first."""
-        return [obj.line() for obj in self.affected]
+        """Human-readable list of affected objects, connectivity losses first.
+
+        A service that goes down is already in `loses_connectivity` as an
+        object; only the applications that lose a *dependency* add a line here,
+        because nothing else in the report mentions them.
+        """
+        return [obj.line() for obj in self.affected] + [
+            service.line()
+            for service in self.affected_services
+            if service.effect == "loses_dependency"
+        ]
 
     def as_dict(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json")
@@ -171,6 +202,18 @@ class DependencyIndex:
             elif kind == NodeKind.wan_link:
                 for iface, _e in g.in_edges(node, EdgeKind.wan_uplink):
                     self._add(node, "interface", iface)
+            elif kind == NodeKind.service:
+                # A service is only as alive as the guest running it.
+                for owner, _e in g.in_edges(node, EdgeKind.runs_service):
+                    self._add(node, "guest", owner)
+            elif kind == NodeKind.listener:
+                for service, _e in g.in_edges(node, EdgeKind.listens_on):
+                    self._add(node, "service", service)
+        # Outbound dependencies are deliberately *not* in this index: mgmt-01
+        # scrapes every exporter in the estate, so treating an established
+        # connection as a hard dependency would put the platform's own path in
+        # the blast radius of every guest port and make Tier 2 meaningless
+        # (docs/risk-tiers.md). Consumers are reported as affected services.
 
     def _interface_dependencies(self, node: str, data: dict[str, Any]) -> None:
         g = self.graph
@@ -366,6 +409,7 @@ def impact_analyze(
     redundancy = [
         _affected(graph, node, "redundancy", reason) for node, reason in sorted(degraded.items())
     ]
+    services = affected_services(graph, failed)
     touched = [resolved, *failed, *degraded]
     summary = ImpactSummary(
         touches_mgmt_path=any(graph.node(n).get("mgmt_path") for n in touched),
@@ -382,7 +426,56 @@ def impact_analyze(
         summary=summary,
         loses_connectivity=connectivity,
         loses_redundancy=redundancy,
+        affected_services=services,
     )
+
+
+def affected_services(graph: TopologyGraph, failed: dict[str, str]) -> list[AffectedService]:
+    """Which applications this takes down, and which lose a dependency.
+
+    Two questions, one list. The services running on the objects that fail stop
+    working; the services elsewhere that had an established connection to one
+    of them keep running but lose something they need - which is the answer the
+    owner wants before approving a change on a database VM or a switch port.
+    """
+    rows: list[AffectedService] = []
+    for node in sorted(failed):
+        if node_kind_of(node) != NodeKind.service:
+            continue
+        data = graph.node(node)
+        rows.append(
+            AffectedService(
+                id=node,
+                label=str(data.get("label", node)),
+                guest=data.get("guest"),
+                effect="down",
+                reason=failed[node],
+                mgmt_path=bool(data.get("mgmt_path")),
+            )
+        )
+    seen = {row.id for row in rows}
+    for node in sorted(failed):
+        provider = _describe(graph, node)[1]
+        for consumer, edge in sorted(
+            graph.in_edges(node, EdgeKind.connects_to), key=lambda item: item[0]
+        ):
+            if consumer in failed or consumer in seen:
+                continue
+            data = graph.node(consumer)
+            port = edge.get("remote_port")
+            where = f"{provider}:{port}" if port else provider
+            seen.add(consumer)
+            rows.append(
+                AffectedService(
+                    id=consumer,
+                    label=str(data.get("label", consumer)),
+                    guest=data.get("guest") or data.get("label"),
+                    effect="loses_dependency",
+                    reason=f"it has an established connection to {where}",
+                    mgmt_path=bool(data.get("mgmt_path")),
+                )
+            )
+    return rows
 
 
 def _affected(graph: TopologyGraph, node: str, effect: Effect, reason: str) -> AffectedObject:
@@ -417,6 +510,8 @@ DEFAULT_ACTIONS: dict[str, str] = {
     NodeKind.vswitch: "esxi.host_setting",
     NodeKind.prefix: "fortigate.static_route",
     NodeKind.ip: "fortigate.address",
+    NodeKind.service: "guest.service_restart",
+    NodeKind.listener: "guest.service_restart",
 }
 
 

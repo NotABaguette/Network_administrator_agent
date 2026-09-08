@@ -1,0 +1,4 @@
+subject=C = GB, O = Example Ltd, CN = legacy.internal
+issuer=C = GB, O = Example Ltd, CN = Example Internal CA
+notAfter=Sep 20 09:30:00 2026 GMT
+No extensions in certificate

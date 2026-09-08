@@ -42,6 +42,12 @@ class NodeKind(StrEnum):
     ip = "ip"
     fw_policy = "fw_policy"
     wan_link = "wan_link"
+    # Phase 5, the application layer inside the guests
+    # (`infra_agent/correlate/guest.py`).
+    service = "service"
+    listener = "listener"
+    certificate = "certificate"
+    external_endpoint = "external_endpoint"
 
 
 class EdgeKind(StrEnum):
@@ -71,6 +77,12 @@ class EdgeKind(StrEnum):
     manages = "manages"  # iLO device -> host device
     subinterface_of = "subinterface_of"  # VLAN subinterface -> parent interface
     switch_member_of = "switch_member_of"  # member port -> FortiGate hardware switch
+    # Phase 5, the application layer inside the guests.
+    guest_of = "guest_of"  # guest device (SSH/WinRM endpoint) -> the VM it is
+    runs_service = "runs_service"  # vm|device -> service
+    listens_on = "listens_on"  # service -> listener (a port it answers on)
+    connects_to = "connects_to"  # service|vm -> listener|device it depends on
+    has_certificate = "has_certificate"  # vm|listener -> certificate
 
 
 # --- node identifiers ------------------------------------------------------
@@ -130,6 +142,22 @@ def fw_policy_id(device: str, policy: str | int) -> str:
 
 def wan_link_id(device: str, name: str) -> str:
     return f"wan_link:{device}:{name}"
+
+
+def service_id(guest: str, name: str) -> str:
+    return f"service:{guest}:{name}"
+
+
+def listener_id(guest: str, proto: str, port: int | str) -> str:
+    return f"listener:{guest}:{proto}/{port}"
+
+
+def certificate_id(guest: str, subject: str) -> str:
+    return f"certificate:{guest}:{subject}"
+
+
+def external_endpoint_id(network: str) -> str:
+    return f"external_endpoint:{network}"
 
 
 def node_kind_of(node_id: str) -> str:

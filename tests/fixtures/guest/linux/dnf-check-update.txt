@@ -1,0 +1,8 @@
+Last metadata expiration check: 0:12:31 ago on Sun 06 Sep 2026 11:47:12 AM UTC.
+
+kernel.x86_64                     5.14.0-427.13.1.el9_4       baseos
+nginx.x86_64                      1:1.20.1-14.el9_2.1         appstream
+openssl-libs.x86_64               1:3.0.7-27.el9              baseos
+
+Obsoleting Packages
+grub2-tools.x86_64                1:2.06-80.el9               baseos

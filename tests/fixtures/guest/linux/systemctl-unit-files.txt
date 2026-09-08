@@ -1,0 +1,7 @@
+cron.service                       enabled         enabled
+dbus.service                       static          -
+nginx.service                      enabled         enabled
+postgresql@14-main.service         enabled         enabled
+ssh.service                        enabled         enabled
+systemd-journald.service           static          -
+unattended-upgrades.service        disabled        enabled

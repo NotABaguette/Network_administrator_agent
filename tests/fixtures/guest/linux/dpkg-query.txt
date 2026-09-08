@@ -1,0 +1,8 @@
+base-files	12ubuntu4.4
+libssl3	3.0.2-0ubuntu1.15
+nginx	1.18.0-6ubuntu14.4
+nginx-common	1.18.0-6ubuntu14.4
+openssh-server	1:8.9p1-3ubuntu0.6
+openssl	3.0.2-0ubuntu1.15
+postgresql-client-14	14.11-0ubuntu0.22.04.1
+python3	3.10.6-1~22.04

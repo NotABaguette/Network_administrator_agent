@@ -1,0 +1,6 @@
+LISTEN 0      4096       127.0.0.53%lo:53         0.0.0.0:*    users:(("systemd-resolve",pid=612,fd=14))
+LISTEN 0      128              0.0.0.0:22         0.0.0.0:*    users:(("sshd",pid=901,fd=3))
+LISTEN 0      511              0.0.0.0:443        0.0.0.0:*    users:(("nginx",pid=812,fd=6),("nginx",pid=811,fd=6))
+LISTEN 0      511              0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=812,fd=5),("nginx",pid=811,fd=5))
+LISTEN 0      244            127.0.0.1:5432       0.0.0.0:*    users:(("postgres",pid=1042,fd=5))
+LISTEN 0      4096                [::]:9100           [::]:*    users:(("node_exporter",pid=1310,fd=3))

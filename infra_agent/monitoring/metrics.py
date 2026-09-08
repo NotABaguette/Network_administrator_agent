@@ -166,6 +166,34 @@ ESXI_VM_EXPECTED_ON = Gauge(
     ["device", "vm"],
 )
 
+# -- guests (infra_agent/collectors/guest.py) -------------------------------
+# One series per guest, and one per object *inside* the guest that the owner
+# would be paged about. `node_exporter` / `windows_exporter` cover the raw OS
+# counters (see `ansible/`); these are the facts only the collector's parsed
+# rows know: how many updates are waiting, whether the services the guest was
+# tagged with are actually up, and how long its certificates have left.
+GUEST_PENDING_UPDATES = Gauge(
+    "infra_guest_pending_updates",
+    "Packages with an update waiting (apt / dnf / Windows Update)",
+    ["device"],
+)
+GUEST_SERVICE_ACTIVE = Gauge(
+    "infra_guest_service_active",
+    "1 when a service the guest is tagged with is running, 0 when it is not",
+    ["device", "service"],
+)
+GUEST_CERTIFICATE_DAYS_TO_EXPIRY = Gauge(
+    "infra_guest_certificate_days_to_expiry",
+    "Days until a certificate the guest serves or stores expires (negative once expired)",
+    ["device", "certificate"],
+)
+GUEST_DISK_FREE_BYTES = Gauge(
+    "infra_guest_disk_free_bytes", "Free space on a guest filesystem", ["device", "mount"]
+)
+GUEST_DISK_TOTAL_BYTES = Gauge(
+    "infra_guest_disk_total_bytes", "Size of a guest filesystem", ["device", "mount"]
+)
+
 
 # ---------------------------------------------------------------------------
 # Per-object gauge bookkeeping.

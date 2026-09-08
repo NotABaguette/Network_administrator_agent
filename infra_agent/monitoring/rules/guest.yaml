@@ -1,0 +1,83 @@
+# Guest operating systems and the applications inside them, from the guest
+# collector's gauges (infra_agent/collectors/guest.py).
+#
+# node_exporter and windows_exporter (see ansible/) cover the raw OS counters.
+# These rules are about the facts only the collector knows: how long a
+# certificate has left, whether the services a guest was tagged with are up,
+# and whether the guest can still be reached at all.
+groups:
+  - name: infra-guest
+    rules:
+      # Certificates. 30 days is "renew it this month", 7 days is "renew it
+      # today": Let's Encrypt renews at 30 days, so a certificate still inside
+      # 7 days means automated renewal is broken, not merely due.
+      - alert: CertificateExpiringSoon
+        expr: infra_guest_certificate_days_to_expiry < 30 >= 7
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.certificate }} on {{ $labels.device }} expires in {{ $value | printf \"%.0f\" }} days"
+          description: "Renewal is a Tier 1 change on the guest. The daily digest lists every certificate inside 30 days with its subject and issuer."
+
+      - alert: CertificateExpiringCritical
+        expr: infra_guest_certificate_days_to_expiry < 7
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.certificate }} on {{ $labels.device }} expires in {{ $value | printf \"%.1f\" }} days"
+          description: "Automatic renewal has not run (Let's Encrypt renews at 30 days). A negative value means the certificate has already expired and clients are failing now."
+
+      # Only services the guest is tagged with (`service:nginx` in the seed
+      # inventory) publish this gauge, so an untagged unit cannot page anybody
+      # and a tagged one that does not exist at all reports 0.
+      - alert: GuestServiceDown
+        expr: infra_guest_service_active == 0
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.service }} on {{ $labels.device }} is not running"
+          description: "The guest snapshot's tagged_services row says whether the unit is missing or merely stopped. A service tagged auto:restart is a Tier 0 restart candidate under cooldown."
+
+      - alert: GuestDiskFull
+        expr: infra_guest_disk_free_bytes / (infra_guest_disk_total_bytes > 0) < 0.10
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.mount }} on {{ $labels.device }} is below 10% free"
+          description: "Extending a guest disk is a Tier 1 change and a VM disk extend cannot be taken with a snapshot present (docs/risk-tiers.md)."
+
+      - alert: GuestDiskCriticallyFull
+        expr: infra_guest_disk_free_bytes / (infra_guest_disk_total_bytes > 0) < 0.03
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.mount }} on {{ $labels.device }} is below 3% free"
+          description: "Databases and journald stop writing before a filesystem is completely full."
+
+      # Patching is not urgent, being unpatched for a month is. `for: 30d`
+      # means the count has been above the threshold continuously for a month.
+      - alert: GuestUpdatesPending
+        expr: infra_guest_pending_updates > 20
+        for: 30d
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.device }} has had {{ $value }} pending updates for 30 days"
+          description: "Patching a guest is a Tier 1 change with a reboot window. The weekly report lists which packages."
+
+      # The collector's own freshness is the reachability signal: `collect()`
+      # raises when SSH or WinRM does not answer, so last_success stops moving.
+      - alert: GuestUnreachable
+        expr: time() - max by (device) (infra_collector_last_success_timestamp_seconds{collector="guest"}) > 3600
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: "The guest collector has not reached {{ $labels.device }} for an hour"
+          description: "Four consecutive 15-minute runs failed: the guest is down, the network to it is down, or its credential or host key changed. Check infra_collector_errors_total{collector=\"guest\"} for which."
+
+      - alert: GuestCollectorFailing
+        expr: increase(infra_collector_errors_total{collector="guest"}[3h]) > 5
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "The guest collector keeps failing against {{ $labels.device }}"
+          description: "The guest answers sometimes: a flapping SSH service, an expiring credential, or WinRM refusing the certificate."

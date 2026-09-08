@@ -35,11 +35,13 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 import networkx as nx
 
 from infra_agent.config import Settings, get_settings
+from infra_agent.correlate.guest import finalize_guest_layer, ingest_guest
 from infra_agent.correlate.model import (
     EdgeKind,
     Evidence,
@@ -230,6 +232,9 @@ class GraphBuilder:
                 "fortigate": self._ingest_fortigate,
                 "esxi": self._ingest_esxi,
                 "ilo": self._ingest_ilo,
+                # Phase 5: services, listeners, certificates and application
+                # dependencies (`infra_agent/correlate/guest.py`).
+                "guest": partial(ingest_guest, self),
             }.get(device.kind.platform)
             if handler is None:
                 continue
@@ -244,6 +249,9 @@ class GraphBuilder:
         self._resolve_l2()
         self._resolve_l3()
         self._resolve_storage()
+        # Phase 5: the application layer, once every VM, device and address
+        # exists (`infra_agent/correlate/guest.py`).
+        finalize_guest_layer(self)
         self.mark_mgmt_path()
         self.graph.g.graph["built_at"] = iso(self.now)
         self.graph.g.graph["parse_gaps"] = list(self.state.parse_gaps)

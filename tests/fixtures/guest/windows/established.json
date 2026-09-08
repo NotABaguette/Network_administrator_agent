@@ -1,0 +1,4 @@
+[{"LocalPort":49812,"RemoteAddress":"10.20.0.31","RemotePort":1433,"ProcessId":3300,"Process":"w3wp"},
+ {"LocalPort":49813,"RemoteAddress":"10.20.0.31","RemotePort":1433,"ProcessId":3300,"Process":"w3wp"},
+ {"LocalPort":443,"RemoteAddress":"10.10.10.50","RemotePort":51999,"ProcessId":4,"Process":"System"},
+ {"LocalPort":49900,"RemoteAddress":"198.51.100.7","RemotePort":443,"ProcessId":3300,"Process":"w3wp"}]

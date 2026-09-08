@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 def _load_collectors() -> None:
     # Import side effects register collectors.
-    from infra_agent.collectors import cisco, esxi, fortigate, ilo  # noqa: F401
+    from infra_agent.collectors import cisco, esxi, fortigate, guest, ilo  # noqa: F401
 
 
 def _context():

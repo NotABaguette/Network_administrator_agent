@@ -1,0 +1,7 @@
+  cron.service                    loaded active   running Regular background program processing daemon
+  dbus.service                    loaded active   running D-Bus System Message Bus
+* nginx.service                   loaded failed   failed  A high performance web server and a reverse proxy server
+  postgresql@14-main.service      loaded active   running PostgreSQL Cluster 14-main
+  ssh.service                     loaded active   running OpenBSD Secure Shell server
+  systemd-journald.service        loaded active   running Journal Service
+  unattended-upgrades.service     loaded inactive dead    Unattended Upgrades Shutdown
