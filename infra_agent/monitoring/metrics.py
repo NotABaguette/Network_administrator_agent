@@ -39,6 +39,24 @@ HEARTBEAT_LAST_OK = Gauge(
 )
 FROZEN = Gauge("infra_frozen", "1 when the break-glass freeze is active")
 
+# -- change engine (Phase 4) ------------------------------------------------
+CHANGE_EXECUTIONS = Counter(
+    "infra_change_executions_total",
+    "ChangePlan executions by risk tier and outcome "
+    "(done, rolled_back, rollback_failed, failed, blocked)",
+    ["tier", "outcome"],
+)
+CHANGE_ROLLBACKS = Counter(
+    "infra_change_rollbacks_total",
+    "Automatic rollbacks the change engine performed, by platform",
+    ["platform"],
+)
+UNAPPROVED_CONFIG_CHANGES = Counter(
+    "infra_unapproved_config_changes_total",
+    "Config-git commits that matched no ChangePlan executed on that device",
+    ["device"],
+)
+
 
 def start_metrics_server(port: int) -> None:
     start_http_server(port)

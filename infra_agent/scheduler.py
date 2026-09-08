@@ -68,11 +68,31 @@ def run_once(kinds: set[DeviceKind] | None = None, *, rebuild_graph: bool = True
             )
             if result.changes or result.config_commits:
                 changed += 1
+            _correlate_config_commits(device.name, result.config_commits)
         except Exception:
             log.exception("collector failed for %s", device.name)
     if rebuild_graph and changed:
         _rebuild_graph()
     return changed
+
+
+def _correlate_config_commits(device: str, commits: dict[str, str]) -> None:
+    """Phase 4 hook: a config commit that no executed ChangePlan explains is an
+    `UnapprovedConfigChange` - recorded, counted and paged by the change engine."""
+    if not commits:
+        return
+    try:
+        from infra_agent.change.engine import config_change_hook
+
+        for correlation in config_change_hook(device, commits):
+            if not correlation.matched:
+                log.warning(
+                    "unapproved config change on %s (%s)",
+                    device,
+                    correlation.commit_sha[:12],
+                )
+    except Exception:
+        log.exception("config change correlation failed for %s", device)
 
 
 def _rebuild_graph() -> None:
