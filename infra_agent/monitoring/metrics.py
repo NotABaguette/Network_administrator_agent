@@ -39,9 +39,72 @@ HEARTBEAT_LAST_OK = Gauge(
 )
 FROZEN = Gauge("infra_frozen", "1 when the break-glass freeze is active")
 
+# -- Disaster recovery (infra_agent/dr/) ------------------------------------
+# Set from `data_dir/dr-state.json` so any process - the CLI, the collectors,
+# the agent - publishes the same answer; a per-process gauge would report
+# "never exported" in every container but the one that ran the export.
+DR_LAST_EXPORT = Gauge(
+    "infra_dr_last_export_timestamp_seconds", "Unix time of the last successful DR export"
+)
+DR_LAST_VERIFY = Gauge(
+    "infra_dr_last_verify_timestamp_seconds", "Unix time of the last DR bundle verification"
+)
+DR_LAST_VERIFY_OK = Gauge(
+    "infra_dr_last_verify_ok", "1 when the last DR bundle verification passed, 0 when it failed"
+)
+DR_STANDBY_LAST_SYNC = Gauge(
+    "infra_dr_standby_last_sync_timestamp_seconds",
+    "Unix time of the last bundle successfully pushed to the standby target",
+)
+DR_BUNDLE_BYTES = Gauge("infra_dr_last_export_bytes", "Size of the last DR bundle")
+
+# -- VM backups (infra_agent/collectors/backups.py) -------------------------
+# The platform does not take VM backups (docs/architecture.md "Known gap"); it
+# watches whichever solution the owner chose. `schedule` carries the VM's
+# backup:daily / backup:weekly tag so one gauge serves both alert thresholds.
+BACKUP_LAST_SUCCESS = Gauge(
+    "infra_backup_last_success_timestamp_seconds",
+    "Unix time of the last successful backup of a VM",
+    ["device", "vm", "schedule"],
+)
+BACKUP_LAST_SIZE_BYTES = Gauge(
+    "infra_backup_last_size_bytes", "Size of the newest restore point of a VM", ["device", "vm"]
+)
+BACKUP_RESTORE_POINTS = Gauge(
+    "infra_backup_restore_points", "Restore points retained for a VM", ["device", "vm"]
+)
+BACKUP_JOB_LAST_RUN = Gauge(
+    "infra_backup_job_last_run_timestamp_seconds",
+    "Unix time the backup job last ran on this host",
+    ["device"],
+)
+BACKUP_JOB_OK = Gauge(
+    "infra_backup_job_ok",
+    "1 when the last backup job run reported success for every VM it touched",
+    ["device"],
+)
+
 
 def start_metrics_server(port: int) -> None:
     start_http_server(port)
+    _arm_dr_gauges()
+
+
+def _arm_dr_gauges() -> None:
+    """Point the DR gauges at `data_dir/dr-state.json`.
+
+    Every container that serves /metrics answers the same way about the last
+    export and the last verification, whichever one of them actually ran it.
+    Imported lazily: `infra_agent.dr.state` imports this module.
+    """
+    try:
+        from infra_agent.dr.state import arm_metrics
+
+        arm_metrics()
+    except Exception:  # noqa: BLE001 - metrics must never stop a service starting
+        import logging
+
+        logging.getLogger(__name__).warning("could not arm the DR gauges", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

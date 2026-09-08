@@ -63,6 +63,36 @@ class Settings(BaseSettings):
     # Metrics
     metrics_port: int = 9101
 
+    # Disaster recovery (infra_agent/dr/, docs/runbooks/dr-mgmt-01.md)
+    dr_target: str | None = Field(
+        default=None,
+        description="Where `infra dr export` ships bundles: a local directory, "
+        "ssh://user@host/path or user@host:/path. SSH targets must use key auth "
+        "(BatchMode); a password in this string would be a secret in a setting",
+    )
+    dr_retention_days: int = Field(
+        default=14, ge=1, description="Bundles older than this are pruned, except the newest one"
+    )
+    dr_grafana_url: str | None = Field(
+        default=None,
+        description="Grafana base URL for the dashboard export; the API token lives in "
+        "secrets/platform.enc.yaml under grafana_api_token",
+    )
+    dr_postgres_databases: list[str] = Field(
+        default_factory=lambda: ["infra", "netbox"],
+        description="Databases pg_dump'ed into the bundle",
+    )
+    dr_backup_root: str = Field(
+        default="/vmfs/volumes/backup",
+        description="Default path on an ESXi host holding ghettoVCB output; a device tag "
+        "`backup-root:<path>` overrides it per host",
+    )
+    dr_backup_status_dir: Path | None = Field(
+        default=None,
+        description="Local directory where agent-based guest backups publish "
+        "status.json (see docs/runbooks/dr-mgmt-01.md)",
+    )
+
     @property
     def config_repo(self) -> Path:
         return self.config_repo_dir or (self.data_dir / "configs")
@@ -78,6 +108,15 @@ class Settings(BaseSettings):
     @property
     def audit_log(self) -> Path:
         return self.egress_audit_log or (self.data_dir / "egress-audit.jsonl")
+
+    @property
+    def dr_dir(self) -> Path:
+        """Where DR bundles are built and kept locally before they are pushed."""
+        return self.data_dir / "dr"
+
+    @property
+    def dr_state_file(self) -> Path:
+        return self.data_dir / "dr-state.json"
 
 
 @lru_cache

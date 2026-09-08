@@ -562,6 +562,7 @@ class Duties:
             "pending_approvals": self.pending_approvals(),
             "drift": self.drift(),
             "datastore_forecast": self.datastore_forecast(),
+            "platform_health": self.platform_health(),
         }
 
     def daily_digest(self) -> AgentRunResult:
@@ -592,6 +593,68 @@ class Duties:
         return self._run(
             FIRMWARE_TASK, "firmware_inventory", self.firmware_context(), "Firmware inventory"
         )
+
+    # -- disaster recovery --------------------------------------------------
+    def platform_health(self) -> dict[str, Any]:
+        """Can this platform still recover? Structured, secret-free, local-only.
+
+        Carried in the daily digest so a degraded administrator is noticed on
+        an ordinary morning rather than on the morning it matters.
+        """
+        try:
+            from infra_agent.dr.health import health_report
+
+            return health_report(self.settings, now=self._now()).llm_view()
+        except Exception as exc:
+            log.exception("platform health report failed")
+            return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    def dr_export(self) -> dict[str, Any]:
+        """Nightly: ship the platform state to the standby and prune by retention.
+
+        Runs even when the platform is frozen. A freeze stops changes to the
+        estate; an export changes nothing and is worth most precisely when
+        somebody has just pulled the handle.
+        """
+        from infra_agent.dr.errors import DRError
+        from infra_agent.dr.export import export_bundle
+
+        if not self.settings.dr_target:
+            log.info("no INFRA_DR_TARGET configured; skipping the nightly DR export")
+            return {"ok": False, "skipped": "INFRA_DR_TARGET is not set"}
+        try:
+            result = export_bundle(self.settings, now=self._now())
+        except DRError as exc:
+            log.error("DR export failed: %s", exc)
+            self.notifier.send(f"DR export failed: {exc}", critical=True)
+            return {"ok": False, "error": str(exc)}
+        summary = result.summary()
+        if not result.ok:
+            self.notifier.send(
+                f"DR export incomplete ({result.bundle.name}): {'; '.join(result.warnings)}",
+                critical=False,
+            )
+        return {"ok": result.ok, **summary}
+
+    def dr_verify(self) -> dict[str, Any]:
+        """Weekly: verify the newest local bundle and tell the owner either way.
+
+        A backup nobody restored is a rumour, so the schedule proves it once a
+        week and the quarterly restore test (docs/runbooks/restore-test.md)
+        proves it the whole way into a scratch VM.
+        """
+        from infra_agent.dr.transfer import newest_bundle
+        from infra_agent.dr.verify import verify_and_record
+
+        bundle = newest_bundle(self.settings.dr_dir)
+        if bundle is None:
+            message = f"no DR bundle in {self.settings.dr_dir}; nothing to verify"
+            log.warning(message)
+            self.notifier.send(message, critical=True)
+            return {"ok": False, "error": message}
+        report = verify_and_record(bundle, self.settings, now=self._now())
+        self.notifier.send(report.headline(), critical=not report.ok)
+        return report.llm_view()
 
     def heartbeat(self) -> bool:
         """Dead-man ping. No model involved: this must work when everything else does not."""
@@ -640,6 +703,12 @@ class Duties:
             id="firmware-inventory",
         )
         scheduler.add_job(self.heartbeat, "interval", minutes=5, id="heartbeat")
+        # Disaster recovery: export in the quiet hours, verify before the week
+        # starts so a failed bundle has a working day to be fixed in.
+        scheduler.add_job(self.dr_export, "cron", hour=2, minute=15, id="dr-export")
+        scheduler.add_job(
+            self.dr_verify, "cron", day_of_week="sat", hour=5, minute=0, id="dr-verify"
+        )
         return scheduler
 
 
