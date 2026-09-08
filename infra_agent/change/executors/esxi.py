@@ -777,6 +777,7 @@ class SshTransport:
         that directory the moment it exists, so a clone that dies half way
         through the disk copy still has something to clean up.
         """
+        name = safe_name(name, "VM name")
         source_vmx = host_path(template.get("vmx"))
         if not source_vmx:
             raise EsxiError(f"no .vmx path for template {template.get('name')}")
@@ -1252,6 +1253,7 @@ class PyvmomiTransport:
         something the rollback can remove.
         """
         vim = self.vim()
+        name = safe_name(name, "VM name")
         source_vmx = template.get("vmx")
         disks = template.get("disks") or []
         source_vmdk = (disks[0] or {}).get("path") if disks else None
@@ -2237,8 +2239,7 @@ class EsxiExecutor(Executor):
                 undo.update(self._power_off_for_rollback(ctx, vm, transport, timeout))
             else:
                 raise EsxiError(f"no power state was recorded to go back to (was {wanted!r})")
-        except EsxiError as exc:
-            # The inverse failed; the snapshot is what is left.
+        except Exception as exc:  # noqa: BLE001 - any failure falls back to the snapshot
             undo["inverse_failed"] = short_error(exc)
             undo.update(self._revert_to_pre_snapshot(ctx, result, transport))
             return undo
