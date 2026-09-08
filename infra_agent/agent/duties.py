@@ -25,6 +25,7 @@ from infra_agent.agent.notify import LogNotifier, Notifier
 from infra_agent.agent.runner import AgentRunner, AgentRunResult
 from infra_agent.change.plan import ChangePlan, ChangeState
 from infra_agent.change.store import PlanStore
+from infra_agent.collectors.guest import CERT_EXPIRY_WARN_DAYS
 from infra_agent.config import Settings, get_settings
 from infra_agent.configstore.git_store import ConfigGitStore
 from infra_agent.models.common import SeedDevice, SeedInventory
@@ -38,9 +39,8 @@ KNOWN_GOOD_VERSIONS = Path(__file__).with_name("known_good_versions.yaml")
 STALE_SNAPSHOT_SECONDS = 3600
 DATASTORE_WARN_DAYS = 30
 DATASTORE_WARN_PERCENT = 15.0
-#: Certificates inside this many days go in the digest. Kept in the guest
-#: collector so the duty, the gauge and the alert rule share one threshold.
-CERT_EXPIRY_WARN_DAYS = 30
+#: The certificate threshold is the guest collector's own (CERT_EXPIRY_WARN_DAYS
+#: above), so the digest, the gauge and the alert rule cannot drift apart.
 
 #: Collector health has to come from Prometheus, not from this process's own
 #: registry: `run_collector` sets these gauges inside the `infra-collectors`

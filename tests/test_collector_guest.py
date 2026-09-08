@@ -736,8 +736,14 @@ def test_guest_rules_are_valid_and_reference_real_metrics():
 
 
 def test_certificate_alerts_fire_at_thirty_and_seven_days():
+    """The alert, the gauge and the daily digest share one threshold."""
+    from infra_agent.agent.duties import CERT_EXPIRY_WARN_DAYS as duty_threshold
+    from infra_agent.collectors.guest import CERT_EXPIRY_WARN_DAYS
+
     document = yaml.safe_load((RULES / "guest.yaml").read_text())
     rules = {rule["alert"]: rule for rule in document["groups"][0]["rules"]}
+    assert duty_threshold == CERT_EXPIRY_WARN_DAYS == 30
+    assert f"< {CERT_EXPIRY_WARN_DAYS}" in rules["CertificateExpiringSoon"]["expr"]
     assert "< 30" in rules["CertificateExpiringSoon"]["expr"]
     assert "< 7" in rules["CertificateExpiringCritical"]["expr"]
     assert "guest" in rules["GuestUnreachable"]["expr"]
