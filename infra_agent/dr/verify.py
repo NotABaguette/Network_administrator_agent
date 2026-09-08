@@ -140,7 +140,7 @@ def verify(
         report.created_at = manifest.created_at
         report.host = manifest.host
         report.tool_version = manifest.tool_version
-        report.incomplete_components = [c.name for c in manifest.components if not c.ok]
+        report.incomplete_components = [c.name for c in manifest.components if c.failed]
 
         report.checks.append(_check_files(root, manifest))
         report.checks.append(_check_plans_db(root))
@@ -320,6 +320,11 @@ def _check_graph(root: Path) -> CheckResult:
 def _check_postgres(root: Path, manifest: Manifest) -> CheckResult:
     component = manifest.component("postgres")
     dumps = sorted((root / POSTGRES_DIR).glob("*.dump")) if (root / POSTGRES_DIR).exists() else []
+    if component is not None and component.skipped:
+        # Nothing was asked of Postgres, so nothing is missing. Verify checks
+        # that a bundle matches what the export set out to make; whether the
+        # owner should be running Postgres at all is `infra dr health`'s answer.
+        return CheckResult(name="postgres", ok=True, detail=component.detail)
     if not dumps:
         detail = component.detail if component else "no postgres/ directory in the bundle"
         return CheckResult(name="postgres", ok=False, detail=f"no database dumps ({detail})")

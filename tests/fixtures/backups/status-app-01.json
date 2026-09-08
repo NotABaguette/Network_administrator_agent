@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "host": "app-01",
+  "tool": "restic",
+  "schedule": "daily",
+  "status": "ok",
+  "last_success": "2026-09-07T02:14:03Z",
+  "last_attempt": "2026-09-07T02:14:03Z",
+  "size_bytes": 51234567890,
+  "snapshots": 42,
+  "error": null,
+  "repository": "sftp://backup:hunter2@nas.example.net/srv/backups/app-01",
+  "password_file": "/root/.restic-password",
+  "env": { "RESTIC_PASSWORD": "correct-horse-battery-staple" }
+}

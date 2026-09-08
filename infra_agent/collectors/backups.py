@@ -340,8 +340,13 @@ class BackupsCollector(Collector):
         else:
             run = self.runner(device, cred)
             data["job"] = self._job(run, root, data["errors"])
-            _merge(rows, self._from_logs(data["job"]))
+            # Order matters: what is on disk is the evidence a restore would
+            # use, and the log is the authority on top of it. A restore-point
+            # directory is named for the moment the run STARTED, so letting it
+            # win would move every success time back by however long the copy
+            # took - and would report a success for a VM whose copy then failed.
             _merge(rows, self._from_datastore(run, root, data["errors"]))
+            _merge(rows, self._from_logs(data["job"]))
             _merge(rows, self._remote_agent_status(run, root, data["errors"]))
             if data["job"] or rows:
                 data["sources"].append("ghettovcb")

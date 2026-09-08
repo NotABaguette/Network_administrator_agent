@@ -26,6 +26,15 @@ payload the model can read. Every byte sent to the Claude API goes through one
 redaction gateway that strips secrets and refuses raw configs. One environment
 flag (`INFRA_FROZEN=1`) freezes all automation and makes the agent read-only.
 
+## Status
+
+Phases 0-6 are implemented: collectors and the observed-state store, NetBox
+reconciliation and the topology graph, the redaction gateway and the read-only
+AI layer, the change engine with native executors and human-only approval, the
+guest and application layer, and the platform's own disaster recovery. The
+acceptance criteria in [`docs/roadmap.md`](docs/roadmap.md) are exercises
+against real hardware and are the owner's to run.
+
 ## Getting started (Phase 0)
 
 ```bash
@@ -52,6 +61,30 @@ Secrets are prompted locally and written straight into `secrets/*.enc.yaml`
 | `inventory/` | `seed.yaml`: devices onboarded before NetBox exists (gitignored; example provided) |
 | `secrets/` | SOPS-encrypted secrets only; plaintext is gitignored |
 | `tests/` | Unit tests on recorded fixtures |
+
+`deploy/standby/` is the cold standby on a second host and its failover and
+failback scripts; `deploy/oob/` is the out-of-band mini-box that watches the
+platform from outside it.
+
+## Recovering the platform itself
+
+The estate has backups because this platform watches them; the platform has
+one because of [`infra_agent/dr/`](infra_agent/dr/).
+
+```bash
+infra dr health                                    # could this platform recover right now?
+infra dr export --to ssh://infra@standby/srv/infra-dr
+infra dr verify                                    # prove the newest bundle restores
+infra dr import <bundle>                           # onto empty ground; leaves it FROZEN
+```
+
+A nightly duty ships a dated, checksummed bundle to a cold standby on a second
+ESXi host and a weekly one verifies it. `deploy/.env` and the age private key
+are deliberately not in the bundle; the manifest says why. The runbooks are
+[`docs/runbooks/dr-mgmt-01.md`](docs/runbooks/dr-mgmt-01.md),
+[`restore-test.md`](docs/runbooks/restore-test.md),
+[`oob-box.md`](docs/runbooks/oob-box.md) and
+[`freeze.md`](docs/runbooks/freeze.md).
 
 ## Development
 

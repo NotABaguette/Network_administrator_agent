@@ -1,0 +1,75 @@
+# Out-of-band Prometheus. One job per thing that must still be visible when
+# mgmt-01 is not: the ISP gateways, the firewall, every switch, every ESXi host
+# and iLO, and mgmt-01 itself.
+#
+# Targets live in ./targets/*.json so the file can be edited without touching
+# this config, and so the same file shape as the main stack
+# (deploy/prometheus/targets/) can be copied across.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    vantage: oob
+
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"] }]
+
+  # This box's own heartbeat container, so the main side can alert on it going
+  # quiet and so a silence here is visible locally too.
+  - job_name: oob-heartbeat
+    metrics_path: /heartbeat.prom
+    static_configs: [{ targets: ["heartbeat-metrics:9105"] }]
+
+  # Everything on the management VLAN, from the management leg.
+  - job_name: blackbox-icmp
+    metrics_path: /probe
+    params: { module: [icmp] }
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/icmp.json"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # mgmt-01's own health endpoint and the management web UIs. `up` on this job
+  # going to 0 while the switches still answer ICMP is the signature of
+  # "mgmt-01 is down", which is a different incident from "the site is down".
+  - job_name: blackbox-https
+    metrics_path: /probe
+    params: { module: [https_2xx] }
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/https.json"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # The ISP gateways, from the WAN leg. Separate job so the alert can say
+  # "the uplink is down" rather than "something is unreachable".
+  - job_name: blackbox-wan
+    metrics_path: /probe
+    params: { module: [icmp] }
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/wan.json"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

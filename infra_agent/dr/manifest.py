@@ -85,11 +85,21 @@ class FileEntry(BaseModel):
 
 
 class ComponentStatus(BaseModel):
-    """Whether one part of the export produced anything, and why not if not."""
+    """Whether one part of the export produced anything, and why not if not.
+
+    `skipped` separates "this platform does not have one" from "this platform
+    has one and it did not answer". Grafana that was never configured is not a
+    broken backup; Grafana that timed out is.
+    """
 
     name: str
     ok: bool
     detail: str = ""
+    skipped: bool = False
+
+    @property
+    def failed(self) -> bool:
+        return not self.ok and not self.skipped
 
 
 class Manifest(BaseModel):

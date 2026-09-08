@@ -1,0 +1,103 @@
+# Disaster recovery and backup monitoring.
+#
+# The DR gauges are served by every container that exposes /metrics and are all
+# read from `data_dir/dr-state.json` at scrape time
+# (`infra_agent/dr/state.py:arm_metrics`), so the expressions aggregate over
+# instances: there is one DR state for the platform, not one per container, and
+# `max()` keeps a restarting container from firing a second copy of the alert.
+#
+# A timestamp that has never been recorded reads as 0, so `time() - <gauge>` is
+# enormous and the staleness alerts fire on "never" as well as on "not lately".
+# `infra_dr_last_verify_ok` is the exception: it reads 1 until a verification
+# has actually failed, so DRVerifyFailed means a failure and DRVerifyStale
+# means nobody has checked.
+groups:
+  - name: infra-dr
+    rules:
+      - alert: DRExportStale
+        expr: time() - max(infra_dr_last_export_timestamp_seconds) > 36 * 3600
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: "No DR export of mgmt-01 in more than 36 hours"
+          description: "The nightly `infra dr export` duty has not produced a bundle since the last two windows. Run `infra dr export` by hand and read `infra dr health`; if mgmt-01 dies now, the estate is rebuilt from the switches' own configs and the owner's memory. Runbook: docs/runbooks/dr-mgmt-01.md."
+
+      - alert: DRVerifyFailed
+        expr: min(infra_dr_last_verify_ok) == 0
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: "The last DR bundle failed verification"
+          description: "A bundle exists but does not restore: run `infra dr verify --json` for the failing check. Until it passes, treat the platform as having no backup. A checksum mismatch means the bundle was altered after the export - suspect the standby before suspecting the code."
+
+      - alert: DRVerifyStale
+        expr: time() - max(infra_dr_last_verify_timestamp_seconds) > 14 * 24 * 3600
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "No DR bundle has been verified in two weeks"
+          description: "The weekly verify duty has not run or has not recorded a result. A backup nobody restored is a rumour."
+
+      - alert: StandbyStale
+        expr: |
+          (time() - max(infra_dr_standby_last_sync_timestamp_seconds) > 36 * 3600)
+          and (max(infra_dr_last_export_timestamp_seconds) > 0)
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: "The standby has not received a bundle in more than 36 hours"
+          description: "Exports are being produced but not landing on the standby: the SSH key, the standby VM or the link between them. A local bundle on a host that has just died is not a backup. Check `ssh -o BatchMode=yes <INFRA_DR_TARGET host> true` from mgmt-01."
+
+      # -- VM backups (infra_agent/collectors/backups.py) --------------------
+      # The platform does not take VM backups (docs/architecture.md, "Known
+      # gap"); it watches whichever solution the owner chose. Only VMs the
+      # owner tagged are alerted on: `backup:daily`, `backup:weekly`, or
+      # nothing, because guessing that every VM needs a nightly backup produces
+      # an alert nobody can act on.
+      - alert: BackupMissing
+        expr: time() - infra_backup_last_success_timestamp_seconds{schedule="daily"} > 26 * 3600
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.vm }} has no successful backup in the last 26 hours"
+          description: "Tagged backup:daily on {{ $labels.device }}. Read the newest ghettoVCB log named in the backups snapshot: a failed snapshot usually means the datastore is full or the VM already carries one."
+
+      - alert: BackupMissingWeekly
+        expr: time() - infra_backup_last_success_timestamp_seconds{schedule="weekly"} > 8 * 24 * 3600
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.vm }} has no successful backup in the last 8 days"
+          description: "Tagged backup:weekly on {{ $labels.device }}."
+
+      - alert: BackupJobMissing
+        expr: time() - infra_backup_job_last_run_timestamp_seconds > 26 * 3600
+        for: 30m
+        labels: { severity: critical }
+        annotations:
+          summary: "The backup job on {{ $labels.device }} has not run in 26 hours"
+          description: "Not one VM failed - the whole run is missing. Check the cron entry on the host and that the backup datastore is still mounted; a job that cannot write its log looks exactly like a job that was never scheduled."
+
+      - alert: BackupJobFailed
+        expr: infra_backup_job_ok == 0
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "The last backup run on {{ $labels.device }} reported failures"
+          description: "The run happened and some VMs did not make it. The per-VM detail is in the newest `backups` snapshot for this host."
+
+      # -- Out-of-band box (deploy/oob/, docs/runbooks/oob-box.md) -----------
+      # The OOB box pings the same dead-man service as mgmt-01, but only while
+      # it can see the WAN itself, so a silence here means the OOB box is down
+      # or the site is dark - which is exactly when nothing else can tell you.
+      # This needs a scrape job for the OOB heartbeat exporter in
+      # deploy/prometheus/prometheus.yml; docs/runbooks/oob-box.md has it.
+      - alert: OOBHeartbeatMissing
+        expr: |
+          (time() - max(infra_oob_heartbeat_last_ok_timestamp_seconds) > 1800)
+          or absent(infra_oob_heartbeat_last_ok_timestamp_seconds)
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: "The out-of-band box has not reported a WAN-visible heartbeat in 30 minutes"
+          description: "Either the OOB box is down or it cannot see the WAN. Until it is back, no Tier 2 change on the edge may be enabled (docs/risk-tiers.md): the OOB box is what gets the owner back in after a FortiGate change locks everyone out."

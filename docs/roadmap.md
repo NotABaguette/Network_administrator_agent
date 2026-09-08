@@ -13,7 +13,22 @@ then understanding (inventory, graph), then delegation (agent, changes).
 | 5 Guest and application layer | Guest collectors, node/windows exporters, application dependency edges, certificate-expiry duty |
 | 6 Hardening and DR | Standby mgmt-01 failover rehearsed, DR runbook, restore test, backup solution monitored |
 
+## Status
+
+Phases 0-6 are implemented. What remains is the part only the estate can
+supply: the acceptance criteria above are exercises against real hardware, and
+none of them counts until it has been run there. In particular Phase 6 ships
+the mechanism (`infra dr export|verify|import|health`, `deploy/standby/`,
+`deploy/oob/`) but a failover that has never been rehearsed is a document, not
+a capability - see [`runbooks/restore-test.md`](runbooks/restore-test.md).
+
+Tier 0 actions stay in shadow mode (`INFRA_TIER0_SHADOW_MODE=1`) and are
+enabled one at a time, and no Tier 2 edge change may be enabled until the
+out-of-band box is built and reporting
+([`runbooks/oob-box.md`](runbooks/oob-box.md)).
+
 ## Open items to confirm in Phase 0
 - ESXi license type per host; whether Essentials is on the table for backups.
 - Exact Catalyst models/IOS versions and iLO generation per host.
-- Hardware for the OOB mini-box.
+- Hardware for the OOB mini-box: any x86 mini PC or a Pi 4+ with two NICs
+  ([`runbooks/oob-box.md`](runbooks/oob-box.md) has the options and the cabling).

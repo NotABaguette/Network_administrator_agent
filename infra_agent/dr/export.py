@@ -71,8 +71,14 @@ class ExportResult:
 
     @property
     def ok(self) -> bool:
-        """True when every component of the bundle was produced."""
-        return all(component.ok for component in self.components)
+        """True when nothing this platform actually has failed to be exported.
+
+        A component that is not configured at all - no Grafana, no Postgres -
+        is reported, not counted as a failure: a nightly duty that pages the
+        owner about a service they deliberately do not run is a duty they turn
+        off, and then it is not there on the night it matters.
+        """
+        return not any(component.failed for component in self.components)
 
     def summary(self) -> dict[str, object]:
         """Secret-free description for the owner and for the digest."""
@@ -82,7 +88,8 @@ class ExportResult:
             "created_at": self.manifest.created_at.isoformat(),
             "files": len(self.manifest.files),
             "components": {c.name: c.ok for c in self.components},
-            "incomplete": [c.name for c in self.components if not c.ok],
+            "incomplete": [c.name for c in self.components if c.failed],
+            "not_configured": [c.name for c in self.components if c.skipped],
             "pushed_to": self.pushed_to,
             "pruned": self.pruned,
             "warnings": self.warnings,
@@ -156,6 +163,7 @@ def _postgres(settings: Settings, dest: Path, dumper: PgDumper) -> ComponentStat
         return ComponentStatus(
             name="postgres",
             ok=False,
+            skipped=True,
             detail="INFRA_POSTGRES_DSN is not set; nothing to dump",
         )
     dest.mkdir(parents=True, exist_ok=True)
@@ -180,7 +188,10 @@ def _postgres(settings: Settings, dest: Path, dumper: PgDumper) -> ComponentStat
 def _grafana(dest: Path, exporter: GrafanaExporter | None) -> ComponentStatus:
     if exporter is None:
         return ComponentStatus(
-            name="grafana", ok=False, detail="INFRA_DR_GRAFANA_URL is not set; dashboards skipped"
+            name="grafana",
+            ok=False,
+            skipped=True,
+            detail="INFRA_DR_GRAFANA_URL is not set; dashboards skipped",
         )
     try:
         dashboards = exporter()
@@ -246,7 +257,7 @@ def build_bundle(
 
     checksum = bundle.with_name(bundle.name + CHECKSUM_SUFFIX)
     checksum.write_text(f"{sha256_file(bundle)}  {bundle.name}\n")
-    warnings = [f"{c.name}: {c.detail}" for c in manifest.components if not c.ok]
+    warnings = [f"{c.name}: {c.detail}" for c in manifest.components if c.failed]
     for warning in warnings:
         log.warning("DR export incomplete - %s", warning)
     return ExportResult(

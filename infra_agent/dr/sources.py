@@ -135,7 +135,7 @@ class HttpGrafanaExporter:
         try:
             search = requests.get(
                 f"{self.url}/api/search",
-                params={"type": "dash-db", "limit": 500},
+                params={"type": "dash-db", "limit": "500"},
                 headers=self._headers(),
                 timeout=self.timeout,
             )

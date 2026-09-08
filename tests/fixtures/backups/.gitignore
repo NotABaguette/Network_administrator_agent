@@ -1,0 +1,4 @@
+# The root .gitignore drops *.log, which is right everywhere except here: these
+# are recorded ghettoVCB output that the backup collector's parser is tested
+# against, and a fixture that is not in the repository is not a fixture.
+!*.log

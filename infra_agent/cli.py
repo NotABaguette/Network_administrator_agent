@@ -475,14 +475,21 @@ def dr_health(
 
 
 @dr_app.command("list")
-def dr_list() -> None:
-    """Local bundles, newest first."""
+def dr_list(
+    directory: str | None = typer.Argument(
+        None, help="where to look (default: the local keep directory, data_dir/dr)"
+    ),
+) -> None:
+    """Bundles in a directory, newest first."""
+    from pathlib import Path as _Path
+
     from infra_agent.dr.transfer import local_bundles
 
     settings = _dr_settings()
-    found = local_bundles(settings.dr_dir)
+    where = _Path(directory) if directory else settings.dr_dir
+    found = local_bundles(where)
     if not found:
-        console.print(f"[yellow]no bundles[/] in {settings.dr_dir}")
+        console.print(f"[yellow]no bundles[/] in {where}")
         return
     from rich.table import Table
 
