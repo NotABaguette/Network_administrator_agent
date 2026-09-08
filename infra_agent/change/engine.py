@@ -430,7 +430,9 @@ class ChangeEngine:
             if getattr(report, "found", True) is False:
                 unresolved.append(target)
                 continue
-            summaries.append(getattr(report, "summary", report))
+            summary = getattr(report, "summary", report)
+            if isinstance(summary, ImpactSummary):
+                summaries.append(summary)
         merged = _merge_summaries(summaries)
         tier, reasons = compute_tier(plan.action, merged)
         if unresolved:
@@ -1135,7 +1137,7 @@ class ChangeEngine:
     def unapproved_changes(
         self, device: str | None = None, *, limit: int = 50
     ) -> list[UnapprovedConfigChange]:
-        return self.plans.unapproved_changes(device, limit=limit)
+        return list(self.plans.unapproved_changes(device, limit=limit))
 
 
 # -- helpers -----------------------------------------------------------------

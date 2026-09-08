@@ -14,6 +14,7 @@ approval token or a Tier 2 confirmation phrase.
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import hmac
 import json
@@ -274,7 +275,7 @@ class PlanStore:
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int = 100,
-    ) -> list[ExecutionRecord]:
+    ) -> builtins.list[ExecutionRecord]:
         """Execution records, newest first. `device` is matched in Python because
         a record names every device it touched."""
         query = "SELECT body FROM executions"
@@ -324,7 +325,7 @@ class PlanStore:
 
     def unapproved_changes(
         self, device: str | None = None, *, limit: int = 100
-    ) -> list[UnapprovedConfigChange]:
+    ) -> builtins.list[UnapprovedConfigChange]:
         query = "SELECT body FROM unapproved_changes"
         params: list[Any] = []
         if device is not None:
