@@ -41,7 +41,7 @@ from typing import Any
 import networkx as nx
 
 from infra_agent.config import Settings, get_settings
-from infra_agent.correlate.guest import ingest_guest
+from infra_agent.correlate.guest import finalize_guest_layer, ingest_guest
 from infra_agent.correlate.model import (
     EdgeKind,
     Evidence,
@@ -249,6 +249,9 @@ class GraphBuilder:
         self._resolve_l2()
         self._resolve_l3()
         self._resolve_storage()
+        # Phase 5: the application layer, once every VM, device and address
+        # exists (`infra_agent/correlate/guest.py`).
+        finalize_guest_layer(self)
         self.mark_mgmt_path()
         self.graph.g.graph["built_at"] = iso(self.now)
         self.graph.g.graph["parse_gaps"] = list(self.state.parse_gaps)

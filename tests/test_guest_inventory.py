@@ -82,9 +82,20 @@ ESXI_VMS: list[dict[str, Any]] = [
 ]
 
 
-def estate(tmp_path: Path, devices: list[SeedDevice] | None = None) -> tuple[Any, SeedInventory]:
+def estate(
+    tmp_path: Path,
+    devices: list[SeedDevice] | None = None,
+    vms: list[dict[str, Any]] | None = None,
+) -> tuple[Any, SeedInventory]:
     store = FileSnapshotStore(tmp_path / "snapshots")
-    store.save(Snapshot(device="esx-01", collector="esxi", taken_at=NOW, data={"vms": ESXI_VMS}))
+    store.save(
+        Snapshot(
+            device="esx-01",
+            collector="esxi",
+            taken_at=NOW,
+            data={"vms": ESXI_VMS if vms is None else vms},
+        )
+    )
     inventory = SeedInventory(
         devices=devices
         if devices is not None
@@ -438,3 +449,110 @@ def test_seed_guests_says_what_to_do_when_nothing_is_tagged(tmp_path: Path, monk
         assert "guest:linux" in result.stdout
     finally:
         get_settings.cache_clear()
+
+
+def test_annotation_tags_keep_the_case_of_the_value_and_normalise_the_key():
+    """`vm:Web-01` has to match a graph node id, and a Windows service really
+    is called `MSSQLSERVER`; only the key is a keyword."""
+    tags = annotation_tags("Guest:Windows VM:Web-01 Service:MSSQLSERVER auto:restart")
+
+    assert tags == ["auto:restart", "guest:Windows", "service:MSSQLSERVER", "vm:Web-01"]
+    assert guest_kind(tags) is DeviceKind.guest_windows
+
+
+def test_a_mixed_case_guest_tag_is_not_copied_onto_the_seed_device(tmp_path: Path):
+    store, inventory = estate(
+        tmp_path,
+        vms=[
+            {
+                "name": "Web-01",
+                "power_state": "poweredOn",
+                "annotation": "Guest:linux Service:Nginx",
+                "guest_ips": ["10.20.0.77"],
+            }
+        ],
+    )
+    (candidate,) = guest_candidates(store, inventory)
+
+    assert candidate.kind is DeviceKind.guest_linux
+    assert candidate.tags == ["service:Nginx"]
+    assert seed_device_for(candidate).tags == ["host:esx-01", "service:Nginx", "vm:Web-01"]
+
+
+def test_the_windows_playbook_is_idempotent_and_pins_the_scraper():
+    """A second run must not fail because Windows cleared C:\\Windows\\Temp, and
+    the exporter port must not be open to the whole estate."""
+    root = Path(__file__).resolve().parents[1] / "ansible"
+    play = yaml.safe_load((root / "playbooks" / "windows_exporter.yml").read_text())[0]
+    tasks = {task["name"]: task for task in play["tasks"]}
+
+    install = tasks["Install windows_exporter"]
+    assert "existing.exists" in install["when"]
+    firewall = tasks["Allow the scrape from mgmt-01 only"]
+    assert firewall["community.windows.win_firewall_rule"]["remoteip"] == "{{ prometheus_address }}"
+    assert "default('any')" not in yaml.safe_dump(play)
+    assert any(
+        "assert" in str(task) and "prometheus_address" in str(task) for task in play["tasks"]
+    )
+
+
+def test_add_device_asks_for_the_api_password_even_with_an_ssh_key(cli_estate: Path, monkeypatch):
+    """`--ssh-key` is what the ESXi host-config backup needs, but the ESXi
+    collector still logs into hostd with the password: prompting for a key
+    passphrase there would leave the API credential empty."""
+    prompts: list[str] = []
+    monkeypatch.setattr("infra_agent.onboarding.cli.SecretsStore", FakeSecrets)
+    monkeypatch.setattr(
+        "infra_agent.onboarding.cli.getpass",
+        lambda prompt="": prompts.append(prompt) or "api-password",
+    )
+    FakeSecrets.stored.clear()
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "add-device",
+            "esxi",
+            "10.10.10.21",
+            "--name",
+            "esx-01",
+            "--ssh-key",
+            "/home/infra/.ssh/infra-agent",
+            "--skip-probe",
+        ],
+        input="infra-ro\n",
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert prompts == ["password: "]
+    assert FakeSecrets.stored["devices/esx-01"]["password"] == "api-password"
+    assert FakeSecrets.stored["devices/esx-01"]["ssh_key_path"] == "/home/infra/.ssh/infra-agent"
+
+
+def test_add_device_still_calls_it_a_passphrase_for_a_guest(cli_estate: Path, monkeypatch):
+    prompts: list[str] = []
+    monkeypatch.setattr("infra_agent.onboarding.cli.SecretsStore", FakeSecrets)
+    monkeypatch.setattr(
+        "infra_agent.onboarding.cli.getpass", lambda prompt="": prompts.append(prompt) or ""
+    )
+    FakeSecrets.stored.clear()
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "add-device",
+            "guest_linux",
+            "10.20.0.11",
+            "--name",
+            "web-01",
+            "--ssh-key",
+            "/home/infra/.ssh/infra-agent",
+            "--skip-probe",
+        ],
+        input="infra-ro\n",
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert prompts == ["key passphrase (blank if the key has none): "]

@@ -138,25 +138,33 @@ GUESTS: list[tuple[str, DeviceKind, str, list[str]]] = [
 ]
 
 
-def build_estate(tmp_path: Path, *, guests: list[str] | None = None) -> TopologyGraph:
-    """The estate graph with the named guests onboarded (all of them by default)."""
+def build_estate(
+    tmp_path: Path, *, guests: list[str] | None = None, host_last: bool = False
+) -> TopologyGraph:
+    """The estate graph with the named guests onboarded (all of them by default).
+
+    `host_last` puts the ESXi host at the end of the inventory, which is what a
+    host added or re-onboarded after `seed-guests` looks like on disk. The
+    answer must not depend on it.
+    """
     wanted = {name for name, *_ in GUESTS} if guests is None else set(guests)
     store = FileSnapshotStore(tmp_path / "snapshots")
     store.save(Snapshot(device="esx-01", collector="esxi", taken_at=NOW, data=ESXI_SNAPSHOT))
-    devices = [
-        SeedDevice(
-            name="esx-01",
-            kind=DeviceKind.esxi,
-            mgmt_ip="10.10.10.21",
-            credential_ref="esx-01",
-            license="free",
-        )
-    ]
+    host = SeedDevice(
+        name="esx-01",
+        kind=DeviceKind.esxi,
+        mgmt_ip="10.10.10.21",
+        credential_ref="esx-01",
+        license="free",
+    )
+    devices: list[SeedDevice] = [] if host_last else [host]
     for name, kind, ip, tags in GUESTS:
         if name not in wanted:
             continue
         store.save(Snapshot(device=name, collector="guest", taken_at=NOW, data=snapshot_data(name)))
         devices.append(SeedDevice(name=name, kind=kind, mgmt_ip=ip, credential_ref=name, tags=tags))
+    if host_last:
+        devices.append(host)
     settings = Settings(data_dir=tmp_path, seed_inventory=tmp_path / "no-inventory.yaml")
     return GraphBuilder(store, SeedInventory(devices=devices), settings=settings, now=NOW).build()
 
@@ -177,6 +185,28 @@ def test_the_web_guest_snapshot_matches_the_collector():
         "tests/fixtures/guest/snapshots/web-01.json is stale: "
         "run `uv run python tests/fixtures/guest/regenerate.py`"
     )
+
+
+# --------------------------------------------------------------------------
+# inventory order must not change the answer
+# --------------------------------------------------------------------------
+def test_the_application_layer_does_not_depend_on_the_order_of_seed_yaml(tmp_path: Path):
+    """`seed.yaml` is in whatever order `infra onboard` wrote it, and a host
+    re-onboarded after its guests ends up last. Resolving the guest layer
+    inside the per-device loop would then silently lose every guest_of edge and
+    every service from that host's impact analysis."""
+    ordered = build_estate(tmp_path / "ordered")
+    reversed_ = build_estate(tmp_path / "reversed", host_last=True)
+
+    for graph in (ordered, reversed_):
+        assert graph.edge("device:web-01", WEB, EdgeKind.guest_of) is not None
+        assert graph.edge("device:db-01", DB, EdgeKind.guest_of) is not None
+        assert graph.edge(WEB, NGINX, EdgeKind.runs_service) is not None
+        down = {row.id for row in impact_analyze("device:esx-01", graph).affected_services}
+        assert {NGINX, POSTGRES, GUNICORN} <= down
+
+    assert sorted(ordered.g.nodes) == sorted(reversed_.g.nodes)
+    assert sorted(ordered.g.edges(keys=True)) == sorted(reversed_.g.edges(keys=True))
 
 
 # --------------------------------------------------------------------------
@@ -436,7 +466,7 @@ def test_the_diagram_shows_the_certificate_nobody_serves_but_everybody_forgets(
     diagram = render_applications(graph)
 
     legacy = _safe("certificate:web-01:C=GB, O=Example Ltd, CN=legacy.internal")
-    assert "CN=legacy.internal (14d)" in diagram
+    assert "CN=legacy.internal (13d)" in diagram
     assert "classDef expiring" in diagram
     styled = [
         line

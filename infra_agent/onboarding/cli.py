@@ -79,7 +79,8 @@ def add_device(
     ssh_key: str = typer.Option(
         "",
         help="path to the SSH private key: how a Linux guest is authenticated, and "
-        "what the ESXi host-config backup needs. The password, if any, is its passphrase.",
+        "what the ESXi host-config backup needs. For a guest the password is the "
+        "key's passphrase; everywhere else it is still the API password.",
     ),
     skip_probe: bool = typer.Option(False),
 ) -> None:
@@ -92,7 +93,15 @@ def add_device(
         cred = Credential(token=getpass("API token: "))
     else:
         username = typer.prompt("username")
-        prompt = "key passphrase (blank if the key has none): " if ssh_key else "password: "
+        # Only a guest authenticates with the key alone. An ESXi host onboarded
+        # with `--ssh-key` (for the host-config backup) still logs into hostd
+        # with `cred.password`, so asking for a passphrase there would leave the
+        # API password unset and every collector cycle failing.
+        prompt = (
+            "key passphrase (blank if the key has none): "
+            if ssh_key and kind.platform == "guest"
+            else "password: "
+        )
         cred = Credential(
             username=username, password=getpass(prompt) or None, ssh_key_path=ssh_key or None
         )

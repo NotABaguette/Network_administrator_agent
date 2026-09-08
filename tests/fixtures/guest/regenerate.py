@@ -58,7 +58,6 @@ def answers() -> dict[str, Any]:
     read_cert = guest_collector.CERT_READ_TEMPLATE.format
     return {
         guest_collector.WHOAMI_COMMAND: "1001\n",
-        guest_collector.SUDO_TEST_COMMAND: "",
         guest_collector.OS_RELEASE_COMMAND: read("os-release"),
         guest_collector.KERNEL_COMMAND: read("uname"),
         guest_collector.HOSTNAME_COMMAND: read("hostname"),
@@ -78,7 +77,9 @@ def answers() -> dict[str, Any]:
         guest_collector.CERT_FIND_COMMAND: (1, read("find-certs")),
         read_cert(path=cert): read("openssl-cert"),
         read_cert(path=legacy): read("openssl-cert-nosan"),
-        "timeout 5 openssl s_client -connect 127.0.0.1:443*": read("openssl-s-client"),
+        guest_collector.TLS_PROBE_TEMPLATE.format(
+            host="127.0.0.1", port=443, timeout=guest_collector.TLS_PROBE_TIMEOUT_SECONDS
+        ): read("openssl-s-client"),
     }
 
 
@@ -98,7 +99,6 @@ class ReplayRunner:
 
     def run(self, command: str) -> Any:
         self.commands.append(command)
-        # `sudo -n true` is the probe itself, not a command run through sudo.
         plain = command if command in self.recorded else command.removeprefix("sudo -n ")
         answer = self.recorded.get(plain)
         if answer is None:

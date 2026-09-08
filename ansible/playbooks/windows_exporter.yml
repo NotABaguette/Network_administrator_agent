@@ -20,6 +20,14 @@
     windows_exporter_installer: 'C:\Windows\Temp\windows_exporter.msi'
 
   tasks:
+    - name: Require the address Prometheus scrapes from
+      ansible.builtin.assert:
+        that: prometheus_address is defined and prometheus_address | length > 0
+        fail_msg: >-
+          Set `prometheus_address` (mgmt-01's address) so the firewall rule only
+          opens {{ exporter_port }} to the scraper, e.g.
+          `-e prometheus_address=10.10.10.10`.
+
     - name: Look for an existing installation
       ansible.windows.win_service:
         name: windows_exporter
@@ -33,6 +41,8 @@
         dest: "{{ windows_exporter_installer }}"
       when: not existing.exists | default(false)
 
+    # Only on the first run: `win_package` would otherwise fail on the second
+    # one, because Windows clears C:\Windows\Temp and the MSI path is gone.
     - name: Install windows_exporter
       ansible.windows.win_package:
         path: "{{ windows_exporter_installer }}"
@@ -41,6 +51,7 @@
           ENABLED_COLLECTORS="{{ windows_exporter_collectors }}"
           LISTEN_ADDR="{{ ansible_host }}"
           LISTEN_PORT="{{ exporter_port }}"
+      when: not existing.exists | default(false)
       notify: Restart windows_exporter
 
     - name: Allow the scrape from mgmt-01 only
@@ -50,7 +61,10 @@
         action: allow
         direction: in
         protocol: tcp
-        remoteip: "{{ prometheus_address | default('any') }}"
+        # mgmt-01 only. There is no sane default for "which host scrapes me",
+        # so the play fails loudly rather than opening 9182 to the estate; the
+        # Linux side binds the exporter to the guest address for the same reason.
+        remoteip: "{{ prometheus_address }}"
         state: present
         enabled: true
 

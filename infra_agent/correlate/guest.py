@@ -39,9 +39,12 @@ Two things this module deliberately does *not* do:
 * It does not trust the guest to say which VM it is. The mapping is resolved
   from the seed tag, the VM name, the guest's hostname and finally its IP.
 
-The builder calls `ingest_guest` once per guest device. Because a guest can be
-ingested before the guest it talks to, the whole application layer is rebuilt
-from every guest seen so far on each call; the passes are idempotent.
+The builder calls `ingest_guest` once per guest device, which only *stashes* the
+snapshot, and `finalize_guest_layer` once after the L2/L3 passes, which builds
+the whole layer in one go. That split is what makes the result independent of
+the order `seed.yaml` lists devices in: a guest is joined to its VM, and a
+dependency to the port it lands on, only when every VM, device and address in
+the estate already exists in the graph.
 """
 
 from __future__ import annotations
@@ -214,18 +217,35 @@ def _owner_of_address(graph: TopologyGraph, address: str) -> str | None:
 # the hook the builder calls
 # ---------------------------------------------------------------------------
 def ingest_guest(builder: GraphBuilder, device: SeedDevice, snapshot: Snapshot) -> None:
-    """Add one guest's applications to the graph and re-resolve the layer.
+    """Stash one guest snapshot. Nothing is resolved yet, deliberately.
 
-    This is the whole hook `infra_agent/correlate/builder.py` calls. The layer
-    is rebuilt from every guest handed over so far, because guest A's dependency
-    on guest B's port can only be resolved once B has been ingested, and the
-    seed inventory is in whatever order `infra onboard` wrote it.
+    A guest *is* a VM the ESXi collector found, and it depends on ports other
+    guests listen on and on addresses the ARP/DHCP join produces - none of which
+    exist while the per-device ingestion loop is still running. Resolving here
+    would make the whole application layer depend on the order `seed.yaml`
+    happens to be in: an ESXi host listed after its guests would silently lose
+    every `guest_of` edge and every service from that host's impact analysis.
+
+    `finalize_guest_layer` does the work, once, after the L2/L3 passes.
     """
     seen: list[tuple[SeedDevice, Snapshot]] = getattr(builder, _STATE_ATTR, [])
     seen = [entry for entry in seen if entry[0].name != device.name]
     seen.append((device, snapshot))
     setattr(builder, _STATE_ATTR, seen)
-    build_application_layer(builder, seen)
+
+
+def finalize_guest_layer(builder: GraphBuilder) -> None:
+    """Build the application layer from every stashed guest, once.
+
+    The second half of the builder hook, called from `GraphBuilder.build()`
+    after `_resolve_l3()`: by then every VM, every device and every `ip:` node
+    with its owner exists, so a guest resolves to the VM it runs in and a
+    dependency resolves to the listener it lands on regardless of inventory
+    order.
+    """
+    guests: list[tuple[SeedDevice, Snapshot]] = getattr(builder, _STATE_ATTR, [])
+    if guests:
+        build_application_layer(builder, guests)
 
 
 def build_application_layer(

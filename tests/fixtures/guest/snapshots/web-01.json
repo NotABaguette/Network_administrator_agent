@@ -191,9 +191,6 @@
  "connections": [
   {
    "local_port": 44120,
-   "local_ports": [
-    44120
-   ],
    "remote_ip": "10.10.10.50",
    "remote_port": 8086,
    "process": "telegraf",
@@ -202,10 +199,6 @@
   },
   {
    "local_port": 51234,
-   "local_ports": [
-    51234,
-    51236
-   ],
    "remote_ip": "10.20.0.31",
    "remote_port": 5432,
    "process": "gunicorn",
@@ -214,9 +207,6 @@
   },
   {
    "local_port": 52100,
-   "local_ports": [
-    52100
-   ],
    "remote_ip": "10.20.0.31",
    "remote_port": 8080,
    "process": "nginx",
@@ -225,9 +215,6 @@
   },
   {
    "local_port": 39004,
-   "local_ports": [
-    39004
-   ],
    "remote_ip": "203.0.113.44",
    "remote_port": 443,
    "process": "curl",
@@ -272,7 +259,7 @@
    ],
    "source": "/etc/letsencrypt/live/app.example.com/cert.pem",
    "kind": "file",
-   "days_to_expiry": 56.0
+   "days_to_expiry": 56
   },
   {
    "subject": "C=GB, O=Example Ltd, CN=legacy.internal",
@@ -281,7 +268,7 @@
    "sans": [],
    "source": "/etc/nginx/ssl/internal-ca-signed.crt",
    "kind": "file",
-   "days_to_expiry": 13.9
+   "days_to_expiry": 13
   },
   {
    "subject": "CN=app.example.com",
@@ -295,7 +282,7 @@
    "kind": "listener",
    "port": 443,
    "process": "nginx",
-   "days_to_expiry": 56.0
+   "days_to_expiry": 56
   }
  ],
  "tagged_services": [
@@ -317,6 +304,7 @@
   }
  ],
  "privileged": false,
+ "sudo": true,
  "warnings": [],
  "errors": {}
 }

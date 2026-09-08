@@ -1,0 +1,4 @@
+[
+ {"DeviceID":"C:","VolumeName":"System","FileSystem":"NTFS","Size":111111111110,"FreeSpace":10307921510},
+ {"DeviceID":"D:","VolumeName":"Data","FileSystem":"NTFS","Size":214748364800,"FreeSpace":107374182400}
+]

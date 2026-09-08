@@ -29,8 +29,14 @@ ansible-playbook -i inventory/guests.yml playbooks/node_exporter.yml \
   --user infra-deploy --private-key ~/.ssh/infra-deploy --become
 
 ansible-playbook -i inventory/guests.yml playbooks/windows_exporter.yml \
-  --extra-vars "ansible_user=lab\\infra-deploy" --ask-pass
+  --extra-vars "ansible_user=lab\\infra-deploy prometheus_address=10.10.10.50" --ask-pass
 ```
+
+`prometheus_address` (mgmt-01) is **required** for the Windows play: it is the
+only host the firewall rule opens 9182 to, and there is no sane default for
+"whichever machine scrapes me", so the play stops rather than opening the port
+to the estate. The Linux play needs no equivalent because node_exporter is bound
+to the guest's own address and reached through the same rule set.
 
 The deploy account is **not** the collector's read-only account: installing an
 exporter needs root or Administrator, and the collector account deliberately has

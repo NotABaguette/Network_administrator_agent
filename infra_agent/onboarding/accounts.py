@@ -125,6 +125,20 @@ def account_commands(kind: DeviceKind, username: str, password: str, mgmt_ip: st
     raise LookupError(kind)
 
 
+#: The shell quoting the collector needs and sudoers must not keep: single
+#: quotes around a glob, and the backslashes in front of `find`'s grouping
+#: parentheses. sudo compares the argv *after* the shell expanded it.
+_SHELL_ESCAPES = ("\\(", "\\)", "\\;", "\\*", "\\ ")
+
+
+def _unescape_for_sudoers(arguments: str) -> str:
+    """The command line as the kernel sees it: no quotes, no shell backslashes."""
+    text = arguments.replace("'", "").replace('"', "")
+    for escaped in _SHELL_ESCAPES:
+        text = text.replace(escaped, escaped[1:])
+    return text
+
+
 def sudoers_line(username: str) -> list[str]:
     """The sudoers allowlist for exactly the collector's read commands.
 
@@ -135,17 +149,19 @@ def sudoers_line(username: str) -> list[str]:
     Let's Encrypt's root-only `live/` directory. `-noout` and the absence of
     `-out` mean the openssl entry cannot write a file.
 
-    sudo matches the argument vector the shell already expanded, so the shell
-    quoting in the collector's templates is stripped here: `-name '*.pem'`
-    reaches sudo as `-name *.pem`, and a sudoers entry that kept the quotes
-    would match nothing at all.
+    sudo matches the argument vector the shell already expanded, so *all* the
+    shell quoting in the collector's templates is stripped here: `-name '*.pem'`
+    reaches sudo as `-name *.pem` and `\\(` reaches it as `(`. A sudoers entry
+    that kept either would be wrong, and the backslash is worse than wrong -
+    `\\(` is a syntax error, `visudo -cf` rejects the whole file, and every
+    `sudo -n` on that guest then answers "a password is required".
     """
     from infra_agent.collectors.guest import SUDO_COMMANDS
 
     commands: list[str] = []
     for command in SUDO_COMMANDS:
         binary, _, arguments = command.partition(" ")
-        arguments = arguments.replace("'", "")
+        arguments = _unescape_for_sudoers(arguments)
         for path in BINARY_PATHS.get(binary, (f"/usr/bin/{binary}",)):
             commands.append(f"{path} {arguments}".strip())
     return [

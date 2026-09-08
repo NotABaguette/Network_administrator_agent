@@ -27,9 +27,17 @@ Rules this collector is built around:
   `infra_agent/onboarding/accounts.py` writes into the sudoers allowlist. When
   sudo is not available the run degrades (sockets without process names) with a
   warning instead of failing.
-* **One bad section never loses the run.** Each section is wrapped like the
-  ESXi collector's: a failure lands in `errors[section]` and the gauges of that
-  section survive the stale-series sweep, because "not collected" is not "gone".
+* **One bad section never loses the run, and never becomes a false alarm.**
+  Each section is wrapped like the ESXi collector's: a failure lands in
+  `errors[section]`, adds a warning, and the gauges of that section survive the
+  stale-series sweep, because "not collected" is not "gone". The tagged
+  services of a run whose `systemctl` failed are reported `active: None`, not
+  `active: False` - "unknown" must never page as "down".
+* **Stored values are stable between runs.** A snapshot is diffed against the
+  previous one, so anything that moves every fifteen minutes would report a
+  change every cycle: certificate expiry is therefore stored in whole days
+  (`snapshot_days_to_expiry`), and only the digest, which is computed the
+  moment it is read, works in fractions.
 
 `paramiko` and `winrm` are imported lazily, so the package and the test suite
 import without the `devices` extra.
@@ -37,8 +45,10 @@ import without the `devices` extra.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import math
 import re
 import shlex
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -67,8 +77,9 @@ MAX_SERVICES = 400
 MAX_LISTENERS = 200
 MAX_CONNECTIONS = 100
 MAX_CERTIFICATES = 40
-MAX_TLS_PROBES = 12
-MAX_LOCAL_PORT_SAMPLES = 5
+#: At `TLS_PROBE_TIMEOUT_SECONDS` each this is a minute in the worst case, on a
+#: collector that runs every fifteen.
+MAX_TLS_PROBES = 20
 
 #: A tag `service:nginx` on the seed device is what makes a unit worth a gauge
 #: and worth alerting on; without it every guest would publish a hundred series.
@@ -87,10 +98,13 @@ UPTIME_COMMAND = "cat /proc/uptime"
 CPU_COMMAND = "nproc"
 MEMINFO_COMMAND = "cat /proc/meminfo"
 WHOAMI_COMMAND = "id -u"
-SUDO_TEST_COMMAND = "sudo -n true"
 
-DPKG_COMMAND = "dpkg-query -W -f=${binary:Package}\\t${Version}\\n"
-RPM_COMMAND = "rpm -qa --qf %{NAME}\\t%{VERSION}-%{RELEASE}\\n"
+#: The format strings are single-quoted because `exec_command` hands the whole
+#: line to the account's login shell: unquoted, `${binary:Package}` is a "Bad
+#: substitution" under dash and expands to nothing under bash, and `\t` / `\n`
+#: collapse to `t` / `n`. Either way the package inventory is empty or garbage.
+DPKG_COMMAND = "dpkg-query -W -f='${binary:Package}\\t${Version}\\n'"
+RPM_COMMAND = "rpm -qa --qf '%{NAME}\\t%{VERSION}-%{RELEASE}\\n'"
 
 APT_UPGRADABLE_COMMAND = "apt list --upgradable"
 #: `dnf check-update` answers 100 when updates are waiting and 0 when there are
@@ -124,25 +138,92 @@ CERT_PATHS: tuple[str, ...] = (
     "/etc/httpd",
     "/etc/pki/tls/certs",
 )
+#: `-L` is load-bearing: certbot keeps `live/<domain>/cert.pem` as a *symlink*
+#: into `archive/`, and plain `-type f` does not match a symlink - without it
+#: the flagship certificate-expiry case (a Let's Encrypt certificate whose
+#: renewal broke) is never collected at all. With `-L`, `find` tests the link
+#: target, so `-type f` matches and the private keys are still excluded by name.
+#: `chain.pem` is the intermediate CA and `fullchain.pem` starts with the same
+#: leaf as `cert.pem`; both would only add a duplicate or a CA node.
 CERT_FIND_COMMAND = (
-    "find " + " ".join(CERT_PATHS) + " -maxdepth 3 -type f "
+    "find -L " + " ".join(CERT_PATHS) + " -maxdepth 3 -type f "
     r"\( -name '*.pem' -o -name '*.crt' -o -name '*.cer' \) "
-    "-not -name 'privkey*' -not -name '*key.pem' -not -name '*.key'"
+    "-not -name 'privkey*' -not -name '*key.pem' -not -name '*.key' "
+    "-not -name 'chain*.pem' -not -name 'fullchain*.pem'"
 )
 CERT_READ_TEMPLATE = "openssl x509 -noout -subject -issuer -enddate -ext subjectAltName -in {path}"
+#: `{host}` is always a literal IP address (`_probe_host` validates it with
+#: `ipaddress` and falls back to loopback), so nothing a guest printed can reach
+#: the shell through this template.
 TLS_PROBE_TEMPLATE = (
-    "timeout 5 openssl s_client -connect {host}:{port} -servername localhost </dev/null "
+    "timeout {timeout} openssl s_client -connect {host}:{port} -servername localhost </dev/null "
     "2>/dev/null | openssl x509 -noout -subject -issuer -enddate -ext subjectAltName"
 )
+TLS_PROBE_TIMEOUT_SECONDS = 3
 
-#: Ports worth a TLS handshake, plus anything served by a process that speaks
-#: TLS for a living. Probing every listening port would hang on the ones that
-#: are not TLS and would take a minute per guest.
+#: Every TCP listener is probed, because "every local HTTPS listener" includes
+#: the Node app somebody put on 3001. The two lists below are only what is
+#: *skipped*: ports and processes that certainly do not speak TLS and would
+#: therefore cost `TLS_PROBE_TIMEOUT_SECONDS` of nothing each. Ports known to
+#: serve TLS are probed first so that a guest with more listeners than
+#: `MAX_TLS_PROBES` still gets its real certificates.
 TLS_PORTS = frozenset({443, 465, 636, 993, 995, 5986, 6443, 8006, 8443, 9443, 10250})
 TLS_PROCESSES = frozenset({"nginx", "httpd", "apache2", "haproxy", "traefik", "envoy", "postfix"})
 #: nginx serves both; knocking on its plaintext port only produces a handshake
-#: error and five seconds of nothing.
+#: error and a few seconds of nothing.
 PLAINTEXT_PORTS = frozenset({21, 23, 25, 80, 110, 143, 3000, 8000, 8080})
+#: Protocols that are never TLS on these ports (or that start plaintext and
+#: upgrade), so a handshake can only ever time out.
+NON_TLS_PORTS = frozenset(
+    {
+        22,
+        53,
+        67,
+        68,
+        111,
+        123,
+        135,
+        137,
+        138,
+        139,
+        161,
+        445,
+        514,
+        631,
+        3306,
+        3389,
+        5432,
+        6379,
+        9100,
+        9182,
+        11211,
+        27017,
+    }
+)
+NON_TLS_PROCESSES = frozenset(
+    {
+        "sshd",
+        "postgres",
+        "mysqld",
+        "mariadbd",
+        "redis-server",
+        "memcached",
+        "mongod",
+        "rpcbind",
+        "rpc.statd",
+        "chronyd",
+        "ntpd",
+        "named",
+        "dnsmasq",
+        "systemd-resolve",
+        "dhclient",
+        "cupsd",
+        "node_exporter",
+        "windows_exporter",
+        "smbd",
+        "nmbd",
+    }
+)
 
 #: Exactly the commands the collector needs root for, and exactly what
 #: `infra_agent/onboarding/accounts.py` puts in the sudoers allowlist:
@@ -159,7 +240,40 @@ SUDO_COMMANDS: tuple[str, ...] = (
     CERT_READ_TEMPLATE.format(path="/etc/letsencrypt/live/*/*.pem"),
 )
 
+#: How sudo availability is probed. It has to be one of the allowlisted
+#: commands: the sudoers file `infra_agent/onboarding/accounts.py` generates
+#: permits `SUDO_COMMANDS` and *nothing else*, so the obvious `sudo -n true`
+#: answers "a password is required" on a correctly onboarded guest and would
+#: make the collector (and the onboarding probe) conclude there is no sudo at
+#: all - losing every process name and every Let's Encrypt certificate.
+SUDO_TEST_COMMAND = f"sudo -n {SUDO_COMMANDS[0]}"
+
 COMMAND_NOT_FOUND_STATUS = 127
+
+#: sudo said no. Anything else - including the command itself failing, and
+#: including `sudo: ss: command not found` - means sudo worked.
+#: `sudo: unable to resolve host ...` is deliberately absent: sudo prints it and
+#: then runs the command anyway.
+_SUDO_REFUSED = re.compile(
+    r"(a password is required|a terminal is required|no tty present|"
+    r"not allowed to execute|may not run|is not in the sudoers|"
+    r"authentication failure|no askpass program)",
+    re.IGNORECASE,
+)
+#: `bash: sudo: command not found` / `sh: 1: sudo: not found` - sudo itself is
+#: absent, which is a refusal. `sudo: ss: command not found` is not.
+_SUDO_MISSING = re.compile(r"(?:^|[:\s])sudo:\s*(?:command\s+)?not found", re.IGNORECASE)
+
+
+def sudo_refused(result: CommandResult) -> bool:
+    """True when `sudo` itself rejected the command, not when the command failed."""
+    stderr = result.stderr or ""
+    if _SUDO_MISSING.search(stderr):
+        return True
+    if result.status == 0 or result.status == COMMAND_NOT_FOUND_STATUS:
+        return False
+    return bool(_SUDO_REFUSED.search(stderr))
+
 
 # ---------------------------------------------------------------------------
 # Windows command templates (PowerShell, one section each, JSON out)
@@ -193,6 +307,17 @@ PS_HOTFIX = (
 PS_VOLUMES = (
     "Get-Volume | Where-Object DriveLetter | Select-Object DriveLetter,FileSystemLabel,"
     "FileSystem,Size,SizeRemaining,HealthStatus | ConvertTo-Json -Compress -Depth 2"
+)
+#: The Storage CIM classes (`root/Microsoft/Windows/Storage`) are ACL'd to the
+#: local Administrators group, so `Get-Volume` answers "Access denied" for the
+#: unprivileged account `infra onboard accounts` creates - which is exactly the
+#: account this collector is meant to run as. `Win32_LogicalDisk` is readable by
+#: standard users, so it is the fallback and `DriveType=3` keeps it to fixed
+#: disks (no CD-ROMs, no mapped network drives).
+PS_LOGICAL_DISKS = (
+    'Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" '
+    "| Select-Object DeviceID,VolumeName,FileSystem,Size,FreeSpace "
+    "| ConvertTo-Json -Compress -Depth 2"
 )
 PS_PROGRAMS = (
     r"Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',"
@@ -322,20 +447,26 @@ class WinRmRunner:
 
     def __init__(self, device: SeedDevice, cred: Credential, timeout: float | None = None) -> None:
         self.timeout = timeout or COMMAND_TIMEOUT_SECONDS
-        self.session = self._connect(device, cred)
+        self.session = self._connect(device, cred, self.timeout)
 
     @staticmethod
-    def _connect(device: SeedDevice, cred: Credential) -> Any:
+    def _connect(device: SeedDevice, cred: Credential, timeout: float) -> Any:
         import winrm
 
         username = cred.username or ""
         transport = "ntlm" if ("\\" in username or "@" in username) else "basic"
         endpoint = f"https://{device.mgmt_ip}:{device.port or DEFAULT_WINRM_PORT}/wsman"
+        # `Get-ComputerInfo` is slow; pywinrm's 20 s default cuts it off. The
+        # read timeout must stay above the operation timeout or the HTTP read
+        # gives up before WinRM has answered.
+        operation_timeout = int(timeout)
         return winrm.Session(
             endpoint,
             auth=(username, cred.password.get_secret_value() if cred.password else ""),
             transport=transport,
             server_cert_validation="ignore",  # pinned with the executors
+            operation_timeout_sec=operation_timeout,
+            read_timeout_sec=operation_timeout + 10,
         )
 
     def run(self, command: str) -> CommandResult:
@@ -761,14 +892,28 @@ def parse_openssl_x509(text: str) -> dict[str, Any] | None:
 
 def _with_days(row: dict[str, Any], now: datetime) -> dict[str, Any]:
     expiry = parse_not_after(str(row.get("not_after") or ""))
-    row["days_to_expiry"] = days_to_expiry(expiry, now) if expiry else None
+    row["days_to_expiry"] = snapshot_days_to_expiry(expiry, now) if expiry else None
     return row
 
 
 def days_to_expiry(not_after: datetime | None, now: datetime) -> float | None:
+    """Fractional days, for a report that is computed at the moment it is read."""
     if not_after is None:
         return None
     return round((not_after - now).total_seconds() / 86400.0, 2)
+
+
+def snapshot_days_to_expiry(not_after: datetime | None, now: datetime) -> int | None:
+    """Whole days, for anything that is *stored*.
+
+    A snapshot is diffed against the previous one, so a field that moves by
+    fifteen minutes every run would report a change on every cycle and rebuild
+    the topology graph each time. Whole days round that down to one change a
+    day, which is also the resolution the alert thresholds (30 / 7) use.
+    """
+    if not_after is None:
+        return None
+    return math.floor((not_after - now).total_seconds() / 86400.0)
 
 
 def common_name(subject: str | None) -> str | None:
@@ -853,7 +998,6 @@ def summarise_connections(
         if group is None:
             group = {
                 "local_port": local_port,
-                "local_ports": [],
                 "remote_ip": remote_ip,
                 "remote_port": remote_port,
                 "process": row.get("process"),
@@ -862,23 +1006,36 @@ def summarise_connections(
             }
             groups[key] = group
         group["connections"] = int(group["connections"]) + 1
-        ports = group["local_ports"]
-        if len(ports) < MAX_LOCAL_PORT_SAMPLES:
-            ports.append(local_port)
         group["local_port"] = min(int(group["local_port"]), local_port)
     rows = sorted(
         groups.values(),
         key=lambda row: (str(row["remote_ip"]), int(row["remote_port"]), str(row["process"] or "")),
     )
-    for row in rows:
-        row["local_ports"] = sorted(row["local_ports"])
     return rows[:limit]
 
 
+def _tls_priority(port: int, process: str) -> int | None:
+    """0 = certainly TLS, 1 = might be, None = never knock on it.
+
+    Every TCP listener is a candidate - "every local HTTPS listener" has to
+    include the Node app on 3001 - except the ports and processes that cannot
+    be TLS, where a handshake could only ever burn the timeout.
+    """
+    if port in TLS_PORTS:
+        return 0
+    if port in NON_TLS_PORTS or process in NON_TLS_PROCESSES:
+        return None
+    if process in TLS_PROCESSES and port not in PLAINTEXT_PORTS:
+        return 0
+    if port in PLAINTEXT_PORTS:
+        return None
+    return 1
+
+
 def tls_probe_targets(listeners: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """The listeners worth a TLS handshake, deduplicated by port."""
+    """The listeners worth a TLS handshake, deduplicated by port, TLS ports first."""
     seen: set[int] = set()
-    targets: list[dict[str, Any]] = []
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
     for row in listeners:
         if str(row.get("proto")) != "tcp":
             continue
@@ -886,21 +1043,68 @@ def tls_probe_targets(listeners: Sequence[Mapping[str, Any]]) -> list[dict[str, 
         process = str(row.get("process") or "").lower()
         if port is None or port in seen:
             continue
-        if port not in TLS_PORTS and (process not in TLS_PROCESSES or port in PLAINTEXT_PORTS):
+        priority = _tls_priority(port, process)
+        if priority is None:
             continue
         seen.add(port)
-        targets.append({"port": port, "process": row.get("process"), "host": _probe_host(row)})
-        if len(targets) >= MAX_TLS_PROBES:
-            break
-    return targets
+        candidates.append(
+            (
+                priority,
+                port,
+                {"port": port, "process": row.get("process"), "host": _probe_host(row)},
+            )
+        )
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [target for _priority, _port, target in candidates[:MAX_TLS_PROBES]]
 
 
 def _probe_host(row: Mapping[str, Any]) -> str:
-    """Where to knock: loopback for a wildcard bind, the bound address otherwise."""
+    """Where to knock: loopback for a wildcard bind, the bound address otherwise.
+
+    The address came out of `ss`/`netstat`/`Get-NetTCPConnection`, i.e. from the
+    guest, and it is interpolated into a shell pipeline - so it is validated as
+    a literal IP address here and anything else becomes loopback. This is the
+    module's "nothing a device said becomes a command" rule, enforced.
+    """
     address = str(row.get("address") or "").strip()
     if address in ("", "*", "0.0.0.0", "::", "[::]", "127.0.0.1", "::1"):
         return "127.0.0.1"
-    return address
+    try:  # an IPv6 literal may carry a `%scope` suffix; the address is what matters
+        parsed = ipaddress.ip_address(address.split("%")[0].strip("[]"))
+    except ValueError:
+        return "127.0.0.1"
+    return f"[{parsed}]" if parsed.version == 6 else str(parsed)
+
+
+#: A section that failed is a hole in the run, and a hole is not a fact: the
+#: warning says so once, and the gauges of that section keep their last value
+#: (`SECTION_GAUGES`) instead of publishing a zero nobody measured.
+SECTION_WARNINGS: dict[str, str] = {
+    "updates": "the pending-update count could not be read: it is unknown for this guest",
+    "disks": "the disk list could not be read: free-space alerts are blind for this guest",
+    "services": (
+        "the service list could not be read: the tagged services are reported as unknown "
+        "rather than down, so nothing pages on this run"
+    ),
+    "listeners": "the listening sockets could not be read: the application layer has no ports",
+    "connections": "the established connections could not be read: dependencies are missing",
+    "certificates": "the certificates could not be read: expiry is unknown for this guest",
+    "packages": "the package list could not be read",
+}
+
+
+def section_warnings(errors: Mapping[str, str]) -> list[str]:
+    return [
+        SECTION_WARNINGS.get(key, f"the `{key}` section could not be collected")
+        for key in sorted(errors)
+    ]
+
+
+NO_SUDO_WARNING = (
+    "no passwordless sudo for `{binary}`: it runs unprivileged, so sockets are "
+    "collected without the owning process and root-only certificates are missed. "
+    "Run `infra onboard accounts <guest>` and install the sudoers allowlist."
+)
 
 
 def _section(errors: dict[str, str], key: str, fn: Callable[[], Any], default: Any) -> Any:
@@ -924,16 +1128,35 @@ class LinuxSession:
     errors: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     _uid: int | None = None
-    _sudo: bool | None = None
+    _sudo_denied: set[str] = field(default_factory=set)
+    _sudo_used: bool = False
 
     def run(self, command: str, *, sudo: bool = False) -> CommandResult:
-        """Run a fixed template, through `sudo -n` only when it is on the list."""
+        """Run a fixed template, through `sudo -n` only when it is on the list.
+
+        Availability is learned from the elevated commands themselves rather
+        than from a separate `sudo -n true`: the sudoers file this project
+        generates permits `SUDO_COMMANDS` and nothing else, so `true` is refused
+        on a guest where sudo works perfectly and the whole run would silently
+        drop to unprivileged.
+
+        The refusal is remembered per binary, not globally: sudoers matches on
+        the absolute path, so a guest without `ss` refuses `sudo -n ss ...`
+        while still permitting `sudo -n netstat ...`.
+        """
         if not sudo or self.is_root():
             return self.runner.run(command)
         if command not in SUDO_COMMANDS and not _is_templated_sudo_command(command):
             raise ValueError(f"refusing to sudo a command that is not on the allowlist: {command}")
-        if self.sudo_available():
-            return self.runner.run(f"sudo -n {command}")
+        binary = command.split(" ", 1)[0]
+        if binary in self._sudo_denied:
+            return self.runner.run(command)
+        result = self.runner.run(f"sudo -n {command}")
+        if not sudo_refused(result):
+            self._sudo_used = True
+            return result
+        self._sudo_denied.add(binary)
+        self.warn(NO_SUDO_WARNING.format(binary=binary))
         return self.runner.run(command)
 
     def is_root(self) -> bool:
@@ -942,16 +1165,10 @@ class LinuxSession:
             self._uid = _int_or_none(result.stdout) if result.ok else -1
         return self._uid == 0
 
-    def sudo_available(self) -> bool:
-        if self._sudo is None:
-            self._sudo = self.runner.run(SUDO_TEST_COMMAND).ok
-            if not self._sudo:
-                self.warn(
-                    "no passwordless sudo for the read commands: sockets are collected "
-                    "without the owning process. Run `infra onboard accounts <guest>` and "
-                    "install the sudoers allowlist."
-                )
-        return bool(self._sudo)
+    @property
+    def sudo_worked(self) -> bool:
+        """True once an allowlisted command has actually been elevated."""
+        return self._sudo_used or self.is_root()
 
     def warn(self, message: str) -> None:
         if message not in self.warnings:
@@ -1007,9 +1224,14 @@ def collect_linux(
         "connections": connections,
         "disks": disks,
         "certificates": certificates[:MAX_CERTIFICATES],
-        "tagged_services": tagged_service_state(services, tagged_service_names(device.tags)),
+        "tagged_services": tagged_service_state(
+            services,
+            tagged_service_names(device.tags),
+            known="services" not in session.errors,
+        ),
         "privileged": session.is_root(),
-        "warnings": list(session.warnings),
+        "sudo": session.sudo_worked,
+        "warnings": list(session.warnings) + section_warnings(session.errors),
         "errors": dict(session.errors),
     }
 
@@ -1165,7 +1387,11 @@ def _linux_certificates(
             continue
         rows.append(_with_days({**parsed, "source": path, "kind": "file"}, session.now))
     for target in tls_probe_targets(listeners):
-        command = TLS_PROBE_TEMPLATE.format(host=target["host"], port=int(target["port"]))
+        command = TLS_PROBE_TEMPLATE.format(
+            host=target["host"],
+            port=int(target["port"]),
+            timeout=TLS_PROBE_TIMEOUT_SECONDS,
+        )
         result = session.run(command)
         parsed = parse_openssl_x509(result.stdout) if result.ok else None
         if parsed is None:
@@ -1209,7 +1435,7 @@ def _safe_cert_path(path: str) -> bool:
 
 
 def tagged_service_state(
-    services: Sequence[Mapping[str, Any]], wanted: Sequence[str]
+    services: Sequence[Mapping[str, Any]], wanted: Sequence[str], *, known: bool = True
 ) -> list[dict[str, Any]]:
     """The state of exactly the services the guest is tagged with.
 
@@ -1219,7 +1445,24 @@ def tagged_service_state(
     the `@`. A tag that still matches nothing is reported `found: false` and
     `active: false` - a service that was supposed to be there and is not is the
     alert, not a missing series.
+
+    `known=False` says the service list itself could not be read this run
+    (`systemctl` failed, the channel timed out). Then every row is `None`:
+    "not collected" must never become "every tagged service is down", which
+    would page the owner for the whole guest on one transient failure.
     """
+    if not known:
+        return [
+            {
+                "service": service,
+                "unit": None,
+                "found": None,
+                "state": None,
+                "active": None,
+                "enabled": None,
+            }
+            for service in wanted
+        ]
     by_name: dict[str, Mapping[str, Any]] = {}
     for row in services:
         name = str(row.get("name") or "")
@@ -1316,6 +1559,7 @@ def collect_windows(
             "the Windows Update agent could not be queried over WinRM; "
             "the pending-update count is unknown for this guest"
         )
+    warnings.extend(section_warnings({k: v for k, v in errors.items() if k != "updates"}))
     return {
         "os": info.get("os", {}),
         "uptime_seconds": info.get("uptime_seconds"),
@@ -1329,7 +1573,9 @@ def collect_windows(
         "disks": disks,
         "certificates": certificates[:MAX_CERTIFICATES],
         "hotfixes": hotfixes,
-        "tagged_services": tagged_service_state(services, tagged_service_names(device.tags)),
+        "tagged_services": tagged_service_state(
+            services, tagged_service_names(device.tags), known="services" not in errors
+        ),
         "warnings": warnings,
         "errors": errors,
     }
@@ -1410,26 +1656,68 @@ def _windows_connections(runner: CommandRunner, listening_ports: set[int]) -> li
 
 
 def _windows_disks(runner: CommandRunner) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for row in _json_rows(runner.run(PS_VOLUMES)):
+    """Fixed disks, from `Get-Volume` if the account may read it, else CIM."""
+    primary = runner.run(PS_VOLUMES)
+    rows = _volume_rows(_json_rows(primary))
+    if rows:
+        return rows
+    fallback = runner.run(PS_LOGICAL_DISKS)
+    rows = _logical_disk_rows(_json_rows(fallback))
+    if rows or fallback.ok:
+        return rows
+    raise RuntimeError(
+        f"neither `Get-Volume` (exit {primary.status}) nor `Win32_LogicalDisk` "
+        f"(exit {fallback.status}) returned a disk"
+    )
+
+
+def _disk_row(
+    mount: str, label: Any, filesystem: Any, total: float | None, free: float | None, **extra: Any
+) -> dict[str, Any] | None:
+    if not mount or total is None or free is None or total <= 0:
+        return None
+    return {
+        "filesystem": filesystem,
+        "mount": mount,
+        "label": label,
+        "total_bytes": int(total),
+        "used_bytes": int(total - free),
+        "free_bytes": int(free),
+        "free_ratio": round(free / total, 4),
+        **extra,
+    }
+
+
+def _volume_rows(payload: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any] | None] = []
+    for row in payload:
         letter = str(row.get("DriveLetter") or "").strip()
-        total = _float_or_none(row.get("Size"))
-        free = _float_or_none(row.get("SizeRemaining"))
-        if not letter or total is None or free is None or total <= 0:
-            continue
         rows.append(
-            {
-                "filesystem": row.get("FileSystem"),
-                "mount": f"{letter}:",
-                "label": row.get("FileSystemLabel"),
-                "total_bytes": int(total),
-                "used_bytes": int(total - free),
-                "free_bytes": int(free),
-                "free_ratio": round(free / total, 4),
-                "health": row.get("HealthStatus"),
-            }
+            _disk_row(
+                f"{letter}:" if letter else "",
+                row.get("FileSystemLabel"),
+                row.get("FileSystem"),
+                _float_or_none(row.get("Size")),
+                _float_or_none(row.get("SizeRemaining")),
+                health=row.get("HealthStatus"),
+            )
         )
-    return rows
+    return [row for row in rows if row is not None]
+
+
+def _logical_disk_rows(payload: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows = [
+        _disk_row(
+            str(row.get("DeviceID") or "").strip(),
+            row.get("VolumeName"),
+            row.get("FileSystem"),
+            _float_or_none(row.get("Size")),
+            _float_or_none(row.get("FreeSpace")),
+            source="Win32_LogicalDisk",
+        )
+        for row in payload
+    ]
+    return [row for row in rows if row is not None]
 
 
 def _windows_packages(runner: CommandRunner) -> list[dict[str, Any]]:
@@ -1483,7 +1771,7 @@ def _windows_certificates(runner: CommandRunner, now: datetime) -> list[dict[str
                 "subject": _normalise_dn(str(row.get("Subject") or "")),
                 "issuer": _normalise_dn(str(row.get("Issuer") or "")),
                 "not_after": expiry.isoformat() if expiry else None,
-                "days_to_expiry": days_to_expiry(expiry, now),
+                "days_to_expiry": snapshot_days_to_expiry(expiry, now),
                 "sans": sorted(dict.fromkeys(sans)),
                 "source": f"Cert:\\LocalMachine\\My\\{row.get('Thumbprint')}",
                 "kind": "store",
@@ -1544,10 +1832,15 @@ class _GuestBase(Collector):
 
         for row in data.get("tagged_services") or []:
             service = str(row.get("service") or "")
-            if service:
+            active = row.get("active")
+            # `active is None` means the service list could not be read this
+            # run. Publishing 0 there would fire GuestServiceDown (critical)
+            # for every tagged service on one transient systemctl failure; the
+            # series is spared from the sweep instead and keeps its last value.
+            if service and active is not None:
                 run.set(
                     metrics.GUEST_SERVICE_ACTIVE,
-                    1.0 if row.get("active") else 0.0,
+                    1.0 if active else 0.0,
                     device=device_name,
                     service=service,
                 )
@@ -1616,6 +1909,7 @@ __all__ = [
     "CERT_PATHS",
     "GUEST_INTERVAL_SECONDS",
     "SUDO_COMMANDS",
+    "SUDO_TEST_COMMAND",
     "CommandResult",
     "CommandRunner",
     "GuestLinuxCollector",
@@ -1625,6 +1919,8 @@ __all__ = [
     "collect_linux",
     "collect_windows",
     "expiring_certificates",
+    "snapshot_days_to_expiry",
     "stale_guest",
+    "sudo_refused",
     "tagged_service_names",
 ]

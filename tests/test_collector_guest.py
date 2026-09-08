@@ -11,9 +11,14 @@ with no subjectAltName, and an unprivileged account with no sudo.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+import shutil
+import subprocess
+import sys
+import types
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 import yaml
@@ -41,6 +46,7 @@ from infra_agent.collectors.guest import (
     PS_ESTABLISHED,
     PS_HOTFIX,
     PS_LISTENERS,
+    PS_LOGICAL_DISKS,
     PS_PENDING_UPDATES,
     PS_PROGRAMS,
     PS_SERVICES,
@@ -53,17 +59,22 @@ from infra_agent.collectors.guest import (
     SUDO_TEST_COMMAND,
     SYSTEMD_UNIT_FILES_COMMAND,
     SYSTEMD_UNITS_COMMAND,
+    TLS_PROBE_TEMPLATE,
+    TLS_PROBE_TIMEOUT_SECONDS,
     UPTIME_COMMAND,
     WHOAMI_COMMAND,
     CommandResult,
     GuestLinuxCollector,
     GuestWindowsCollector,
+    WinRmRunner,
     collect_linux,
     collect_windows,
     expiring_certificates,
     parse_openssl_x509,
+    sudo_refused,
     summarise_connections,
     tagged_service_names,
+    tls_probe_targets,
 )
 from infra_agent.models.common import Credential, DeviceKind, SeedDevice
 
@@ -132,7 +143,6 @@ def linux_answers(**overrides: Any) -> dict[str, Any]:
     cert_path = LETSENCRYPT_CERT
     answers: dict[str, Any] = {
         WHOAMI_COMMAND: "1001\n",
-        SUDO_TEST_COMMAND: "",
         OS_RELEASE_COMMAND: linux_fixture("os-release"),
         KERNEL_COMMAND: linux_fixture("uname"),
         HOSTNAME_COMMAND: linux_fixture("hostname"),
@@ -156,7 +166,9 @@ def linux_answers(**overrides: Any) -> dict[str, Any]:
         CERT_READ_TEMPLATE.format(path="/etc/nginx/ssl/internal-ca-signed.crt"): (
             linux_fixture("openssl-cert-nosan")
         ),
-        "timeout 5 openssl s_client -connect 127.0.0.1:443*": linux_fixture("openssl-s-client"),
+        TLS_PROBE_TEMPLATE.format(
+            host="127.0.0.1", port=443, timeout=TLS_PROBE_TIMEOUT_SECONDS
+        ): linux_fixture("openssl-s-client"),
     }
     answers.update(overrides)
     return answers
@@ -357,7 +369,7 @@ def test_linux_certificates_from_files_and_from_the_live_listener(linux_data):
     assert lets_encrypt["issuer"] == "C=US, O=Let's Encrypt, CN=R3"
     assert lets_encrypt["not_after"] == "2026-11-01T12:00:00+00:00"
     assert lets_encrypt["sans"] == ["app.example.com", "www.app.example.com"]
-    assert lets_encrypt["days_to_expiry"] == pytest.approx(56.0)
+    assert lets_encrypt["days_to_expiry"] == 56
     assert lets_encrypt["kind"] == "file"
 
     served = by_source["127.0.0.1:443"]
@@ -394,7 +406,7 @@ def test_a_certificate_without_a_san_is_still_recorded(linux_data):
     assert legacy["sans"] == []
     assert legacy["subject"] == "C=GB, O=Example Ltd, CN=legacy.internal"
     assert legacy["not_after"] == "2026-09-20T09:30:00+00:00"
-    assert legacy["days_to_expiry"] == pytest.approx(13.9, abs=0.1)
+    assert legacy["days_to_expiry"] == 13
 
 
 def test_openssl_output_without_any_extension_block():
@@ -447,20 +459,89 @@ def test_neither_ss_nor_netstat_degrades_with_a_warning_not_an_exception():
 
 
 def test_without_passwordless_sudo_the_run_degrades_and_says_so():
+    """The refusal is learned from the first elevated read and then remembered,
+    so exactly one doomed `sudo -n` per binary is spent, not one per command."""
     answers = linux_answers()
-    answers[SUDO_TEST_COMMAND] = CommandResult(
-        command=SUDO_TEST_COMMAND, status=1, stderr="sudo: a password is required"
-    )
+    refused = CommandResult(command="", status=1, stderr="sudo: a password is required")
+    for command in (SS_TCP_LISTEN_COMMAND, SS_UDP_LISTEN_COMMAND, SS_ESTABLISHED_COMMAND):
+        answers[f"sudo -n {command}"] = refused
+    answers[f"sudo -n {CERT_FIND_COMMAND}"] = refused
     answers[SS_TCP_LISTEN_COMMAND] = re.sub(
         r"\s+users:.*$", "", linux_fixture("ss-tcp-listen"), flags=re.M
+    )
+    answers[SS_UDP_LISTEN_COMMAND] = re.sub(
+        r"\s+users:.*$", "", linux_fixture("ss-udp-listen"), flags=re.M
+    )
+    answers[SS_ESTABLISHED_COMMAND] = linux_fixture("ss-established")
+    answers[CERT_FIND_COMMAND] = CommandResult(
+        command=CERT_FIND_COMMAND, status=1, stdout=linux_fixture("find-certs")
     )
     runner = FakeRunner(answers)
     data = collect_linux(runner, linux_device(), now=NOW)
 
-    assert not any(c.startswith("sudo -n ") for c in runner.commands if c != SUDO_TEST_COMMAND)
+    elevated = [c for c in runner.commands if c.startswith("sudo -n ")]
+    # one doomed attempt for `ss` and one for `find`, then both binaries are
+    # remembered as denied; `openssl` is a third binary and is still tried
+    assert elevated[:2] == [f"sudo -n {SS_TCP_LISTEN_COMMAND}", f"sudo -n {CERT_FIND_COMMAND}"]
+    assert [c for c in elevated if "ss -" in c or " find " in c] == elevated[:2]
     listeners = {row["port"]: row for row in data["listeners"] if row["proto"] == "tcp"}
     assert listeners[443]["process"] is None
+    assert data["listeners"] and data["certificates"]  # the run still happened
     assert any("no passwordless sudo" in w for w in data["warnings"])
+
+
+def test_the_snapshot_records_whether_sudo_actually_worked(linux_data):
+    """`privileged` says the account is root; `sudo` says an allowlisted read
+    was really elevated, which is what the process names depend on."""
+    assert linux_data["privileged"] is False
+    assert linux_data["sudo"] is True
+
+
+def test_sudo_availability_is_never_probed_with_a_command_the_allowlist_refuses():
+    """`sudo -n true` is refused by the sudoers file this project generates, so
+    probing with it would report "no sudo" on every correctly onboarded guest."""
+    assert SUDO_TEST_COMMAND == f"sudo -n {SUDO_COMMANDS[0]}"
+    assert "true" not in SUDO_TEST_COMMAND
+    runner = FakeRunner(linux_answers())
+    collect_linux(runner, linux_device(), now=NOW)
+    assert "sudo -n true" not in runner.commands
+
+
+@pytest.mark.parametrize(
+    ("status", "stderr", "refused"),
+    [
+        (0, "", False),
+        (1, "sudo: a password is required", True),
+        (1, "Sorry, user infra-ro is not allowed to execute '/usr/bin/id' as root", True),
+        (1, "sudo: no tty present and no askpass program specified", True),
+        (127, "sudo: ss: command not found", False),  # sudo ran; the binary is gone
+        (127, "bash: sudo: command not found", True),  # sudo itself is not installed
+        (1, "find: '/etc/httpd': No such file or directory", False),  # the command failed
+    ],
+)
+def test_sudo_refusal_is_told_apart_from_the_command_failing(status, stderr, refused):
+    assert sudo_refused(CommandResult(command="x", status=status, stderr=stderr)) is refused
+
+
+def test_a_binary_missing_from_the_allowlist_does_not_disable_sudo_for_the_others():
+    """sudoers matches an absolute path, so a guest without `ss` refuses
+    `sudo -n ss ...` while still permitting `sudo -n netstat ...`."""
+    answers = linux_answers()
+    for command in (SS_TCP_LISTEN_COMMAND, SS_UDP_LISTEN_COMMAND, SS_ESTABLISHED_COMMAND):
+        answers.pop(f"sudo -n {command}")
+        answers[f"sudo -n {command}"] = CommandResult(
+            command=command, status=1, stderr="sudo: a password is required"
+        )
+    answers[f"sudo -n {NETSTAT_TCP_LISTEN_COMMAND}"] = linux_fixture("netstat-tcp-listen")
+    answers[f"sudo -n {NETSTAT_UDP_LISTEN_COMMAND}"] = linux_fixture("netstat-udp-listen")
+    answers[f"sudo -n {NETSTAT_ESTABLISHED_COMMAND}"] = linux_fixture("netstat-established")
+
+    runner = FakeRunner(answers)
+    data = collect_linux(runner, linux_device(), now=NOW)
+
+    assert f"sudo -n {NETSTAT_TCP_LISTEN_COMMAND}" in runner.commands
+    listeners = {row["port"]: row for row in data["listeners"] if row["proto"] == "tcp"}
+    assert listeners[443]["process"] == "nginx"  # netstat still ran as root
 
 
 def test_sudo_is_only_ever_used_for_the_allowlisted_read_commands():
@@ -565,7 +646,9 @@ def test_windows_listeners_connections_certificates_and_updates(windows_data):
     certs = {row["subject"]: row for row in windows_data["certificates"]}
     assert certs["CN=app-win-01.lab.local"]["not_after"] == "2026-09-20T09:30:00+00:00"
     assert certs["CN=app-win-01.lab.local"]["sans"] == ["app-win-01", "app-win-01.lab.local"]
-    assert certs["CN=app-win-01.lab.local"]["days_to_expiry"] == pytest.approx(13.9, abs=0.1)
+    # whole days: a stored value that moved every run would make every guest
+    # snapshot differ from the last one
+    assert certs["CN=app-win-01.lab.local"]["days_to_expiry"] == 13
     assert certs["CN=win-legacy.lab.local"]["sans"] == []  # /Date(...)/ and no DnsNameList
 
     assert windows_data["updates"]["pending"] == 2
@@ -818,3 +901,303 @@ def test_paramiko_and_winrm_are_imported_lazily():
         if isinstance(node, ast.Import)
         for alias in node.names
     }
+
+
+# --------------------------------------------------------------------------
+# the templates as the guest's login shell sees them
+# --------------------------------------------------------------------------
+#: Every fixed Linux template, replayed through a real shell. `exec_command`
+#: hands the line to the account's login shell, so quoting is part of the
+#: command and a fake runner keyed on the template string cannot see it break.
+LINUX_TEMPLATES: dict[str, str] = {
+    "os_release": OS_RELEASE_COMMAND,
+    "kernel": KERNEL_COMMAND,
+    "hostname": HOSTNAME_COMMAND,
+    "uptime": UPTIME_COMMAND,
+    "cpu": CPU_COMMAND,
+    "meminfo": MEMINFO_COMMAND,
+    "whoami": WHOAMI_COMMAND,
+    "dpkg": DPKG_COMMAND,
+    "rpm": RPM_COMMAND,
+    "apt": APT_UPGRADABLE_COMMAND,
+    "dnf": DNF_CHECK_COMMAND,
+    "units": SYSTEMD_UNITS_COMMAND,
+    "unit_files": SYSTEMD_UNIT_FILES_COMMAND,
+    "ss_tcp": SS_TCP_LISTEN_COMMAND,
+    "ss_udp": SS_UDP_LISTEN_COMMAND,
+    "ss_established": SS_ESTABLISHED_COMMAND,
+    "netstat_tcp": NETSTAT_TCP_LISTEN_COMMAND,
+    "netstat_udp": NETSTAT_UDP_LISTEN_COMMAND,
+    "netstat_established": NETSTAT_ESTABLISHED_COMMAND,
+    "df": DF_COMMAND,
+    "find": CERT_FIND_COMMAND,
+    "openssl": CERT_READ_TEMPLATE.format(path="/etc/nginx/ssl/site.crt"),
+    "tls_probe": TLS_PROBE_TEMPLATE.format(
+        host="127.0.0.1", port=443, timeout=TLS_PROBE_TIMEOUT_SECONDS
+    ),
+    "sudo": SUDO_TEST_COMMAND,
+}
+
+SHELLS = [name for name in ("sh", "dash", "bash") if shutil.which(name)]
+
+
+@pytest.fixture(scope="module")
+def stub_bin(tmp_path_factory) -> Path:
+    """A PATH of stubs that print the argv they were given, one per line."""
+    directory = tmp_path_factory.mktemp("stub-bin")
+    binaries = {command.split()[0] for command in LINUX_TEMPLATES.values()}
+    binaries |= {"cat", "openssl", "sudo", "timeout", "ss", "netstat", "find"}
+    for name in binaries:
+        script = directory / name
+        if name in ("sudo", "timeout"):
+            # both exec the rest of the line, so the real argv still reaches the
+            # binary under test
+            body = '#!/bin/sh\nshift_to=0\nwhile [ "${1#-}" != "$1" ]; do shift; done\nexec "$@"\n'
+        else:
+            body = '#!/bin/sh\nfor a in "$@"; do printf "ARGV:%s\\n" "$a"; done\n'
+        script.write_text(body)
+        script.chmod(0o755)
+    return directory
+
+
+def shell_argv(shell: str, command: str, stub_bin: Path) -> tuple[int, list[str], str]:
+    """Run one template through `shell -c` and report the argv it produced."""
+    completed = subprocess.run(  # noqa: S603 - fixed argv, fixed PATH
+        [shell, "-c", command],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{stub_bin}:/usr/bin:/bin", "HOME": str(stub_bin)},
+        check=False,
+    )
+    argv = [line[5:] for line in completed.stdout.splitlines() if line.startswith("ARGV:")]
+    return completed.returncode, argv, completed.stderr
+
+
+@pytest.mark.skipif(not SHELLS, reason="no POSIX shell to replay the templates through")
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("name", sorted(LINUX_TEMPLATES))
+def test_every_linux_template_survives_the_guests_login_shell(shell, name, stub_bin):
+    """`dpkg-query -W -f=${binary:Package}` is a "Bad substitution" under dash
+    and expands to `-f=tn` under bash: unquoted, the package list is garbage."""
+    status, _argv, stderr = shell_argv(shell, LINUX_TEMPLATES[name], stub_bin)
+
+    assert status == 0, f"{name}: exit {status}: {stderr}"
+    assert "Bad substitution" not in stderr
+    assert "not found" not in stderr
+
+
+@pytest.mark.skipif(not SHELLS, reason="no POSIX shell to replay the templates through")
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_package_format_strings_reach_the_binary_intact(shell, stub_bin):
+    _status, dpkg, _stderr = shell_argv(shell, DPKG_COMMAND, stub_bin)
+    assert dpkg == ["-W", "-f=${binary:Package}\\t${Version}\\n"]
+
+    _status, rpm, _stderr = shell_argv(shell, RPM_COMMAND, stub_bin)
+    assert rpm == ["-qa", "--qf", "%{NAME}\\t%{VERSION}-%{RELEASE}\\n"]
+
+
+@pytest.mark.skipif(not SHELLS, reason="no POSIX shell to replay the templates through")
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_certificate_find_reaches_find_as_the_sudoers_file_spells_it(shell, stub_bin):
+    """The argv sudo matches is the one the shell produced, so the sudoers
+    entry is generated by stripping exactly these quotes and backslashes."""
+    from infra_agent.onboarding.accounts import sudoers_line
+
+    _status, argv, _stderr = shell_argv(shell, CERT_FIND_COMMAND, stub_bin)
+
+    assert argv[0] == "-L"
+    assert "(" in argv and ")" in argv and "\\(" not in argv
+    assert "*.pem" in argv  # the quotes stopped the shell globbing it
+    assert " ".join(argv) in "\n".join(sudoers_line("infra-ro"))
+
+
+# --------------------------------------------------------------------------
+# certificates on disk
+# --------------------------------------------------------------------------
+def test_the_certificate_find_follows_certbots_symlinks(tmp_path):
+    """certbot keeps `live/<domain>/cert.pem` as a symlink into `archive/`, and
+    `-type f` alone does not match a symlink: without `-L` the flagship
+    certificate-expiry case is never collected at all."""
+    assert CERT_FIND_COMMAND.startswith("find -L ")
+    live = tmp_path / "etc/letsencrypt/live/app.example.com"
+    archive = tmp_path / "etc/letsencrypt/archive/app.example.com"
+    archive.mkdir(parents=True)
+    live.mkdir(parents=True)
+    (tmp_path / "etc/nginx/ssl").mkdir(parents=True)
+    (tmp_path / "etc/nginx/ssl/site.crt").write_text("x")
+    for stem in ("cert", "chain", "fullchain", "privkey"):
+        (archive / f"{stem}1.pem").write_text("x")
+        (live / f"{stem}.pem").symlink_to(archive / f"{stem}1.pem")
+
+    command = CERT_FIND_COMMAND.replace("/etc/", f"{tmp_path}/etc/")
+    found = subprocess.run(  # noqa: S602 - the command is a module constant
+        command, shell=True, capture_output=True, text=True, check=False
+    ).stdout.split()
+
+    assert f"{live}/cert.pem" in found
+    assert f"{tmp_path}/etc/nginx/ssl/site.crt" in found
+    # the private key is excluded in the find itself, and the intermediate and
+    # the bundle would only duplicate the leaf or add a CA node
+    assert not any(name in " ".join(found) for name in ("privkey", "chain.pem", "fullchain.pem"))
+
+
+def test_certificate_expiry_is_stored_in_whole_days_so_a_rerun_is_not_a_change():
+    """A stored value that moves every fifteen minutes makes every guest
+    snapshot differ from the last one, and rebuilds the graph every cycle."""
+    from infra_agent.store.snapshots import diff_structures
+
+    # an hour past midday, so neither run sits exactly on a day boundary
+    moment = NOW + timedelta(hours=1)
+    first = collect_linux(FakeRunner(linux_answers()), linux_device(), now=moment)
+    later = collect_linux(
+        FakeRunner(linux_answers()), linux_device(), now=moment + timedelta(minutes=15)
+    )
+
+    assert all(isinstance(row["days_to_expiry"], int) for row in first["certificates"])
+    assert diff_structures(first["certificates"], later["certificates"]) == []
+
+
+# --------------------------------------------------------------------------
+# TLS probing
+# --------------------------------------------------------------------------
+def test_every_https_listener_is_probed_not_only_the_well_known_ports():
+    """A Node app on 3001 serves TLS as much as nginx on 443 does."""
+    targets = tls_probe_targets(
+        [
+            {"proto": "tcp", "port": 3001, "address": "0.0.0.0", "process": "node"},
+            {"proto": "tcp", "port": 8443, "address": "0.0.0.0", "process": "java"},
+            {"proto": "tcp", "port": 22, "address": "0.0.0.0", "process": "sshd"},
+            {"proto": "tcp", "port": 5432, "address": "127.0.0.1", "process": "postgres"},
+            {"proto": "tcp", "port": 80, "address": "0.0.0.0", "process": "nginx"},
+            {"proto": "udp", "port": 53, "address": "0.0.0.0", "process": "systemd-resolve"},
+        ]
+    )
+    ports = [target["port"] for target in targets]
+
+    assert 3001 in ports and 8443 in ports
+    assert ports[0] == 8443  # a port that certainly speaks TLS is knocked on first
+    for never in (22, 5432, 80, 53):
+        assert never not in ports
+
+
+def test_the_probe_never_makes_more_handshakes_than_the_cap():
+    listeners = [
+        {"proto": "tcp", "port": port, "address": "0.0.0.0", "process": "app"}
+        for port in range(20000, 20100)
+    ]
+    assert len(tls_probe_targets(listeners)) == 20
+
+
+def test_a_hostile_listener_address_cannot_reach_the_shell():
+    """`ss` output is something the guest said, and it is interpolated into a
+    shell pipeline: only a literal IP address is ever allowed through."""
+    hostile = tls_probe_targets(
+        [
+            {
+                "proto": "tcp",
+                "port": 443,
+                "address": "127.0.0.1;touch /tmp/pwned #",
+                "process": "nginx",
+            }
+        ]
+    )
+    assert hostile[0]["host"] == "127.0.0.1"
+    command = TLS_PROBE_TEMPLATE.format(host=hostile[0]["host"], port=443, timeout=3)
+    assert "touch" not in command and ";" not in command
+
+    scoped = tls_probe_targets(
+        [{"proto": "tcp", "port": 443, "address": "fe80::1%eth0", "process": "nginx"}]
+    )
+    assert scoped[0]["host"] == "[fe80::1]"
+
+
+# --------------------------------------------------------------------------
+# a failed section is "unknown", never "down"
+# --------------------------------------------------------------------------
+def test_a_failed_service_list_reports_unknown_rather_than_every_service_down():
+    """A transient systemctl or SSH failure must not page the owner for every
+    tagged service on the guest, which is what publishing 0 would do."""
+    answers = linux_answers()
+    answers[SYSTEMD_UNITS_COMMAND] = CommandResult(
+        command=SYSTEMD_UNITS_COMMAND, status=1, stderr="Failed to list units: Connection timed out"
+    )
+    data = collect_linux(FakeRunner(answers), linux_device(), now=NOW)
+
+    assert "services" in data["errors"]
+    assert data["tagged_services"]
+    assert all(row["active"] is None and row["found"] is None for row in data["tagged_services"])
+    assert any("reported as unknown" in warning for warning in data["warnings"])
+
+
+def test_an_unknown_service_publishes_no_gauge_and_keeps_the_last_value(linux_data):
+    collector = GuestLinuxCollector()
+    sample = REGISTRY.get_sample_value
+    device = "web-unknown-service"
+    labels = {"device": device, "service": "postgresql"}
+
+    collector.publish_metrics(device, linux_data)
+    assert sample("infra_guest_service_active", labels) == 1.0
+
+    degraded = {
+        **linux_data,
+        "services": [],
+        "tagged_services": [
+            {"service": row["service"], "unit": None, "found": None, "state": None, "active": None}
+            for row in linux_data["tagged_services"]
+        ],
+        "errors": {"services": "RuntimeError: systemctl exited 1"},
+    }
+    collector.publish_metrics(device, degraded)
+
+    # unchanged: GuestServiceDown must not fire because a section failed
+    assert sample("infra_guest_service_active", labels) == 1.0
+
+
+# --------------------------------------------------------------------------
+# Windows disks
+# --------------------------------------------------------------------------
+def test_windows_disks_fall_back_to_win32_logicaldisk_when_get_volume_is_denied():
+    """`Get-Volume` reads the Storage CIM classes, which are ACL'd to local
+    administrators - and the account this project creates is deliberately not
+    one. Without the fallback GuestDiskFull is dead on every Windows guest."""
+    answers = windows_answers()
+    answers[PS_VOLUMES] = CommandResult(
+        command=PS_VOLUMES, status=1, stderr="Get-Volume : Access denied"
+    )
+    answers[PS_LOGICAL_DISKS] = windows_fixture("logical-disks")
+
+    data = collect_windows(FakeRunner(answers), windows_device(), now=NOW)
+
+    disks = {row["mount"]: row for row in data["disks"]}
+    assert set(disks) == {"C:", "D:"}
+    assert disks["C:"]["free_bytes"] == 10307921510
+    assert disks["C:"]["label"] == "System"
+    assert disks["C:"]["source"] == "Win32_LogicalDisk"
+    assert "disks" not in data["errors"]
+
+
+def test_windows_disks_that_answer_nowhere_are_an_error_with_a_warning():
+    answers = windows_answers()
+    answers[PS_VOLUMES] = CommandResult(command=PS_VOLUMES, status=1, stderr="Access denied")
+    data = collect_windows(FakeRunner(answers), windows_device(), now=NOW)
+
+    assert data["disks"] == []
+    assert "Win32_LogicalDisk" in data["errors"]["disks"]
+    assert any("free-space alerts are blind" in warning for warning in data["warnings"])
+
+
+def test_the_winrm_session_is_given_the_command_timeout():
+    """pywinrm defaults to 20 s, which cuts `Get-ComputerInfo` off."""
+    captured: dict[str, Any] = {}
+
+    class FakeSession:
+        def __init__(self, endpoint: str, **kwargs: Any) -> None:
+            captured["endpoint"] = endpoint
+            captured.update(kwargs)
+
+    with mock.patch.dict(sys.modules, {"winrm": types.SimpleNamespace(Session=FakeSession)}):
+        WinRmRunner(windows_device(), Credential(username="infra-ro", password="pw"), timeout=45)
+
+    assert captured["operation_timeout_sec"] == 45
+    assert captured["read_timeout_sec"] > captured["operation_timeout_sec"]
+    assert captured["endpoint"].startswith("https://10.20.0.21:5986/")

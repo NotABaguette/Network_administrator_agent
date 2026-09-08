@@ -15,7 +15,11 @@ nothing on the guest:
 
 The Linux side also reports whether that passwordless sudo actually works,
 because without it the collector cannot see which process owns a socket and the
-application layer of the graph loses its edges.
+application layer of the graph loses its edges. It is probed with
+`SUDO_TEST_COMMAND` - one of the collector's own allowlisted read commands -
+rather than with `sudo -n true`, which the generated allowlist refuses by
+design and which would therefore report "no sudo" on every correctly onboarded
+guest.
 
 `paramiko` and `winrm` are imported lazily, so this module imports without the
 `devices` extra.
@@ -36,6 +40,7 @@ from infra_agent.collectors.guest import (
     SshRunner,
     WinRmRunner,
     parse_os_release,
+    sudo_refused,
 )
 from infra_agent.models.common import Credential, DeviceKind, ProbeResult, SeedDevice
 from infra_agent.onboarding.probes.base import Probe
@@ -137,7 +142,10 @@ def linux_result(device: SeedDevice, answers: dict[str, CommandResult]) -> Probe
         "user": user,
         "uid": uid,
     }
-    sudo_ok = answers["sudo"].ok
+    # `SUDO_TEST_COMMAND` is one of the collector's own allowlisted reads, so an
+    # exit code is not the answer: `ss` may be absent (127) on a guest whose
+    # sudo works. Only sudo's own refusal counts as "no sudo".
+    sudo_ok = not sudo_refused(answers["sudo"])
     warnings: list[str] = []
     if uid == 0:
         warnings.append(ROOT_WARNING.format(who=f"root ({user or 'uid 0'})", name=device.name))

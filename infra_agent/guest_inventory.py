@@ -56,7 +56,11 @@ GUEST_KIND_TAGS: dict[str, DeviceKind] = {
 
 #: `service:nginx`, `auto:restart`, `vm:web-01` - the tags the collector and the
 #: change engine read. Copied from the annotation onto the seed device.
-_TAG = re.compile(r"\b([a-z][a-z0-9_-]*):([A-Za-z0-9_.@+-]+)\b")
+#:
+#: The *key* is matched case-insensitively and normalised to lower case, but the
+#: value keeps the case the operator typed: `vm:Web-01` has to match the graph's
+#: `vm:Web-01` node id, and a Windows service really is called `MSSQLSERVER`.
+_TAG = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*):([A-Za-z0-9_.@+-]+)\b")
 
 EXPORTER_PORTS: dict[DeviceKind, int] = {
     DeviceKind.guest_linux: NODE_EXPORTER_PORT,
@@ -85,13 +89,18 @@ class GuestCandidate(BaseModel):
 
 
 def annotation_tags(*values: Any) -> list[str]:
-    """`key:value` tokens out of a VM annotation or an explicit tag list."""
+    """`key:value` tokens out of a VM annotation or an explicit tag list.
+
+    The key is lower-cased so `Service:nginx` and `service:nginx` are one tag;
+    the value is left exactly as written, because it is a name somewhere else -
+    a VM node id (`vm:Web-01`), a Windows service (`service:MSSQLSERVER`).
+    """
     found: list[str] = []
     for value in values:
         if isinstance(value, (list, tuple)):
             found.extend(str(item) for item in value)
         elif value:
-            found.extend(f"{key}:{val}" for key, val in _TAG.findall(str(value).lower()))
+            found.extend(f"{key.lower()}:{val}" for key, val in _TAG.findall(str(value)))
     return sorted(dict.fromkeys(tag.strip() for tag in found if tag.strip()))
 
 
@@ -171,7 +180,7 @@ def _candidate(
         host=host,
         kind=kind,
         address=address or "",
-        tags=[tag for tag in tags if tag not in GUEST_KIND_TAGS],
+        tags=[tag for tag in tags if tag.lower() not in GUEST_KIND_TAGS],
         power_state=vm.get("power_state"),
         guest_os=vm.get("guest_os"),
         onboarded=onboarded,

@@ -41,7 +41,6 @@
  "connections": [
   {
    "local_port": 49812,
-   "local_ports": [49812, 49813],
    "remote_ip": "10.20.0.31",
    "remote_port": 5432,
    "process": "w3wp",
@@ -50,7 +49,6 @@
   },
   {
    "local_port": 49900,
-   "local_ports": [49900],
    "remote_ip": "198.51.100.7",
    "remote_port": 443,
    "process": "w3wp",
@@ -75,7 +73,7 @@
    "subject": "CN=app-win-01.lab.local",
    "issuer": "CN=Example Internal CA, O=Example Ltd, C=GB",
    "not_after": "2026-09-20T09:30:00+00:00",
-   "days_to_expiry": 13.9,
+   "days_to_expiry": 13,
    "sans": ["app-win-01", "app-win-01.lab.local"],
    "source": "Cert:\\LocalMachine\\My\\9A1B2C3D4E5F60718293A4B5C6D7E8F901234567",
    "kind": "store",

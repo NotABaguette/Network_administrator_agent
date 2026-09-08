@@ -8,6 +8,8 @@ replaced by a fake runner; nothing connects to anything.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -290,7 +292,8 @@ def test_the_sudoers_allowlist_is_generated_from_the_collector_commands():
 
     for command in SUDO_COMMANDS:
         binary, _, arguments = command.partition(" ")
-        assert arguments.replace("'", "") in lines, command
+        expected = arguments.replace("'", "").replace("\\(", "(").replace("\\)", ")")
+        assert expected in lines, command
         assert f"/{binary} " in lines
     assert "infra-ro ALL=(root) NOPASSWD: INFRA_READ" in lines
     assert "ALL=(ALL)" not in lines and "NOPASSWD: ALL" not in lines
@@ -298,6 +301,10 @@ def test_the_sudoers_allowlist_is_generated_from_the_collector_commands():
     # shell quoting must not survive into the sudoers file
     assert "'" not in lines
     assert "-name *.pem" in lines
+    # ... and a backslash-escaped parenthesis is not merely redundant here: it
+    # is a sudoers syntax error, so the whole file is rejected and every
+    # `sudo -n` on the guest answers "a password is required".
+    assert "\\(" not in lines and "\\)" not in lines
 
 
 def test_the_linux_guest_account_is_unprivileged_and_key_only():
@@ -330,3 +337,59 @@ def test_account_templates_never_grant_a_shell_login_or_a_wildcard(kind: DeviceK
     commands = "\n".join(account_commands(kind, "infra-ro", "s3cret", "10.10.10.50"))
     assert "ALL=(ALL:ALL) ALL" not in commands
     assert "Domain Admins" not in commands
+
+
+def test_sudo_is_probed_with_a_command_the_generated_allowlist_actually_permits():
+    """`sudo -n true` is refused by the sudoers file `infra onboard accounts`
+    writes - it permits SUDO_COMMANDS and nothing else - so probing with it
+    would report "no sudo" on every correctly onboarded guest."""
+    from infra_agent.collectors.guest import SUDO_COMMANDS
+
+    assert SUDO_TEST_COMMAND == f"sudo -n {SUDO_COMMANDS[0]}"
+    _result, runner = probe_linux(linux_answers())
+    assert "sudo -n true" not in runner.commands
+    assert SUDO_TEST_COMMAND in runner.commands
+
+
+def test_a_missing_binary_is_not_a_missing_sudo():
+    """`sudo: ss: command not found` means sudo worked and iproute2 is absent;
+    reporting "no passwordless sudo" there sends the owner to fix the wrong
+    thing."""
+    answers = linux_answers()
+    answers[SUDO_TEST_COMMAND] = CommandResult(
+        command=SUDO_TEST_COMMAND, status=127, stderr="sudo: ss: command not found"
+    )
+    result, _runner = probe_linux(answers)
+
+    assert result.privilege == "user+sudo"
+    assert result.warnings == []
+
+
+def test_sudo_itself_missing_is_reported_as_no_sudo():
+    answers = linux_answers()
+    answers[SUDO_TEST_COMMAND] = CommandResult(
+        command=SUDO_TEST_COMMAND, status=127, stderr="bash: sudo: command not found"
+    )
+    result, _runner = probe_linux(answers)
+
+    assert result.privilege == "user"
+    assert any("application layer of the graph" in w for w in result.warnings)
+
+
+VISUDO = shutil.which("visudo") or "/usr/sbin/visudo"
+
+
+@pytest.mark.skipif(not Path(VISUDO).exists(), reason="visudo is not installed")
+def test_the_generated_sudoers_file_parses(tmp_path: Path):
+    """A sudoers syntax error is not cosmetic: sudo rejects the whole file, so
+    every `sudo -n` on the guest answers "a password is required" and the
+    collector silently loses process names and Let's Encrypt certificates."""
+    path = tmp_path / "infra-agent"
+    path.write_text("\n".join(sudoers_line("infra-ro")) + "\n")
+    path.chmod(0o440)
+
+    completed = subprocess.run(  # noqa: S603 - fixed argv
+        [VISUDO, "-cf", str(path)], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr

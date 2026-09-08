@@ -53,7 +53,6 @@
  "connections": [
   {
    "local_port": 40122,
-   "local_ports": [40122],
    "remote_ip": "10.10.10.50",
    "remote_port": 8086,
    "process": "telegraf",
@@ -79,7 +78,7 @@
    "sans": ["db-01.lab.local"],
    "source": "/etc/postgresql/14/main/server.crt",
    "kind": "file",
-   "days_to_expiry": 4.5
+   "days_to_expiry": 4
   }
  ],
  "tagged_services": [
@@ -93,6 +92,7 @@
   }
  ],
  "privileged": false,
+ "sudo": true,
  "warnings": [],
  "errors": {}
 }
