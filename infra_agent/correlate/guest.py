@@ -84,6 +84,10 @@ _SKIP_REMOTE_KINDS = ("loopback", "link_local", "unspecified", "multicast")
 #: How many ports an external endpoint node lists before it just counts them.
 MAX_EXTERNAL_PORTS = 12
 
+#: Process names that own a socket without being an application: the Windows
+#: kernel answers on 445 and on every port an HTTP.sys service registers.
+NOT_A_SERVICE = frozenset({"system", "idle", "kernel_task", "-"})
+
 CONFIDENCE_TAG = 1.0
 CONFIDENCE_NAME = 0.95
 CONFIDENCE_ADDRESS = 0.9
@@ -127,7 +131,7 @@ def service_name_for(name: str | None, services: Sequence[Mapping[str, Any]]) ->
     if not name:
         return None
     lowered = name.strip().lower()
-    if not lowered:
+    if not lowered or lowered in NOT_A_SERVICE:
         return None
     stems = [str(row.get("name") or "").removesuffix(".service") for row in services]
     for stem in stems:

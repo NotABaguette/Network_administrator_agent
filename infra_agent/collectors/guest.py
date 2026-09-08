@@ -898,7 +898,7 @@ def tls_probe_targets(listeners: Sequence[Mapping[str, Any]]) -> list[dict[str, 
 def _probe_host(row: Mapping[str, Any]) -> str:
     """Where to knock: loopback for a wildcard bind, the bound address otherwise."""
     address = str(row.get("address") or "").strip()
-    if address in ("", "*", "0.0.0.0", "::", "[::]", "127.0.0.1", "::1"):  # noqa: S104
+    if address in ("", "*", "0.0.0.0", "::", "[::]", "127.0.0.1", "::1"):
         return "127.0.0.1"
     return address
 

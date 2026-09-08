@@ -241,22 +241,31 @@ def render_applications(graph: TopologyGraph) -> str:
     ):
         if source in graph and target in graph:
             lines.append(f"  {_safe(source)} --> {_safe(target)}")
+
+    # Every certificate a port presents, plus any certificate on a guest that is
+    # about to expire - the one nobody serves yet is exactly the one that gets
+    # forgotten until it breaks something.
     for source, target, _data in sorted(
         graph.edges_of_kind(EdgeKind.has_certificate), key=lambda e: (e[0], e[1])
     ):
-        if graph.node(source).get("kind") != str(NodeKind.listener):
-            continue
         cert = graph.node(target)
+        days = cert.get("days_to_expiry")
+        soon = isinstance(days, (int, float)) and days < CERT_WARN_DAYS
+        served = graph.node(source).get("kind") == str(NodeKind.listener)
+        if not served and not (soon and source in guests):
+            continue
         if target not in drawn_certs:
             drawn_certs.add(target)
-            days = cert.get("days_to_expiry")
             suffix = f" ({days:.0f}d)" if isinstance(days, (int, float)) else ""
             lines.append(f'  {_safe(target)}[/"{_text(cert.get("subject", target))}{suffix}"/]')
-            if isinstance(days, (int, float)) and days < CERT_WARN_DAYS:
+            if soon:
                 expiring.append(target)
         lines.append(f'  {_safe(source)} -.->|"tls"| {_safe(target)}')
 
     externals: list[str] = []
+    # A node already drawn inside a subgraph, or that *is* a subgraph, must not
+    # be declared again: mermaid gives an id one meaning only.
+    drawn = {node for nodes in guests.values() for node in nodes} | set(guests)
     for source, target, data in sorted(
         graph.edges_of_kind(EdgeKind.connects_to), key=lambda e: (e[0], e[1])
     ):
@@ -264,7 +273,8 @@ def render_applications(graph: TopologyGraph) -> str:
             if target not in externals:
                 externals.append(target)
                 lines.append(f'  {_safe(target)}["{_text(graph.node(target).get("label"))}"]')
-        elif target not in graph.nodes_of_kind(NodeKind.listener) and target not in drawn_certs:
+        elif target not in drawn and target not in drawn_certs:
+            drawn.add(target)
             label = _text(graph.node(target).get("label", target))
             lines.append(f'  {_safe(target)}["{label}"]')
         port = data.get("remote_port")
@@ -283,13 +293,17 @@ def render_applications(graph: TopologyGraph) -> str:
     return "\n".join(lines)
 
 
-def _application_owner(graph: TopologyGraph, node: str) -> str | None:
-    """The vm or device a service or listener belongs to."""
+def _application_owner(graph: TopologyGraph, node: str, depth: int = 0) -> str | None:
+    """The vm or device a service or listener belongs to (listener -> service -> vm)."""
+    if depth > 3:
+        return None
     for kind in (EdgeKind.runs_service, EdgeKind.listens_on):
         for owner, _edge in graph.in_edges(node, kind):
             if graph.node(owner).get("kind") in (str(NodeKind.vm), str(NodeKind.device)):
                 return owner
-            grandparent = _application_owner(graph, owner) if owner != node else None
+            grandparent = (
+                _application_owner(graph, owner, depth + 1) if owner != node else None
+            )
             if grandparent:
                 return grandparent
     return None

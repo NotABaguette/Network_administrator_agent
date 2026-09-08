@@ -26,8 +26,8 @@ from infra_agent.correlate.guest import (
     service_name_for,
 )
 from infra_agent.correlate.impact import DependencyIndex, default_action, impact_analyze
-from infra_agent.correlate.mermaid import render, render_applications, write_docs
-from infra_agent.correlate.model import EdgeKind, NodeKind, TopologyGraph
+from infra_agent.correlate.mermaid import _safe, render, render_applications, write_docs
+from infra_agent.correlate.model import EdgeKind, Evidence, NodeKind, TopologyGraph
 from infra_agent.models.common import DeviceKind, SeedDevice, SeedInventory, Snapshot
 from infra_agent.store.snapshots import FileSnapshotStore
 
@@ -425,6 +425,57 @@ def test_the_applications_diagram_draws_guests_ports_and_dependencies(graph: Top
     assert "classDef external" in diagram
     assert "tls" in diagram  # the certificate the listener presents
     assert render(graph, "applications") == diagram
+
+
+def test_the_diagram_shows_the_certificate_nobody_serves_but_everybody_forgets(
+    graph: TopologyGraph,
+):
+    """The expiring one is on disk, not on a port; drawing only served
+    certificates would hide exactly the certificate that breaks something."""
+    diagram = render_applications(graph)
+
+    legacy = _safe("certificate:web-01:C=GB, O=Example Ltd, CN=legacy.internal")
+    assert "CN=legacy.internal (14d)" in diagram
+    assert "classDef expiring" in diagram
+    styled = [
+        line
+        for line in diagram.splitlines()
+        if line.strip().startswith("class ") and line.rstrip().endswith("expiring;")
+    ]
+    assert styled and legacy in styled[0]
+    # ... and the healthy one, which a port does serve, is drawn without the alarm
+    served = _safe("certificate:web-01:CN=app.example.com")
+    assert f"{served}[/" in diagram
+    assert served not in styled[0]
+
+
+def test_the_windows_kernel_is_not_an_application(graph: TopologyGraph):
+    """`System` owns 443 on a Windows box; it is not a service anybody restarts."""
+    assert not graph.has("service:app-win-01:System")
+    assert graph.has("listener:app-win-01:tcp/443")
+    assert graph.edge(WIN, "listener:app-win-01:tcp/443", EdgeKind.listens_on) is not None
+
+
+def test_a_dependency_on_an_uncollected_port_of_a_collected_guest_draws_once(tmp_path: Path):
+    """The target is a subgraph; declaring it as a node too is a broken diagram."""
+    graph = build_estate(tmp_path, guests=["web-01", "db-01"])
+    # db-01 answers on 5432 and 8080; nothing lists 8086, and mgmt-01 is the
+    # peer there, so aim a dependency at db-01 on a port nobody collected.
+    graph.add_edge(
+        NGINX,
+        DB,
+        EdgeKind.connects_to,
+        Evidence(collector="guest", device="web-01"),
+        remote_port=9999,
+    )
+    diagram = render_applications(graph)
+
+    declarations = [
+        line for line in diagram.splitlines() if line.strip().startswith(f"{_safe(DB)}[")
+    ]
+    assert declarations == []
+    assert f'subgraph {_safe(DB)}["db-01"]' in diagram
+    assert f'{_safe(NGINX)} -->|"9999"| {_safe(DB)}' in diagram
 
 
 def test_an_estate_with_no_guests_renders_an_empty_applications_diagram():
