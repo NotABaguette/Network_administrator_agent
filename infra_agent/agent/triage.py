@@ -516,6 +516,49 @@ class TriageService:
         except Exception:
             log.exception("could not restore the Tier 0 history; cooldowns start empty")
 
+    def change_engine_executor(
+        self, candidate: Tier0Candidate
+    ) -> Callable[[Tier0Candidate, Incident], str] | None:
+        """Phase 4 hook: run an allowed Tier 0 candidate through the change engine.
+
+        Returns None - so the decision stays `unwired`, exactly as it did before
+        the engine existed - whenever the platform cannot act on that object at
+        all: it is not a device in the inventory, it has no read-write
+        credential (collectors keep the read-only one), or no executor
+        implements the action for its platform. Shadow mode never reaches here;
+        the caller has already reported "would have done X".
+
+        The guard has already allowed the action and recorded the run, so
+        `run_tier0` is told not to consult it twice; its own freeze check, its
+        dry run and the recomputed tier still apply, and an action impact
+        analysis escalates goes to the approval channel instead of running.
+        """
+        try:
+            from infra_agent.change.engine import ChangeEngine
+        except Exception:  # pragma: no cover - the change package is always present
+            return None
+        engine = ChangeEngine.from_settings(
+            self.settings,
+            notifier=self.notifier,
+            plan_store=self.plans,
+            guard=self.guard,
+            inventory=self._inventory,
+            gateway=self.gateway,
+        )
+        if not engine.can_run_tier0(candidate.action, candidate.object_id):
+            return None
+
+        def run(one: Tier0Candidate, incident: Incident) -> str:
+            plan = engine.tier0_plan(
+                one.action,
+                one.object_id,
+                cause=derive_cause(one.action, incident),
+                title=f"tier 0: {one.action} on {one.object_id}",
+            )
+            return engine.run_tier0(plan, guard_checked=True, object_id=one.object_id).summary
+
+        return run
+
     def _tier0_refusal(
         self, candidate: Tier0Candidate, reason: str, tags: list[str], cause: str | None
     ) -> Tier0Decision:
@@ -583,7 +626,8 @@ class TriageService:
                 f"{candidate.object_id} for {incident.title}. {candidate.rationale}".strip()
             )
             return decision
-        if self.tier0_executor is None:
+        executor = self.tier0_executor or self.change_engine_executor(candidate)
+        if executor is None:
             metrics.AGENT_TIER0_ACTIONS.labels(action=candidate.action, mode="unwired").inc()
             self.notifier.send(
                 f"Tier 0 allowed but no executor is wired for {candidate.action} "
@@ -596,7 +640,7 @@ class TriageService:
                 }
             )
         try:
-            outcome = self.tier0_executor(candidate, incident)
+            outcome = executor(candidate, incident)
         except Exception as exc:
             # The cooldown slot is already spent, so the owner is told what was
             # attempted and on what; swallowing this would leave a Tier 0 action

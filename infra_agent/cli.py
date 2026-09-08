@@ -70,6 +70,194 @@ def change_list(state: str | None = None) -> None:
     console.print_json(data=change_tools.list_plans(state))
 
 
+def _change_engine():
+    """The engine the change sub-app drives, on the same store as the tools."""
+    from infra_agent.tools import change_tools
+
+    return change_tools.engine()
+
+
+def _refused(exc: Exception) -> None:
+    console.print(f"[red]refused[/]: {exc}")
+    raise typer.Exit(code=3)
+
+
+@change_app.command("dry-run")
+def change_dry_run(
+    plan_id: str,
+    request_approval: bool = typer.Option(
+        False,
+        "--request-approval",
+        "-a",
+        help="mint an approval token for this plan and send it to the owner channel",
+    ),
+) -> None:
+    """Render a proposed plan's diff and compute its risk tier. Changes nothing."""
+    from infra_agent.change.engine import ChangeRefused
+    from infra_agent.change.plan import ChangeState, Tier
+
+    engine = _change_engine()
+    try:
+        plan = engine.dry_run(plan_id)
+    except ChangeRefused as exc:
+        _refused(exc)
+        return
+    except KeyError:
+        console.print(f"[red]unknown plan[/]: {plan_id}")
+        raise typer.Exit(code=1) from None
+    console.print_json(data=plan.llm_view())
+    blockers = plan.diff.get("blockers") if isinstance(plan.diff, dict) else None
+    if blockers or (plan.state is ChangeState.proposed):
+        # A plan past `proposed` is being re-validated, so its state does not
+        # move; what says whether the dry run was clean is the blocker list.
+        console.print(f"[red]blocked[/]: {plan.state.value}; see the blockers above")
+        raise typer.Exit(code=1)
+    console.print(f"tier [bold]{plan.tier.name}[/]: " + "; ".join(plan.tier_reasons))
+    if not request_approval:
+        console.print("run again with --request-approval to put it in front of the owner")
+        return
+    token = engine.request_approval(plan_id)
+    # The operator at this terminal is the human channel `docs/risk-tiers.md`
+    # names next to Telegram, so the token is printed here and nowhere else:
+    # never logged, never stored on the plan, never visible to the model.
+    console.print(f"approval token for {plan_id}: [bold]{token}[/]")
+    plan = engine.plans.get(plan_id)
+    if plan.tier is Tier.WINDOW and plan.confirmation_phrase:
+        console.print(f"tier 2 confirmation phrase: [bold]{plan.confirmation_phrase}[/]")
+    console.print(f"approve with: infra change approve {plan_id}")
+
+
+@change_app.command("execute")
+def change_execute(
+    plan_id: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="do not ask for confirmation"),
+) -> None:
+    """Execute an approved ChangePlan. Refuses anything that is not approved."""
+    from infra_agent.change.engine import ChangeRefused
+
+    engine = _change_engine()
+    try:
+        plan = engine.plans.get(plan_id)
+    except KeyError:
+        console.print(f"[red]unknown plan[/]: {plan_id}")
+        raise typer.Exit(code=1) from None
+    if not yes:
+        typer.confirm(
+            f"execute {plan.id} ({plan.title}, tier {plan.tier.name}) on "
+            f"{', '.join(plan.targets)}?",
+            abort=True,
+        )
+    try:
+        record = engine.execute(plan_id)
+    except ChangeRefused as exc:
+        _refused(exc)
+        return
+    console.print_json(data=record.llm_view())
+    colour = "green" if record.outcome == "done" else "red"
+    console.print(f"[{colour}]{record.outcome}[/] in {record.duration_seconds}s")
+    if record.outcome != "done":
+        raise typer.Exit(code=1)
+
+
+@change_app.command("rollback")
+def change_rollback(
+    plan_id: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="do not ask for confirmation"),
+) -> None:
+    """Undo the last recorded execution of a plan."""
+    from infra_agent.change.engine import ChangeRefused
+
+    engine = _change_engine()
+    if not yes:
+        typer.confirm(f"roll {plan_id} back?", abort=True)
+    try:
+        record = engine.rollback(plan_id)
+    except ChangeRefused as exc:
+        _refused(exc)
+        return
+    except KeyError:
+        console.print(f"[red]unknown plan[/]: {plan_id}")
+        raise typer.Exit(code=1) from None
+    console.print_json(data=record.llm_view())
+    if record.outcome != "rolled_back":
+        raise typer.Exit(code=1)
+
+
+@change_app.command("show")
+def change_show(plan_id: str) -> None:
+    """A plan, its history and every execution recorded against it."""
+    from rich.table import Table
+
+    from infra_agent.change.plan import ChangeState, Tier
+
+    engine = _change_engine()
+    try:
+        plan = engine.plans.get(plan_id)
+    except KeyError:
+        console.print(f"[red]unknown plan[/]: {plan_id}")
+        raise typer.Exit(code=1) from None
+    console.print_json(data=plan.llm_view())
+    provenance = engine.plans.provenance(plan_id)
+    if provenance is None:
+        console.print(
+            "[yellow]not dry-run by this platform[/]: run `infra change dry-run "
+            f"{plan_id}` before executing it"
+        )
+    if (
+        plan.tier is Tier.WINDOW
+        and plan.confirmation_phrase
+        and plan.state
+        in (
+            ChangeState.awaiting_approval,
+            ChangeState.approved,
+        )
+    ):
+        # This terminal is a human channel, the same one `infra change dry-run
+        # --request-approval` prints the token to. The phrase is never logged,
+        # never returned to a tool and never in `llm_view`.
+        console.print(f"tier 2 confirmation phrase: [bold]{plan.confirmation_phrase}[/]")
+    records = engine.plans.executions(plan_id)
+    if not records:
+        console.print("[yellow]no execution recorded[/]")
+        return
+    table = Table("execution", "outcome", "started", "seconds", "steps", "checks")
+    for record in records:
+        table.add_row(
+            record.id,
+            record.outcome,
+            record.started_at.isoformat(timespec="seconds"),
+            str(record.duration_seconds),
+            str(len(record.steps)),
+            f"{sum(1 for c in record.checks if c.ok)}/{len(record.checks)} ok",
+        )
+    console.print(table)
+
+
+@change_app.command("unapproved")
+def change_unapproved(
+    device: str | None = typer.Option(None, "--device", "-d", help="limit to one device"),
+    limit: int = typer.Option(20, help="maximum rows"),
+) -> None:
+    """Configuration commits that matched no ChangePlan executed on that device."""
+    from rich.table import Table
+
+    changes = _change_engine().unapproved_changes(device, limit=limit)
+    if not changes:
+        console.print("[green]no unapproved configuration changes recorded[/]")
+        return
+    table = Table("when", "device", "file", "commit", "why")
+    for change in changes:
+        table.add_row(
+            change.at.isoformat(timespec="seconds"),
+            change.device,
+            change.filename or "",
+            change.commit_sha[:12],
+            change.reason,
+        )
+    console.print(table)
+    raise typer.Exit(code=1)
+
+
 @change_app.command("freeze")
 def change_freeze() -> None:
     """Break-glass. Sets the freeze marker; restart services with INFRA_FROZEN=1 to enforce."""
