@@ -1,0 +1,98 @@
+{
+ "os": {
+  "id": "debian",
+  "name": "Debian GNU/Linux",
+  "version": "12",
+  "pretty_name": "Debian GNU/Linux 12 (bookworm)",
+  "id_like": [],
+  "family": "linux",
+  "kernel": "Linux 6.1.0-18-amd64",
+  "arch": "x86_64",
+  "hostname": "db-01"
+ },
+ "uptime_seconds": 2233104.5,
+ "cpu": { "count": 8 },
+ "memory": { "total_bytes": 16777216000, "available_bytes": 4194304000 },
+ "packages": [
+  { "name": "postgresql-14", "version": "14.11-0+deb12u1" },
+  { "name": "python3-gunicorn", "version": "20.1.0-3" }
+ ],
+ "updates": { "pending": 24, "source": "apt list --upgradable", "packages": ["libssl3"] },
+ "services": [
+  {
+   "name": "postgresql@14-main.service",
+   "load": "loaded",
+   "active": "active",
+   "sub": "running",
+   "description": "PostgreSQL Cluster 14-main",
+   "enabled": "enabled"
+  },
+  {
+   "name": "gunicorn.service",
+   "load": "loaded",
+   "active": "active",
+   "sub": "running",
+   "description": "gunicorn daemon",
+   "enabled": "enabled"
+  },
+  {
+   "name": "ssh.service",
+   "load": "loaded",
+   "active": "active",
+   "sub": "running",
+   "description": "OpenBSD Secure Shell server",
+   "enabled": "enabled"
+  }
+ ],
+ "listeners": [
+  { "proto": "tcp", "address": "0.0.0.0", "port": 22, "process": "sshd", "pid": 640, "state": "listen" },
+  { "proto": "tcp", "address": "0.0.0.0", "port": 5432, "process": "postgres", "pid": 1042, "state": "listen" },
+  { "proto": "tcp", "address": "0.0.0.0", "port": 8080, "process": "gunicorn", "pid": 1180, "state": "listen" },
+  { "proto": "tcp", "address": "::", "port": 9100, "process": "node_exporter", "pid": 1310, "state": "listen" }
+ ],
+ "connections": [
+  {
+   "local_port": 40122,
+   "local_ports": [40122],
+   "remote_ip": "10.10.10.50",
+   "remote_port": 8086,
+   "process": "telegraf",
+   "pid": 1201,
+   "connections": 1
+  }
+ ],
+ "disks": [
+  {
+   "filesystem": "/dev/sda1",
+   "mount": "/",
+   "total_bytes": 42949672960,
+   "used_bytes": 21474836480,
+   "free_bytes": 21474836480,
+   "free_ratio": 0.5
+  }
+ ],
+ "certificates": [
+  {
+   "subject": "CN=db-01.lab.local",
+   "issuer": "C=GB, O=Example Ltd, CN=Example Internal CA",
+   "not_after": "2026-09-11T00:00:00+00:00",
+   "sans": ["db-01.lab.local"],
+   "source": "/etc/postgresql/14/main/server.crt",
+   "kind": "file",
+   "days_to_expiry": 4.5
+  }
+ ],
+ "tagged_services": [
+  {
+   "service": "postgresql",
+   "unit": "postgresql@14-main.service",
+   "found": true,
+   "state": "active",
+   "active": true,
+   "enabled": "enabled"
+  }
+ ],
+ "privileged": false,
+ "warnings": [],
+ "errors": {}
+}

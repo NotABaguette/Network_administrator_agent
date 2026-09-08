@@ -1,0 +1,2 @@
+UNCONN 0      0          127.0.0.53%lo:53         0.0.0.0:*    users:(("systemd-resolve",pid=612,fd=13))
+UNCONN 0      0                0.0.0.0:68         0.0.0.0:*    users:(("dhclient",pid=744,fd=7))

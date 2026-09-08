@@ -1,11 +1,14 @@
 """Mermaid renderings of the topology graph, written to `docs/topology/`.
 
-Three views, because one diagram of everything is unreadable:
+Four views, because one diagram of everything is unreadable:
 
 * **physical** — L1 links proven by CDP/LLDP, one subgraph per device;
 * **vlan-<id>** — the L2 story of one VLAN: trunks, access ports, portgroups,
   VMs and the gateway;
-* **storage** — VM -> datastore -> logical drive -> physical drives.
+* **storage** — VM -> datastore -> logical drive -> physical drives;
+* **applications** — services, listening ports and certificates inside the
+  guests, with the established dependencies between them (Phase 5; the file is
+  only written when guest snapshots exist).
 
 Every file carries a generated header; they are outputs, never edited by hand.
 """
@@ -31,9 +34,16 @@ _CLASS_DEFS = "\n".join(
         "  classDef host fill:#eafaf1,stroke:#27865b,color:#0f2e1f;",
         "  classDef bmc fill:#f4f0fa,stroke:#7d5ba6,color:#241633;",
         "  classDef unknown fill:#f2f2f2,stroke:#8a8a8a,color:#222222;",
+        "  classDef guest fill:#fff8e1,stroke:#b08900,color:#33280a;",
+        "  classDef external fill:#f7f7f7,stroke:#8a8a8a,color:#333333,stroke-dasharray:4 3;",
+        "  classDef expiring fill:#fdecea,stroke:#c0392b,color:#3d1210;",
         "  classDef mgmt stroke:#b8860b,stroke-width:3px;",
     ]
 )
+
+#: A certificate inside this many days is drawn in the alerting colour, which is
+#: the same threshold as `CertificateExpiringSoon` and the daily digest.
+CERT_WARN_DAYS = 30
 
 
 def _safe(node_id: str) -> str:
@@ -190,17 +200,114 @@ def render_storage(graph: TopologyGraph) -> str:
     return "\n".join(lines)
 
 
+def render_applications(graph: TopologyGraph) -> str:
+    """What each guest runs, on which port, and who depends on it.
+
+    One subgraph per guest: the services it runs, the ports they answer on and
+    the certificates those ports present. Arrows between subgraphs are
+    established dependencies observed inside the guests, so a change on a port
+    shows who calls it before anybody approves it.
+    """
+    lines = ["graph LR"]
+    guests: dict[str, list[str]] = {}
+    for node in graph.nodes_of_kind(NodeKind.service) + graph.nodes_of_kind(NodeKind.listener):
+        owner = _application_owner(graph, node)
+        if owner:
+            guests.setdefault(owner, []).append(node)
+    if not guests:
+        return "\n".join(lines + ['  empty["No guest snapshots have been collected yet"]'])
+
+    highlight: list[str] = []
+    expiring: list[str] = []
+    for owner in sorted(guests):
+        label = _text(graph.node(owner).get("label", owner)) if owner in graph else owner
+        lines.append(f'  subgraph {_safe(owner)}["{label}"]')
+        for node in sorted(guests[owner]):
+            data = graph.node(node)
+            if data.get("kind") == str(NodeKind.service):
+                lines.append(f'    {_safe(node)}(["{_text(data.get("service", node))}"])')
+            else:
+                port = f"{data.get('proto')}/{data.get('port')}"
+                process = data.get("process")
+                text = f"{port} {process}" if process else port
+                lines.append(f'    {_safe(node)}["{_text(text)}"]')
+            if data.get("mgmt_path"):
+                highlight.append(node)
+        lines.append("  end")
+
+    drawn_certs: set[str] = set()
+    for source, target, _data in sorted(
+        graph.edges_of_kind(EdgeKind.listens_on), key=lambda e: (e[0], e[1])
+    ):
+        if source in graph and target in graph:
+            lines.append(f"  {_safe(source)} --> {_safe(target)}")
+    for source, target, _data in sorted(
+        graph.edges_of_kind(EdgeKind.has_certificate), key=lambda e: (e[0], e[1])
+    ):
+        if graph.node(source).get("kind") != str(NodeKind.listener):
+            continue
+        cert = graph.node(target)
+        if target not in drawn_certs:
+            drawn_certs.add(target)
+            days = cert.get("days_to_expiry")
+            suffix = f" ({days:.0f}d)" if isinstance(days, (int, float)) else ""
+            lines.append(f'  {_safe(target)}[/"{_text(cert.get("subject", target))}{suffix}"/]')
+            if isinstance(days, (int, float)) and days < CERT_WARN_DAYS:
+                expiring.append(target)
+        lines.append(f'  {_safe(source)} -.->|"tls"| {_safe(target)}')
+
+    externals: list[str] = []
+    for source, target, data in sorted(
+        graph.edges_of_kind(EdgeKind.connects_to), key=lambda e: (e[0], e[1])
+    ):
+        if graph.node(target).get("kind") == str(NodeKind.external_endpoint):
+            if target not in externals:
+                externals.append(target)
+                lines.append(f'  {_safe(target)}["{_text(graph.node(target).get("label"))}"]')
+        elif target not in graph.nodes_of_kind(NodeKind.listener) and target not in drawn_certs:
+            label = _text(graph.node(target).get("label", target))
+            lines.append(f'  {_safe(target)}["{label}"]')
+        port = data.get("remote_port")
+        arrow = f'|"{port}"|' if port else ""
+        lines.append(f"  {_safe(source)} -->{arrow} {_safe(target)}")
+
+    for owner in sorted(guests):
+        lines.append(f"  class {_safe(owner)} guest;")
+    if externals:
+        lines.append(f"  class {','.join(_safe(n) for n in sorted(set(externals)))} external;")
+    if expiring:
+        lines.append(f"  class {','.join(_safe(n) for n in sorted(set(expiring)))} expiring;")
+    if highlight:
+        lines.append(f"  class {','.join(_safe(n) for n in sorted(set(highlight)))} mgmt;")
+    lines.append(_CLASS_DEFS)
+    return "\n".join(lines)
+
+
+def _application_owner(graph: TopologyGraph, node: str) -> str | None:
+    """The vm or device a service or listener belongs to."""
+    for kind in (EdgeKind.runs_service, EdgeKind.listens_on):
+        for owner, _edge in graph.in_edges(node, kind):
+            if graph.node(owner).get("kind") in (str(NodeKind.vm), str(NodeKind.device)):
+                return owner
+            grandparent = _application_owner(graph, owner) if owner != node else None
+            if grandparent:
+                return grandparent
+    return None
+
+
 def render(graph: TopologyGraph, diagram: str = "physical", vlan: int | None = None) -> str:
-    """`physical`, `storage` or `vlan` (with `vlan=<id>`)."""
+    """`physical`, `storage`, `applications` or `vlan` (with `vlan=<id>`)."""
     if diagram == "physical":
         return render_physical(graph)
     if diagram == "storage":
         return render_storage(graph)
+    if diagram == "applications":
+        return render_applications(graph)
     if diagram == "vlan":
         if vlan is None:
             raise ValueError("the vlan diagram needs a vlan id")
         return render_vlan(graph, vlan)
-    raise ValueError(f"unknown diagram {diagram!r}: use physical, vlan or storage")
+    raise ValueError(f"unknown diagram {diagram!r}: use physical, vlan, storage or applications")
 
 
 def _fence(mermaid: str) -> str:
@@ -250,6 +357,21 @@ def write_docs(
     )
     written.append(storage)
 
+    if graph.nodes_of_kind(NodeKind.service) or graph.nodes_of_kind(NodeKind.listener):
+        applications = directory / "applications.md"
+        atomic_write(
+            applications,
+            _header(
+                graph,
+                "Applications and dependencies",
+                "Services and listening ports inside the guests, with the "
+                "established connections between them. Dashed nodes are outside "
+                "the estate; a red certificate expires within 30 days.",
+            )
+            + _fence(render_applications(graph)),
+        )
+        written.append(applications)
+
     vlans = sorted(
         int(graph.node(v).get("vlan_id", 0)) for v in graph.nodes_of_kind(NodeKind.vlan)
     )[:max_vlans]
@@ -270,6 +392,8 @@ def write_docs(
         "| Physical (L1) | [physical.md](physical.md) |",
         "| Storage | [storage.md](storage.md) |",
     ]
+    if (directory / "applications.md") in written:
+        index_lines.append("| Applications | [applications.md](applications.md) |")
     index_lines += [f"| VLAN {v} | [vlan-{v:04d}.md](vlan-{v:04d}.md) |" for v in vlans]
     index_lines += ["", "## Consistency findings", "", _findings_section(findings or [])]
     atomic_write(index, "\n".join(index_lines))

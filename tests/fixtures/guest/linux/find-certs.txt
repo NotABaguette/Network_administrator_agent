@@ -1,0 +1,3 @@
+find: '/etc/httpd': No such file or directory
+/etc/letsencrypt/live/app.example.com/cert.pem
+/etc/nginx/ssl/internal-ca-signed.crt

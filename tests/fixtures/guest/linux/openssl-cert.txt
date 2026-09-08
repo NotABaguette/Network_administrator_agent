@@ -1,0 +1,5 @@
+subject=CN = app.example.com
+issuer=C = US, O = Let's Encrypt, CN = R3
+notAfter=Nov  1 12:00:00 2026 GMT
+X509v3 Subject Alternative Name: 
+    DNS:app.example.com, DNS:www.app.example.com

@@ -1,0 +1,2 @@
+[{"Subject":"CN=app-win-01.lab.local","Issuer":"CN=Example Internal CA, O=Example Ltd, C=GB","NotAfter":"2026-09-20T09:30:00+00:00","Thumbprint":"9A1B2C3D4E5F60718293A4B5C6D7E8F901234567","DnsNameList":["app-win-01.lab.local","app-win-01"]},
+ {"Subject":"CN=win-legacy.lab.local","Issuer":"CN=win-legacy.lab.local","NotAfter":"/Date(1798713000000)/","Thumbprint":"11223344556677889900AABBCCDDEEFF00112233","DnsNameList":null}]

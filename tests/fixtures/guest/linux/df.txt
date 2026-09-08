@@ -1,0 +1,7 @@
+Filesystem     1024-blocks     Used Available Capacity Mounted on
+udev               3963536        0   3963536       0% /dev
+tmpfs               813452     1748    811704       1% /run
+/dev/sda1         61118592 48932864   9052160      85% /
+/dev/sda15          106858     6182    100676       6% /boot/efi
+/dev/sdb1        103081248 92173952   5651904      95% /var/lib/postgresql
+tmpfs               813448        0    813448       0% /run/user/1001

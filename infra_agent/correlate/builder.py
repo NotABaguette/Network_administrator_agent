@@ -35,11 +35,13 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 import networkx as nx
 
 from infra_agent.config import Settings, get_settings
+from infra_agent.correlate.guest import ingest_guest
 from infra_agent.correlate.model import (
     EdgeKind,
     Evidence,
@@ -230,6 +232,9 @@ class GraphBuilder:
                 "fortigate": self._ingest_fortigate,
                 "esxi": self._ingest_esxi,
                 "ilo": self._ingest_ilo,
+                # Phase 5: services, listeners, certificates and application
+                # dependencies (`infra_agent/correlate/guest.py`).
+                "guest": partial(ingest_guest, self),
             }.get(device.kind.platform)
             if handler is None:
                 continue
