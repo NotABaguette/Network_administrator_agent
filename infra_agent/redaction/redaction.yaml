@@ -109,6 +109,12 @@ commands:
       - 'esxcli system (account|permission|secpolicy|settings advanced set|syslog config set|shutdown|maintenanceMode set)'
       - 'vim-cmd (vmsvc/(power|snapshot\.(create|remove|revert)|destroy|reload)|hostsvc/firmware)'
       - '/etc/shadow|/etc/passwd|keys/|\.pem\b'
+  guest:
+    allow:
+      - '^(uptime|hostname|df -h|free -m|ss -tlnp|ss -tunap|ip -br (addr|link)|systemctl (status|list-units|is-active)( [\w@.-]+)*|journalctl -n \d{1,4}( -u [\w@.-]+)?|cat /etc/os-release|dpkg -l|rpm -qa|Get-Service|Get-Process|Get-NetTCPConnection|Get-ComputerInfo|Get-EventLog -LogName \w+ -Newest \d{1,3})$'
+    deny:
+      - '(sudo|su |rm |chmod|chown|systemctl (start|stop|restart|enable|disable)|Stop-|Start-|Restart-|Set-|Remove-|Invoke-)'
+      - '/etc/shadow|/etc/passwd|id_rsa|\.pem\b'
   ilo:
     allow:
       - '^GET /redfish/v1/(Systems|Chassis|Managers|UpdateService|TelemetryService)(/.*)?$'

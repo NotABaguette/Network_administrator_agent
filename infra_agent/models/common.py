@@ -17,12 +17,16 @@ class DeviceKind(StrEnum):
     cisco_iosxe = "cisco_iosxe"
     esxi = "esxi"
     ilo = "ilo"
+    guest_linux = "guest_linux"
+    guest_windows = "guest_windows"
 
     @property
     def platform(self) -> str:
         """Platform family used by redaction allowlists and executors."""
         if self in (DeviceKind.cisco_ios, DeviceKind.cisco_iosxe):
             return "cisco"
+        if self in (DeviceKind.guest_linux, DeviceKind.guest_windows):
+            return "guest"
         return self.value
 
 
@@ -60,6 +64,9 @@ class SeedDevice(BaseModel):
     kind: DeviceKind
     mgmt_ip: str
     credential_ref: str
+    rw_credential_ref: str | None = Field(
+        default=None, description="read-write credential for the change engine; None = no writes"
+    )
     port: int | None = None
     tags: list[str] = Field(default_factory=list)
     notes: str | None = None

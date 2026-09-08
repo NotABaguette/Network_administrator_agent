@@ -24,6 +24,7 @@ devices = [
     "pyvmomi>=8.0",
     "redfish>=3.2",
     "paramiko>=3.4",
+    "pywinrm>=0.4",
 ]
 platform = [
     "sqlalchemy>=2.0",
