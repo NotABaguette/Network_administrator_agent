@@ -78,9 +78,6 @@ _STATE_ATTR = "_guest_layer"
 #: A tag on the seed device that names the VM the guest runs in.
 VM_TAG_PREFIX = "vm:"
 
-#: Remote addresses that are never a dependency on somebody else.
-_SKIP_REMOTE_KINDS = ("loopback", "link_local", "unspecified", "multicast")
-
 #: How many ports an external endpoint node lists before it just counts them.
 MAX_EXTERNAL_PORTS = 12
 
@@ -105,6 +102,13 @@ def external_network(address: str) -> str | None:
         return None
     prefix = 24 if parsed.version == 4 else 64
     return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
+
+
+def _is_private(network: str) -> bool:
+    try:
+        return ipaddress.ip_network(network).is_private
+    except ValueError:
+        return False
 
 
 def is_routable_peer(address: str) -> bool:
@@ -488,10 +492,14 @@ def _resolve_dependencies(
         )
 
     for network, info in sorted(externals.items()):
+        # "Outside the estate", not "on the internet": an RFC1918 peer here is
+        # usually a guest nobody has onboarded yet, and telling the owner it is
+        # external would send them looking for a firewall rule instead.
         node = graph.add_node(
             external_endpoint_id(network),
             NodeKind.external_endpoint,
-            label=f"{network} (external)",
+            label=f"{network} (outside the estate)",
+            private=_is_private(network),
             network=network,
             addresses=sorted(info["addresses"])[:MAX_EXTERNAL_PORTS],
             ports=sorted(info["ports"])[:MAX_EXTERNAL_PORTS],

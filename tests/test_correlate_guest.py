@@ -306,6 +306,7 @@ def test_a_connection_to_a_known_object_whose_port_was_never_collected(graph: To
 def test_unknown_remotes_are_grouped_into_external_endpoints(graph: TopologyGraph):
     node = "external_endpoint:203.0.113.0/24"
     assert graph.has(node)
+    assert graph.node(node)["label"] == "203.0.113.0/24 (outside the estate)"
     assert graph.node(node)["ports"] == [443]
     assert graph.node(node)["addresses"] == ["203.0.113.44"]
     assert graph.edge(WEB, node, EdgeKind.connects_to) is not None
@@ -421,7 +422,7 @@ def test_the_applications_diagram_draws_guests_ports_and_dependencies(graph: Top
     assert '"tcp/443 nginx"' in diagram
     assert '"nginx"' in diagram
     assert '-->|"8080"|' in diagram
-    assert "203.0.113.0/24 (external)" in diagram
+    assert "203.0.113.0/24 (outside the estate)" in diagram
     assert "classDef external" in diagram
     assert "tls" in diagram  # the certificate the listener presents
     assert render(graph, "applications") == diagram

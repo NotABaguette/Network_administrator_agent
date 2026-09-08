@@ -119,9 +119,16 @@ class ImpactReport(BaseModel):
         return self.loses_connectivity + self.loses_redundancy
 
     def describe(self) -> list[str]:
-        """Human-readable list of affected objects, connectivity losses first."""
+        """Human-readable list of affected objects, connectivity losses first.
+
+        A service that goes down is already in `loses_connectivity` as an
+        object; only the applications that lose a *dependency* add a line here,
+        because nothing else in the report mentions them.
+        """
         return [obj.line() for obj in self.affected] + [
-            service.line() for service in self.affected_services
+            service.line()
+            for service in self.affected_services
+            if service.effect == "loses_dependency"
         ]
 
     def as_dict(self) -> dict[str, Any]:
