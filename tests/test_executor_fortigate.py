@@ -606,7 +606,7 @@ def test_a_full_cycle_never_calls_a_revision_backup_or_reboot_endpoint(executor,
     ]
     executor.rollback(ctx, applied)
     for _method, path, _params, _body in box.calls:
-        assert not fg.FORBIDDEN_PATH.search(path), path
+        assert fg.forbidden_endpoint(path) is None, path
 
 
 def test_a_frozen_context_refuses_to_write(executor, box):
@@ -740,3 +740,159 @@ def test_an_unreferenced_object_is_not_blocked_by_the_group_check(executor, ctx,
     box.rows("cmdb/firewall/policy").clear()
     result = executor.dry_run(ctx, [step("fortigate.service", op="delete", name="PGSQL")])
     assert result.ok, result.blockers
+
+
+# ---------------------------------------------------------------------------
+# audit fixes: the endpoint guard, whole-token secrets, delete position
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "monitor/system/config/revision",
+        "monitor/system/config-revision/file",
+        "monitor/system/config/backup",
+        "cmdb/system/api-user",
+        "cmdb/vpn.ipsec/phase1-interface",
+    ],
+)
+def test_the_guard_refuses_a_forbidden_endpoint(endpoint):
+    assert fg.forbidden_endpoint(endpoint) is not None
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "cmdb/firewall/address",
+        "cmdb/firewall.service/custom",
+        "cmdb/firewall/policy",
+        "cmdb/router/static",
+        "cmdb/firewall/vip",
+        "monitor/router/ipv4",
+        "monitor/firewall/policy",
+    ],
+)
+def test_the_guard_lets_every_endpoint_this_executor_uses_through(endpoint):
+    assert fg.forbidden_endpoint(endpoint) is None
+
+
+@pytest.mark.parametrize(
+    "name", ["backup-nas", "factory-floor", "reset-svc", "veeam-backup-srv", "esxi-upgrade-host"]
+)
+def test_an_object_whose_name_looks_like_a_forbidden_endpoint_is_still_manageable(
+    executor, ctx, box, name
+):
+    """The guard is about endpoints. A backup NAS is a perfectly good address."""
+    created = executor.apply(
+        ctx,
+        step(
+            "fortigate.address",
+            op="create",
+            name=name,
+            body={"type": "ipmask", "subnet": "10.20.0.90 255.255.255.255"},
+        ),
+    )
+    assert created.ok, created.error
+
+    (check,) = executor.post_check(ctx, [f"address {name} exists"])
+    assert check.ok, check.detail
+
+    updated = executor.apply(
+        ctx, step("fortigate.address", op="update", name=name, body={"comment": "the NAS"})
+    )
+    assert updated.ok, updated.error
+    assert box._find("cmdb/firewall/address", name)["comment"] == "the NAS"
+
+    dry = executor.dry_run(ctx, [step("fortigate.address", op="delete", name=name)])
+    assert dry.ok, dry.blockers
+
+    deleted = executor.apply(ctx, step("fortigate.address", op="delete", name=name))
+    assert deleted.ok, deleted.error
+    assert box._find("cmdb/firewall/address", name) is None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "secret"),
+    [
+        ("password", True),
+        ("passwd", True),
+        ("psksecret", True),
+        ("auth-key", True),
+        ("ssh-key", True),
+        ("secondary-secret", True),
+        ("q_origin_key", False),
+        ("ssl-client-rekey-count", False),
+        ("monkey", False),
+        ("keychain-name", False),
+        ("comment", False),
+    ],
+)
+def test_only_whole_secret_tokens_are_treated_as_secrets(field_name, secret):
+    assert fg.is_secret_field(field_name) is secret
+
+
+def test_a_vip_update_touching_a_rekey_counter_is_fully_restorable(executor, ctx, box):
+    """`q_origin_key` and `ssl-client-rekey-count` are not secrets."""
+    vip = box._find("cmdb/firewall/vip", "vip-web")
+    vip["q_origin_key"] = "vip-web"
+    vip["ssl-client-rekey-count"] = 0
+    result = executor.apply(
+        ctx, step("fortigate.vip", op="update", name="vip-web", body={"ssl-client-rekey-count": 5})
+    )
+    assert result.ok, result.error
+    assert "restore_incomplete" not in result.output
+    assert result.output["redacted_fields"] == []
+    assert result.output["previous"]["q_origin_key"] == "vip-web"
+
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert box._find("cmdb/firewall/vip", "vip-web")["ssl-client-rekey-count"] == 0
+
+
+def test_deleting_a_policy_and_rolling_it_back_restores_its_position(executor, ctx, box):
+    assert box.policy_order() == ["1", "2", "3"]
+    result = executor.apply(ctx, step("fortigate.policy", op="delete", policyid=2))
+    assert result.ok, result.error
+    assert box.policy_order() == ["1", "3"]
+    assert result.output["previous_position"] == {"position": "after", "target": "1"}
+
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert box.policy_order() == ["1", "2", "3"]
+    assert undone.output["position_restored"] == "after 1"
+
+
+def test_deleting_the_first_policy_puts_it_back_at_the_top(executor, ctx, box):
+    result = executor.apply(ctx, step("fortigate.policy", op="delete", policyid=1))
+    assert result.output["previous_position"] == {"position": "before", "target": "2"}
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert box.policy_order() == ["1", "2", "3"]
+
+
+def test_a_delete_rollback_whose_neighbour_vanished_fails_loudly(executor, ctx, box):
+    result = executor.apply(ctx, step("fortigate.policy", op="delete", policyid=2))
+    assert result.ok, result.error
+    box.rows("cmdb/firewall/policy").remove(box._find("cmdb/firewall/policy", 1))
+
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok is False
+    assert "no longer in the table" in undone.error
+    # the rule itself is back; only its order needs a human
+    assert "2" in box.policy_order()
+
+
+def test_deleting_the_only_policy_says_there_is_nothing_to_move_back(executor, ctx, box):
+    rows = box.rows("cmdb/firewall/policy")
+    del rows[1:]
+    result = executor.apply(ctx, step("fortigate.policy", op="delete", policyid=1))
+    assert result.output["previous_position"] is None
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert "only one" in undone.output["position_restored"]
+
+
+def test_deleting_an_address_records_no_position(executor, ctx):
+    result = executor.apply(ctx, step("fortigate.address", op="delete", name="lab-host"))
+    assert result.ok, result.error
+    assert "previous_position" not in result.output
+    assert executor.rollback(ctx, [result])[0].ok

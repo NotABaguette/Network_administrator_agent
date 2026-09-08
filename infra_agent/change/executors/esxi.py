@@ -15,10 +15,20 @@ Both transports implement :class:`EsxiTransport`, so the safety rules live in
 the executor and hold on either path:
 
 * Every VM-changing action except ``vm.disk_extend`` and the snapshot actions
-  themselves takes a pre-change snapshot named ``infra-<plan_id>`` first, and
-  rolls back by reverting to it and restoring the recorded power state. The
+  themselves takes a pre-change snapshot named ``infra-<plan_id>`` first. The
   snapshot is not deleted by the rollback path; it is deleted by the cleanup
   the successful run records in ``StepResult.output["cleanup"]``.
+* A ``vm.resize`` rolls back by reverting to that snapshot, because the
+  snapshot is the only thing that holds the old CPU/memory. The two *power*
+  actions do not: their pre-change snapshot is crash-consistent, and reverting
+  to it would boot the guest from a crash image or throw away everything it
+  wrote since it started. Their rollback is the inverse power operation, with
+  the revert kept only for when that fails.
+* ``vm.create_from_template`` copies into a directory it creates itself and
+  records that directory before the first byte is written. The rollback
+  deletes exactly that directory and nothing else — never one found by looking
+  up whatever VM currently answers to the clone's name, and never through
+  ``Destroy_Task``, which deletes every file the VM references.
 * ``vm.disk_extend`` is refused outright when the VM has snapshots — an extend
   with a snapshot present corrupts the chain — and it never takes one itself,
   because that would guarantee the refusal it is trying to avoid.
@@ -26,6 +36,16 @@ the executor and hold on either path:
   and record it as ``StepResult.output["backup_ref"]``.
 * A snapshot is refused when the datastore holding the VM is below the
   free-space threshold, because a full datastore stuns every VM on it.
+
+Neither transport is a vCenter client. `CloneVM_Task` is a vCenter operation
+that standalone hostd refuses, so the licensed clone is `MakeDirectory` +
+`CopyVirtualDisk_Task` + `CopyDatastoreFile_Task` + `RegisterVM_Task` — the
+same sequence the SSH path runs with `vmkfstools -i` and `solo/registervm`.
+
+Both transports hold **one host session per executor call**: hostd caps
+concurrent sessions and an idle one lingers for half an hour, and the SSH path
+would otherwise log in once per `vim-cmd`. `dry_run`, `pre_check`, `apply`,
+`post_check` and `rollback` each open a session and close it on the way out.
 
 `pyVim`/`pyVmomi` and `paramiko` are imported lazily, and both transports take
 their session factory as a constructor argument so the tests drive fakes.
@@ -38,7 +58,8 @@ import logging
 import re
 import shlex
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -70,6 +91,10 @@ POWERED_OFF = "poweredOff"
 #: Actions that take a pre-change snapshot. Disk extends must not (snapshots
 #: are exactly what breaks them) and the snapshot actions are the mechanism.
 SNAPSHOT_BEFORE = frozenset({"vm.power_on", "vm.power_off_graceful", "vm.resize"})
+#: Actions whose rollback is the inverse power operation, not a snapshot
+#: revert: reverting a running VM to a crash-consistent snapshot loses guest
+#: writes, and the honest undo of a power change is the other power change.
+POWER_ACTIONS = frozenset({"vm.power_on", "vm.power_off_graceful"})
 
 ACTIONS = frozenset(
     {
@@ -295,6 +320,39 @@ def parse_json(text: str, what: str) -> Any:
         raise EsxiError(f"{what} did not return JSON") from exc
 
 
+#: The heredoc delimiter a rewritten `.vmx` is written with. Quoted at the
+#: shell, so nothing inside it is expanded.
+VMX_HEREDOC = "INFRA_VMX_EOF"
+
+#: `.vmx` lines a clone must not inherit: the template's name and its identity.
+_VMX_DROP = re.compile(r"^\s*(displayName|uuid\.[A-Za-z]+|vc\.uuid)\s*=", re.IGNORECASE)
+
+
+def patch_vmx(text: str, name: str, old_disk: str, new_disk: str) -> str:
+    """A template's `.vmx` retitled for a clone, with its disk re-pointed.
+
+    Done in Python rather than with a `sed` script: the disk basename is data,
+    and `.` in it is a regex metacharacter that a `sed 's|...|...|'` would
+    happily match against anything. `name` has already passed `SAFE_NAME`, so
+    it holds no quote the file format could trip over.
+    """
+    lines: list[str] = []
+    for line in (text or "").splitlines():
+        if _VMX_DROP.match(line):
+            continue
+        if old_disk and old_disk in line and "fileName" in line:
+            line = line.replace(old_disk, new_disk)
+        lines.append(line.rstrip())
+    lines.append(f'displayName = "{name}"')
+    # Pre-answer hostd's "I moved it / I copied it" question: a copied .vmx
+    # otherwise blocks on it at the first power on.
+    lines.append('uuid.action = "create"')
+    body = "\n".join(lines)
+    if VMX_HEREDOC in body:
+        raise EsxiError("the template .vmx contains this executor's heredoc marker")
+    return body
+
+
 def bundle_reference(command_output: str) -> dict[str, Any]:
     """The host-config bundle `backup_config` just wrote, as a reference.
 
@@ -321,7 +379,9 @@ class EsxiTransport(Protocol):
 
     name: str
 
+    def connection(self) -> AbstractContextManager[None]: ...
     def vm(self, ctx: ExecutionContext, name: str) -> dict[str, Any] | None: ...
+    def power_state(self, ctx: ExecutionContext, vm: dict[str, Any]) -> str: ...
     def datastores(self, ctx: ExecutionContext) -> list[dict[str, Any]]: ...
     def host_setting_get(self, ctx: ExecutionContext, key: str) -> Any: ...
     def host_setting_set(
@@ -346,7 +406,12 @@ class EsxiTransport(Protocol):
         self, ctx: ExecutionContext, vm: dict[str, Any], disk: dict[str, Any], size_gb: float
     ) -> dict[str, Any]: ...
     def clone_from_template(
-        self, ctx: ExecutionContext, template: dict[str, Any], name: str, datastore: str | None
+        self,
+        ctx: ExecutionContext,
+        template: dict[str, Any],
+        name: str,
+        datastore: str | None,
+        record: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]: ...
     def destroy_vm(self, ctx: ExecutionContext, vm: dict[str, Any]) -> dict[str, Any]: ...
     def backup_host_config(self, ctx: ExecutionContext) -> dict[str, Any]: ...
@@ -379,15 +444,25 @@ class ParamikoSession:
             "hostname": device.mgmt_ip,
             "port": 22,  # device.port is the API port; ESXi SSH is always 22
             "username": cred.username,
-            "key_filename": cred.ssh_key_path,
             "timeout": timeout,
             "allow_agent": False,
             "look_for_keys": False,
         }
-        if cred.password:
-            # The password is the hostd API password; it is only ever offered
-            # as the key's passphrase, never replayed at a shell prompt.
-            kwargs["passphrase"] = cred.password.get_secret_value()
+        # Mirror the collector's `EsxiShowTransport`: the ESXi root account this
+        # estate uses is a password account, and offering that password only as
+        # a key passphrase meant every free-licence write failed with "no
+        # authentication methods available".
+        if cred.ssh_key_path:
+            kwargs["key_filename"] = cred.ssh_key_path
+            if cred.password:
+                kwargs["passphrase"] = cred.password.get_secret_value()
+        elif cred.password:
+            kwargs["password"] = cred.password.get_secret_value()
+        else:
+            raise LookupError(
+                f"the read-write credential for {device.name} has neither an ssh_key_path "
+                "nor a password; a free-licence ESXi write needs one of them"
+            )
         client.connect(**kwargs)
         self._client = client
 
@@ -419,22 +494,52 @@ class SshTransport:
     ) -> None:
         self.open_session = open_session or (lambda device, cred: ParamikoSession(device, cred))
         self.timeout = timeout
+        self._session: SshSession | None = None
+        self._depth = 0
 
     # -- plumbing ---------------------------------------------------------
-    def run(self, ctx: ExecutionContext, command: str) -> str:
+    @contextmanager
+    def connection(self) -> Iterator[None]:
+        """One SSH session for everything inside the scope.
+
+        A dry run plus pre-checks plus an apply plus post-checks used to be
+        dozens of separate logins to the same host; the executor opens this
+        once per call instead.
+        """
+        self._depth += 1
+        try:
+            yield
+        finally:
+            self._depth -= 1
+            if self._depth == 0:
+                self._close()
+
+    def _close(self) -> None:
+        session, self._session = self._session, None
+        if session is not None:
+            session.close()
+
+    @contextmanager
+    def _shell(self, ctx: ExecutionContext) -> Iterator[SshSession]:
+        if self._depth > 0:
+            if self._session is None:
+                self._session = self.open_session(ctx.device, ctx.credential)
+            yield self._session
+            return
         session = self.open_session(ctx.device, ctx.credential)
         try:
-            return session.run(command, self.timeout)
+            yield session
         finally:
             session.close()
+
+    def run(self, ctx: ExecutionContext, command: str) -> str:
+        with self._shell(ctx) as session:
+            return session.run(command, self.timeout)
 
     def run_many(self, ctx: ExecutionContext, commands: list[str]) -> list[str]:
         """Several commands on one session, stopping at the first failure."""
-        session = self.open_session(ctx.device, ctx.credential)
-        try:
+        with self._shell(ctx) as session:
             return [session.run(command, self.timeout) for command in commands]
-        finally:
-            session.close()
 
     # -- reads ------------------------------------------------------------
     def vm(self, ctx: ExecutionContext, name: str) -> dict[str, Any] | None:
@@ -463,6 +568,11 @@ class SshTransport:
         row["snapshots"] = parse_snapshotinfo(snapshots)
         row["disks"] = parse_devices(devices)
         return row
+
+    def power_state(self, ctx: ExecutionContext, vm: dict[str, Any]) -> str:
+        """One `power.getstate`, for polling a shutdown without re-reading the VM."""
+        vmid = shlex.quote(str(vm["vmid"]))
+        return parse_power_state(self.run(ctx, f"vim-cmd vmsvc/power.getstate {vmid}"))
 
     def datastores(self, ctx: ExecutionContext) -> list[dict[str, Any]]:
         rows = parse_json(
@@ -513,21 +623,33 @@ class SshTransport:
         key = normalise_setting_key(key)
         if key == SYSLOG_KEY:
             target = shlex.quote(str(value or ""))
+            # The firewall ruleset is the half everyone forgets: on a default
+            # host the loghost is set, the check passes, and nothing ever
+            # reaches the collector. Enabling it is idempotent.
             self.run_many(
                 ctx,
                 [
                     f"esxcli system syslog config set --loghost={target}",
                     "esxcli system syslog reload",
+                    "esxcli network firewall ruleset set -r syslog -e true",
                 ],
             )
-            return {"key": key, "value": value}
+            return {"key": key, "value": value, "firewall_ruleset": "syslog enabled"}
         if key == NTP_KEY:
-            servers = value if isinstance(value, list) else [value]
-            flags = " ".join(f"--server={shlex.quote(str(s))}" for s in servers if s)
+            servers = [s for s in (value if isinstance(value, list) else [value]) if s]
+            if not servers:
+                # `esxcli system ntp set` with no flags is an error, so a
+                # rollback to a host that had no NTP has to reset instead.
+                self.run_many(
+                    ctx,
+                    ["esxcli system ntp set --reset", "esxcli system ntp set --enabled=0"],
+                )
+                return {"key": key, "value": [], "via": "reset"}
+            flags = " ".join(f"--server={shlex.quote(str(s))}" for s in servers)
             self.run_many(
                 ctx,
                 [
-                    f"esxcli system ntp set {flags}".strip(),
+                    f"esxcli system ntp set {flags}",
                     "esxcli system ntp set --enabled=1",
                 ],
             )
@@ -599,7 +721,18 @@ class SshTransport:
 
         Only integers reach the file, and only through a delete-then-append of
         the whole line, so a malformed existing value cannot survive.
+
+        A running VM is refused: hostd holds the .vmx open and `vmsvc/reload`
+        does not hot-add, so the rewrite would either fail or quietly do
+        nothing until the next power cycle (VMware KB 1026043). Hot-add lives
+        on the API path only.
         """
+        if vm.get("power_state") == POWERED_ON:
+            raise EsxiError(
+                f"{vm.get('name')} is powered on and this host has no reconfigure API: "
+                "a .vmx rewrite needs the VM powered off, and hot-add is only "
+                "available on the licensed (API) path"
+            )
         vmx = host_path(vm.get("vmx"))
         if not vmx:
             raise EsxiError(f"no .vmx path for {vm.get('name')}")
@@ -625,12 +758,24 @@ class SshTransport:
         return {"disk": disk.get("label"), "size_gb": size_gb}
 
     def clone_from_template(
-        self, ctx: ExecutionContext, template: dict[str, Any], name: str, datastore: str | None
+        self,
+        ctx: ExecutionContext,
+        template: dict[str, Any],
+        name: str,
+        datastore: str | None,
+        record: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Copy the template's files, retitle them and register the result.
 
         Standalone ESXi has no clone API on the free licence, so this is the
         documented `vmkfstools -i` + `vim-cmd solo/registervm` path.
+
+        The directory is created with a plain `mkdir`, not `mkdir -p`: if
+        anything is already there the step stops before a single byte is
+        written, because the rollback for this action deletes a directory and
+        it must only ever delete one this step made. `record` is called with
+        that directory the moment it exists, so a clone that dies half way
+        through the disk copy still has something to clean up.
         """
         source_vmx = host_path(template.get("vmx"))
         if not source_vmx:
@@ -645,20 +790,26 @@ class SshTransport:
             raise EsxiError(f"template {template.get('name')} has no disk to copy")
         quoted_dir = shlex.quote(target_dir)
         quoted_vmx = shlex.quote(target_vmx)
-        outputs = self.run_many(
-            ctx,
-            [
-                f"mkdir -p {quoted_dir}",
-                f"vmkfstools -i {shlex.quote(source_vmdk)} -d thin {shlex.quote(target_vmdk)}",
-                f"cp {shlex.quote(source_vmx)} {quoted_vmx}",
-                f"sed -i '/^displayName[[:space:]]*=/d;/^uuid\\./d;"
-                f"/^vc\\.uuid[[:space:]]*=/d' {quoted_vmx}",
-                f"echo 'displayName = \"{name}\"' >> {quoted_vmx}",
-                f"sed -i 's|{shlex.quote(_vmdk_basename(source_vmdk))}|{name}.vmdk|g' {quoted_vmx}",
-                f"vim-cmd solo/registervm {quoted_vmx}",
-            ],
-        )
-        vmid = (outputs[-1] or "").strip().splitlines()[-1].strip() if outputs[-1].strip() else None
+
+        with self.connection():
+            source_text = self.run(ctx, f"cat {shlex.quote(source_vmx)}")
+            self.run(ctx, f"mkdir {quoted_dir}")
+            if record is not None:
+                record({"dir": target_dir})
+            patched = patch_vmx(source_text, name, _vmdk_basename(source_vmdk), f"{name}.vmdk")
+            outputs = self.run_many(
+                ctx,
+                [
+                    f"vmkfstools -i {shlex.quote(source_vmdk)} -d thin {shlex.quote(target_vmdk)}",
+                    # A quoted heredoc: the shell expands nothing inside it, so
+                    # the .vmx is written verbatim without a sed script that
+                    # would have to escape regex metacharacters.
+                    f"cat > {quoted_vmx} <<'{VMX_HEREDOC}'\n{patched}\n{VMX_HEREDOC}",
+                    f"vim-cmd solo/registervm {quoted_vmx}",
+                ],
+            )
+        last = (outputs[-1] or "").strip()
+        vmid = last.splitlines()[-1].strip() if last else None
         return {
             "name": name,
             "vmid": vmid,
@@ -667,19 +818,30 @@ class SshTransport:
         }
 
     def destroy_vm(self, ctx: ExecutionContext, vm: dict[str, Any]) -> dict[str, Any]:
-        """Unregister the VM and delete its directory. Refuses anything outside a datastore."""
-        vmid = shlex.quote(str(vm["vmid"]))
-        directory = vm.get("dir") or _vmx_directory(host_path(vm.get("vmx")))
-        if not directory or not directory.startswith("/vmfs/volumes/") or directory.count("/") < 4:
+        """Unregister the clone and delete the directory *this plan created*.
+
+        `dir` has to have been recorded by `clone_from_template`. Falling back
+        to the directory of whatever VM happens to answer to that name is how a
+        rollback deletes somebody else's VM folder.
+        """
+        directory = vm.get("dir")
+        if not directory:
+            raise EsxiError(
+                "no directory was recorded for this clone, so there is nothing this "
+                "rollback may safely delete; remove the clone by hand"
+            )
+        if not directory.startswith("/vmfs/volumes/") or directory.count("/") < 4:
             raise EsxiError(f"refusing to delete {directory!r}: not a VM directory on a datastore")
-        self.run_many(
-            ctx,
-            [
-                f"vim-cmd vmsvc/power.off {vmid} || true",
-                f"vim-cmd vmsvc/unregister {vmid}",
-                f"rm -rf {shlex.quote(directory)}",
-            ],
-        )
+        commands = []
+        vmid = vm.get("vmid")
+        if vmid not in (None, ""):
+            quoted = shlex.quote(str(vmid))
+            commands += [
+                f"vim-cmd vmsvc/power.off {quoted} || true",
+                f"vim-cmd vmsvc/unregister {quoted}",
+            ]
+        commands.append(f"rm -rf {shlex.quote(directory)}")
+        self.run_many(ctx, commands)
         return {"destroyed": vm.get("name"), "dir": directory}
 
     def backup_host_config(self, ctx: ExecutionContext) -> dict[str, Any]:
@@ -695,10 +857,6 @@ class SshTransport:
 
 def _vmdk_basename(path: str) -> str:
     return path.rsplit("/", 1)[-1]
-
-
-def _vmx_directory(path: str | None) -> str | None:
-    return path.rsplit("/", 1)[0] if path else None
 
 
 class PyvmomiTransport:
@@ -721,6 +879,9 @@ class PyvmomiTransport:
         self._vim = vim
         self.sleep = sleep
         self.timeout = timeout
+        self._si: Any = None
+        self._content: Any = None
+        self._depth = 0
 
     # -- plumbing ---------------------------------------------------------
     def vim(self) -> Any:
@@ -730,7 +891,42 @@ class PyvmomiTransport:
             self._vim = vim
         return self._vim
 
+    @contextmanager
+    def connection(self) -> Iterator[None]:
+        """One hostd session for everything inside the scope.
+
+        hostd caps concurrent sessions and an idle one lingers for half an
+        hour; a login per read would lock the platform out of its own host
+        after a couple of plans. The session is disconnected on the way out.
+        """
+        self._depth += 1
+        try:
+            yield
+        finally:
+            self._depth -= 1
+            if self._depth == 0:
+                self._disconnect()
+
+    def _disconnect(self) -> None:
+        si, self._si, self._content = self._si, None, None
+        if si is None:
+            return
+        try:
+            from pyVim.connect import Disconnect  # lazy: optional dependency
+
+            Disconnect(si)
+        except Exception:  # noqa: BLE001 - closing a dead session is not an error
+            pass
+
     def connect(self, ctx: ExecutionContext) -> Any:
+        if self._si is not None:
+            return self._si
+        si = self._open(ctx)
+        if self._depth > 0:
+            self._si = si
+        return si
+
+    def _open(self, ctx: ExecutionContext) -> Any:
         if self._connect is not None:
             return self._connect(ctx.device, ctx.credential)
         import ssl
@@ -749,12 +945,26 @@ class PyvmomiTransport:
         )
 
     def content(self, ctx: ExecutionContext) -> Any:
-        return self.connect(ctx).RetrieveContent()
+        if self._content is not None:
+            return self._content
+        content = self.connect(ctx).RetrieveContent()
+        if self._depth > 0:
+            self._content = content
+        return content
 
     def host(self, ctx: ExecutionContext) -> Any:
         from infra_agent.collectors.esxi import first_host
 
         return first_host(self.content(ctx))
+
+    def datacenter(self, ctx: ExecutionContext) -> Any:
+        """The single Datacenter of a standalone host."""
+        for entity in (
+            getattr(getattr(self.content(ctx), "rootFolder", None), "childEntity", None) or []
+        ):
+            if getattr(entity, "vmFolder", None) is not None:
+                return entity
+        raise EsxiError("this host exposes no datacenter to register a VM in")
 
     def wait(self, task: Any) -> Any:
         """Block until a task finishes; raise its error as an EsxiError."""
@@ -784,6 +994,13 @@ class PyvmomiTransport:
         if obj is None:
             return None
         return self._row(obj)
+
+    def power_state(self, ctx: ExecutionContext, vm: dict[str, Any]) -> str:
+        """One property read, for polling a shutdown without re-reading the VM."""
+        obj = vm.get("_ref") or self._find_vm(ctx, str(vm.get("name")))
+        if obj is None:
+            raise EsxiError(f"{vm.get('name')} is not registered on this host")
+        return str(getattr(getattr(obj, "runtime", None), "powerState", "") or "unknown")
 
     def _row(self, obj: Any) -> dict[str, Any]:
         config = getattr(obj, "config", None)
@@ -886,19 +1103,62 @@ class PyvmomiTransport:
             if mode not in CDP_MODES:
                 raise EsxiError(f"CDP mode {value!r} is not one of {sorted(CDP_MODES)}")
             name = safe_name(params.get("vswitch", DEFAULT_VSWITCH), "vSwitch")
-            spec = vim.host.VirtualSwitch.Specification()
-            spec.bridge = vim.host.VirtualSwitch.BondBridge(
-                linkDiscoveryProtocolConfig=vim.host.LinkDiscoveryProtocolConfig(
+            # `UpdateVirtualSwitch` REPLACES the switch spec. A freshly built
+            # Specification has neither `numPorts` nor the bridge's `nicDevice`
+            # (both required fields), so it cannot even be serialised — and
+            # supplying empty ones would strip vSwitch0's uplinks and isolate
+            # the host. The live spec is read and only CDP is changed on it.
+            spec = self._vswitch_spec(host, name)
+            bridge = getattr(spec, "bridge", None)
+            if bridge is None:
+                raise EsxiError(
+                    f"vSwitch {name} has no uplink bridge, so CDP has nothing to run on"
+                )
+            discovery = getattr(bridge, "linkDiscoveryProtocolConfig", None)
+            if discovery is None:
+                bridge.linkDiscoveryProtocolConfig = vim.host.LinkDiscoveryProtocolConfig(
                     protocol="cdp", operation=mode
                 )
-            )
+            else:
+                discovery.protocol = "cdp"
+                discovery.operation = mode
             managers.networkSystem.UpdateVirtualSwitch(vswitchName=name, spec=spec)
             return {"key": key, "value": mode, "vswitch": name}
         option_key = SYSLOG_KEY if key == SYSLOG_KEY else key
         managers.advancedOption.UpdateOptions(
             changedValue=[vim.option.OptionValue(key=option_key, value=value)]
         )
-        return {"key": key, "value": value}
+        applied: dict[str, Any] = {"key": key, "value": value}
+        if key == SYSLOG_KEY:
+            applied["firewall_ruleset"] = self._enable_syslog_ruleset(managers)
+        return applied
+
+    @staticmethod
+    def _vswitch_spec(host: Any, name: str) -> Any:
+        network = getattr(getattr(host, "config", None), "network", None)
+        for switch in getattr(network, "vswitch", None) or []:
+            if getattr(switch, "name", None) == name:
+                spec = getattr(switch, "spec", None)
+                if spec is None:
+                    break
+                return spec
+        raise EsxiError(f"this host has no vSwitch named {name!r}")
+
+    @staticmethod
+    def _enable_syslog_ruleset(managers: Any) -> str:
+        """Open the syslog ruleset, or say why it could not be opened.
+
+        Without it the loghost is set, the check passes and nothing arrives.
+        """
+        firewall = getattr(managers, "firewallSystem", None)
+        enable = getattr(firewall, "EnableRuleset", None)
+        if enable is None:
+            return "not available on this host; enable the syslog ruleset by hand"
+        try:
+            enable(id="syslog")
+        except Exception as exc:  # noqa: BLE001 - the loghost itself is set either way
+            return f"could not be enabled: {short_error(exc)}"
+        return "syslog enabled"
 
     def _snapshot_ref(self, vm: dict[str, Any], name: str) -> Any:
         for snapshot in vm.get("snapshots") or []:
@@ -971,27 +1231,134 @@ class PyvmomiTransport:
         return {"disk": disk.get("label"), "size_gb": size_gb}
 
     def clone_from_template(
-        self, ctx: ExecutionContext, template: dict[str, Any], name: str, datastore: str | None
+        self,
+        ctx: ExecutionContext,
+        template: dict[str, Any],
+        name: str,
+        datastore: str | None,
+        record: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        """Copy, register and retitle — the standalone-host clone.
+
+        `CloneVM_Task` is a vCenter operation: hostd answers it with "the
+        operation is not supported on the object", and there is no vCenter in
+        this estate, so it is never called. What a host *can* do is make a
+        directory, copy a disk and a `.vmx` into it and register the result,
+        which is the same sequence the SSH path runs.
+
+        `MakeDirectory` is the existence guard: it fails if the directory is
+        already there, before anything is copied. `record` is called with the
+        directory the moment it exists so a half-finished clone still has
+        something the rollback can remove.
+        """
         vim = self.vim()
-        source = template["_ref"]
-        folder = getattr(source, "parent", None)
-        if folder is None:
-            raise EsxiError("the template has no folder to clone into")
-        spec = vim.vm.CloneSpec(location=vim.vm.RelocateSpec(), powerOn=False, template=False)
-        self.wait(source.CloneVM_Task(folder=folder, name=name, spec=spec))
-        return {"name": name, "from": template.get("name"), "via": "CloneVM_Task"}
+        source_vmx = template.get("vmx")
+        disks = template.get("disks") or []
+        source_vmdk = (disks[0] or {}).get("path") if disks else None
+        if not source_vmx or not source_vmdk:
+            raise EsxiError(f"template {template.get('name')} has no .vmx and disk to copy")
+        store = safe_name(datastore or template.get("datastore") or "", "datastore")
+        target_dir = f"[{store}] {name}"
+        target_vmx = f"{target_dir}/{name}.vmx"
+        target_vmdk = f"{target_dir}/{name}.vmdk"
+
+        content = self.content(ctx)
+        datacenter = self.datacenter(ctx)
+        files = getattr(content, "fileManager", None)
+        disk_manager = getattr(content, "virtualDiskManager", None)
+        if files is None or disk_manager is None:
+            raise EsxiError("this host exposes no fileManager/virtualDiskManager to clone with")
+
+        files.MakeDirectory(name=target_dir, datacenter=datacenter, createParentDirectories=False)
+        if record is not None:
+            record({"dir": target_dir})
+        # No destSpec: the copy keeps the template's disk format rather than
+        # guessing an adapter type the source may not use.
+        self.wait(
+            disk_manager.CopyVirtualDisk_Task(
+                sourceName=source_vmdk,
+                sourceDatacenter=datacenter,
+                destName=target_vmdk,
+                destDatacenter=datacenter,
+                force=False,
+            )
+        )
+        self.wait(
+            files.CopyDatastoreFile_Task(
+                sourceName=source_vmx,
+                sourceDatacenter=datacenter,
+                destinationName=target_vmx,
+                destinationDatacenter=datacenter,
+                force=False,
+            )
+        )
+        host = self.host(ctx)
+        pool = getattr(getattr(host, "parent", None), "resourcePool", None)
+        registered = self.wait(
+            datacenter.vmFolder.RegisterVM_Task(
+                path=target_vmx, name=name, asTemplate=False, pool=pool, host=host
+            )
+        )
+        obj = registered or self._find_vm(ctx, name)
+        if obj is None:
+            raise EsxiError(f"{name} was registered but the host does not list it")
+        # The copied .vmx still carries the template's displayName and points
+        # at the template's disk, so both are corrected before anything can
+        # power the clone on. `uuid.action` pre-answers the "I copied it"
+        # question a copied .vmx otherwise blocks on.
+        spec = vim.vm.ConfigSpec()
+        spec.name = name
+        spec.extraConfig = [vim.option.OptionValue(key="uuid.action", value="create")]
+        change = self._disk_backing_change(vim, obj, target_vmdk)
+        if change is not None:
+            spec.deviceChange = [change]
+        self.wait(obj.ReconfigVM_Task(spec=spec))
+        return {
+            "name": name,
+            "from": template.get("name"),
+            "vmx": target_vmx,
+            "dir": target_dir,
+            "via": "MakeDirectory + CopyVirtualDisk + RegisterVM",
+        }
+
+    @staticmethod
+    def _disk_backing_change(vim: Any, obj: Any, path: str) -> Any:
+        """Point the clone's first disk at the copy, not at the template's file."""
+        for device in (
+            getattr(getattr(getattr(obj, "config", None), "hardware", None), "device", None) or []
+        ):
+            backing = getattr(device, "backing", None)
+            if getattr(device, "capacityInKB", None) is None or backing is None:
+                continue
+            if getattr(backing, "fileName", None) is None:
+                continue
+            backing.fileName = path
+            return vim.vm.device.VirtualDeviceSpec(operation="edit", device=device)
+        return None
 
     def destroy_vm(self, ctx: ExecutionContext, vm: dict[str, Any]) -> dict[str, Any]:
-        obj = vm.get("_ref")
-        if obj is None:
-            obj = self._find_vm(ctx, str(vm.get("name")))
-        if obj is None:
-            raise EsxiError(f"{vm.get('name')} is not registered on this host")
-        if str(getattr(getattr(obj, "runtime", None), "powerState", "")) == POWERED_ON:
-            self.wait(obj.PowerOffVM_Task())
-        self.wait(obj.Destroy_Task())
-        return {"destroyed": vm.get("name")}
+        """Unregister the clone and delete the directory *this plan created*.
+
+        Never `Destroy_Task`: it deletes every file the VM references, and a
+        clone whose backing edit did not land still references the template's
+        own disk. Only the recorded directory goes.
+        """
+        directory = vm.get("dir")
+        if not directory:
+            raise EsxiError(
+                "no directory was recorded for this clone, so there is nothing this "
+                "rollback may safely delete; remove the clone by hand"
+            )
+        obj = vm.get("_ref") or self._find_vm(ctx, str(vm.get("name")))
+        if obj is not None:
+            if str(getattr(getattr(obj, "runtime", None), "powerState", "")) == POWERED_ON:
+                self.wait(obj.PowerOffVM_Task())
+            obj.UnregisterVM()
+        files = getattr(self.content(ctx), "fileManager", None)
+        if files is None:
+            raise EsxiError("this host exposes no fileManager to delete the clone's files with")
+        self.wait(files.DeleteDatastoreFile_Task(name=directory, datacenter=self.datacenter(ctx)))
+        return {"destroyed": vm.get("name"), "dir": directory}
 
     def backup_host_config(self, ctx: ExecutionContext) -> dict[str, Any]:
         firmware = getattr(getattr(self.host(ctx), "configManager", None), "firmwareSystem", None)
@@ -1103,9 +1470,23 @@ class EsxiExecutor(Executor):
         return set(ACTIONS)
 
     def transport(self, device: SeedDevice) -> EsxiTransport:
+        """The transport for this licence, built once and reused.
+
+        Memoised on purpose: a transport holds the host session, and a new one
+        per call is a new login per call.
+        """
         if is_licensed(device):
-            return self._licensed or PyvmomiTransport()
-        return self._free or SshTransport()
+            if self._licensed is None:
+                self._licensed = PyvmomiTransport()
+            return self._licensed
+        if self._free is None:
+            self._free = SshTransport()
+        return self._free
+
+    def _session(self, device: SeedDevice) -> AbstractContextManager[None]:
+        """One host session for the whole of a public call."""
+        scope = getattr(self.transport(device), "connection", None)
+        return scope() if callable(scope) else nullcontext()
 
     # -- shared step logic ------------------------------------------------
     def _vm(self, ctx: ExecutionContext, name: str) -> dict[str, Any]:
@@ -1125,6 +1506,23 @@ class EsxiExecutor(Executor):
 
     def snapshot_name(self, ctx: ExecutionContext) -> str:
         return f"infra-{ctx.plan_id}"
+
+    @staticmethod
+    def _setting_before(
+        transport: EsxiTransport, ctx: ExecutionContext, key: str, params: dict[str, Any]
+    ) -> tuple[Any, Any]:
+        """(the value a rollback restores, everything the host reported).
+
+        CDP is read per host, not per vSwitch: `host_setting_get` answers with
+        `{vswitch: mode}` for every switch. Handing that map back as *the* mode
+        is how a rollback of `cdp.mode` used to fail every time, so the scalar
+        for the vSwitch the step names is what gets captured.
+        """
+        current = transport.host_setting_get(ctx, key)
+        if key == CDP_KEY and isinstance(current, dict):
+            vswitch = str(params.get("vswitch", DEFAULT_VSWITCH))
+            return current.get(vswitch), current
+        return current, current
 
     def _snapshot_space_blocker(
         self, ctx: ExecutionContext, vm: dict[str, Any], minimum: float
@@ -1169,11 +1567,12 @@ class EsxiExecutor(Executor):
             frozen=ctx.frozen,
             extra=ctx.extra,
         )
-        for step in steps:
-            entry, step_warnings, step_blockers = self._preview(probe, step)
-            entries.append(entry)
-            warnings.extend(step_warnings)
-            blockers.extend(step_blockers)
+        with self._session(ctx.device):
+            for step in steps:
+                entry, step_warnings, step_blockers = self._preview(probe, step)
+                entries.append(entry)
+                warnings.extend(step_warnings)
+                blockers.extend(step_blockers)
         return DryRunResult(
             ok=not blockers,
             diff={
@@ -1220,7 +1619,8 @@ class EsxiExecutor(Executor):
             blockers.append("esxi.host_setting needs params.key")
             return entry, warnings, blockers
         value = step.params.get("value")
-        current = self.transport(ctx.device).host_setting_get(ctx, key)
+        transport = self.transport(ctx.device)
+        current, everything = self._setting_before(transport, ctx, key, step.params)
         entry.update(
             {
                 "operation": f"set host setting {key}",
@@ -1230,6 +1630,12 @@ class EsxiExecutor(Executor):
                 "backup": "a host-config backup is taken before the change",
             }
         )
+        if everything is not current:
+            entry["before_all"] = everything
+        if key == CDP_KEY:
+            entry["vswitch"] = str(step.params.get("vswitch", DEFAULT_VSWITCH))
+            if isinstance(everything, dict) and entry["vswitch"] not in everything:
+                blockers.append(f"this host has no vSwitch named {entry['vswitch']!r}")
         if key == CDP_KEY and str(value).lower() not in CDP_MODES:
             blockers.append(f"CDP mode {value!r} is not one of {sorted(CDP_MODES)}")
         if key == CDP_KEY and str(value).lower() != "both":
@@ -1295,7 +1701,7 @@ class EsxiExecutor(Executor):
                 "cpu": cpu if cpu is not None else vm.get("cpu"),
                 "memory_mb": memory if memory is not None else vm.get("memory_mb"),
             }
-            blockers.extend(self._resize_blockers(vm, cpu, memory))
+            blockers.extend(self._resize_blockers(vm, cpu, memory, self.transport(ctx.device)))
             blockers.extend(self._pre_snapshot_blockers(ctx, vm, minimum))
         elif step.action == "vm.disk_extend":
             size = step.params.get("size_gb")
@@ -1328,9 +1734,19 @@ class EsxiExecutor(Executor):
         return [f"pre-change snapshot: {space}"] if space else []
 
     @staticmethod
-    def _resize_blockers(vm: dict[str, Any], cpu: Any, memory: Any) -> list[str]:
+    def _resize_blockers(
+        vm: dict[str, Any], cpu: Any, memory: Any, transport: EsxiTransport | None = None
+    ) -> list[str]:
         if vm.get("power_state") != POWERED_ON:
             return []
+        if getattr(transport, "name", "") == "ssh":
+            # The free licence resizes by rewriting the .vmx and reloading,
+            # which needs the VM powered off (VMware KB 1026043); a reload
+            # does not hot-add, so the hot-add flags mean nothing here.
+            return [
+                f"{vm.get('name')} is powered on and this host has no reconfigure API: "
+                "power it off to resize, or use a licensed host for hot-add"
+            ]
         blockers = []
         if cpu is not None and not vm.get("hot_add_cpu"):
             blockers.append(
@@ -1444,11 +1860,12 @@ class EsxiExecutor(Executor):
 
     def _run_checks(self, ctx: ExecutionContext, checks: list[str]) -> list[CheckResult]:
         results: list[CheckResult] = []
-        for check in checks:
-            try:
-                results.append(self._evaluate(ctx, check))
-            except Exception as exc:  # noqa: BLE001 - a check never crashes the engine
-                results.append(CheckResult(check=check, ok=False, detail=short_error(exc)))
+        with self._session(ctx.device):
+            for check in checks:
+                try:
+                    results.append(self._evaluate(ctx, check))
+                except Exception as exc:  # noqa: BLE001 - a check never crashes the engine
+                    results.append(CheckResult(check=check, ok=False, detail=short_error(exc)))
         return results
 
     def pre_check(self, ctx: ExecutionContext, checks: list[str]) -> list[CheckResult]:
@@ -1472,7 +1889,8 @@ class EsxiExecutor(Executor):
                 raise EsxiError("apply() called with a dry-run context")
             if step.action not in ACTIONS:
                 raise EsxiError(f"{step.action} is not an ESXi action this executor implements")
-            self._apply(ctx, step, output)
+            with self._session(ctx.device):
+                self._apply(ctx, step, output)
             return StepResult(
                 step=step, ok=True, output=output, started_at=started, finished_at=datetime.now(UTC)
             )
@@ -1503,9 +1921,16 @@ class EsxiExecutor(Executor):
             value = step.params.get("value")
             # The backup comes first: a host setting that locks us out has to
             # be recoverable from the same bundle the collector commits.
-            output["backup_ref"] = transport.backup_host_config(ctx)
+            output["backup_ref"] = {
+                **transport.backup_host_config(ctx),
+                "plan_id": ctx.plan_id,
+                "device": ctx.device.name,
+            }
             output["key"] = key
-            output["previous"] = transport.host_setting_get(ctx, key)
+            previous, everything = self._setting_before(transport, ctx, key, step.params)
+            output["previous"] = previous
+            if everything is not previous:
+                output["previous_all"] = everything
             output["applied"] = transport.host_setting_set(ctx, key, value, step.params)
             output["rollback"] = "restore the previous value"
             return
@@ -1513,11 +1938,23 @@ class EsxiExecutor(Executor):
         if action == "vm.create_from_template":
             template = self._vm(ctx, str(step.params.get("template", "")))
             new_name = safe_name(step.params.get("name"), "VM name")
-            created = transport.clone_from_template(
-                ctx, template, new_name, step.params.get("datastore")
-            )
-            output["created"] = public(created)
+            # The same refusal the preview makes, repeated here: a dry run and
+            # an apply are separate moments, and a clone that lands on top of
+            # an existing VM is a rollback that deletes somebody else's files.
+            if transport.vm(ctx, new_name) is not None:
+                raise EsxiError(f"a VM named {new_name!r} already exists on {ctx.device.name}")
             output["vm"] = new_name
+
+            def record(what: dict[str, Any]) -> None:
+                # Written before the copy, so a clone that dies half way still
+                # tells the rollback exactly which directory it created.
+                output["created"] = {**(output.get("created") or {}), **public(what)}
+
+            record({"name": new_name, "from": template.get("name")})
+            created = transport.clone_from_template(
+                ctx, template, new_name, step.params.get("datastore"), record
+            )
+            record(created)
             output["rollback"] = "destroy the clone"
             return
 
@@ -1573,6 +2010,26 @@ class EsxiExecutor(Executor):
             output["rollback"] = "none: a virtual disk cannot be shrunk"
             return
 
+        # Refusals that do not depend on the snapshot are made *before* it is
+        # taken: a step that snapshots and then refuses has left an orphaned
+        # infra-<plan_id> on the datastore for nothing.
+        if action == "vm.resize":
+            cpu, memory = step.params.get("cpu"), step.params.get("memory_mb")
+            if cpu is None and memory is None:
+                raise EsxiError("vm.resize needs params.cpu and/or params.memory_mb")
+            refusals = self._resize_blockers(vm, cpu, memory, transport)
+            if refusals:
+                raise EsxiError(refusals[0])
+        if (
+            action == "vm.power_off_graceful"
+            and not vm.get("tools_running")
+            and not step.params.get("force")
+        ):
+            raise EsxiError(
+                "VMware Tools is not running, so no guest shutdown can be requested; "
+                "params.force is required for a hard power off"
+            )
+
         # Everything that follows changes a running VM: snapshot it first.
         snapshot = self.snapshot_name(ctx)
         space = self._snapshot_space_blocker(ctx, vm, minimum)
@@ -1603,7 +2060,7 @@ class EsxiExecutor(Executor):
             cpu, memory = step.params.get("cpu"), step.params.get("memory_mb")
             if cpu is None and memory is None:
                 raise EsxiError("vm.resize needs params.cpu and/or params.memory_mb")
-            blockers = self._resize_blockers(vm, cpu, memory)
+            blockers = self._resize_blockers(vm, cpu, memory, transport)
             if blockers:
                 raise EsxiError(blockers[0])
             transport.reconfigure(
@@ -1629,9 +2086,10 @@ class EsxiExecutor(Executor):
         if vm.get("tools_running"):
             transport.shutdown_guest(ctx, vm)
             deadline = self.monotonic() + timeout
+            # One `power.getstate` per poll, not a whole VM read: the full read
+            # is seven `vim-cmd` calls, sixty times over during a shutdown.
             while self.monotonic() < deadline:
-                current = transport.vm(ctx, str(vm.get("name")))
-                if (current or {}).get("power_state") == POWERED_OFF:
+                if transport.power_state(ctx, vm) == POWERED_OFF:
                     return {"power_state": POWERED_OFF, "via": "guest shutdown"}
                 self.sleep(SHUTDOWN_POLL_SECONDS)
             reason = f"the guest did not shut down within {timeout:g}s"
@@ -1653,18 +2111,23 @@ class EsxiExecutor(Executor):
 
         A step that took its pre-change snapshot and then failed part-way — the
         vmx was rewritten but the reload failed, the power-on task errored — is
-        not a no-op, and its snapshot is the only way back. The engine may hand
-        such a step to `rollback` or not; either way it is handled here rather
-        than left as an orphaned `infra-<plan_id>` on the datastore.
+        not a no-op, and its snapshot is the only way back. Nor is a clone whose
+        `vmkfstools -i` had already copied tens of gigabytes before the register
+        failed: the directory it created is recorded before the copy starts, and
+        that is what makes it recoverable instead of an orphan filling the
+        datastore. The engine may hand such a step to `rollback` or not; either
+        way it is handled here.
         """
-        return bool(result.output.get("pre_snapshot"))
+        created = result.output.get("created") or {}
+        return bool(result.output.get("pre_snapshot") or created.get("dir"))
 
     def rollback(self, ctx: ExecutionContext, applied: list[StepResult]) -> list[StepResult]:
         undone: list[StepResult] = []
-        for result in reversed(applied):
-            if not result.ok and not self.partially_applied(result):
-                continue
-            undone.append(self._undo(ctx, result))
+        with self._session(ctx.device):
+            for result in reversed(applied):
+                if not result.ok and not self.partially_applied(result):
+                    continue
+                undone.append(self._undo(ctx, result))
         return undone
 
     def _undo(self, ctx: ExecutionContext, result: StepResult) -> StepResult:
@@ -1688,14 +2151,33 @@ class EsxiExecutor(Executor):
                 output["backup_ref"] = result.output.get("backup_ref")
                 if key is None:
                     raise EsxiError("no captured host setting to restore")
+                if key == CDP_KEY and previous is None:
+                    raise EsxiError(
+                        "no previous CDP mode was captured for "
+                        f"{result.step.params.get('vswitch', DEFAULT_VSWITCH)}; "
+                        "set it back by hand rather than guessing a default"
+                    )
                 transport.host_setting_set(ctx, str(key), previous, result.step.params)
                 output["undo"] = f"restored host setting {key}"
+                output["restored"] = previous
             elif action == "vm.create_from_template":
                 created = result.output.get("created") or {}
                 name = created.get("name") or result.output.get("vm")
-                vm = transport.vm(ctx, str(name)) or {**created, "name": name}
-                transport.destroy_vm(ctx, vm)
+                directory = created.get("dir")
+                if not directory:
+                    raise EsxiError(
+                        "no directory was recorded for this clone, so there is nothing "
+                        "this rollback may safely delete"
+                    )
+                registered = transport.vm(ctx, str(name)) if name else None
+                # Only ever the directory this step created: never one found by
+                # looking up whatever VM currently answers to that name.
+                target = {**(registered or {}), "name": name, "dir": directory}
+                if created.get("vmid") and not target.get("vmid"):
+                    target["vmid"] = created["vmid"]
+                transport.destroy_vm(ctx, target)
                 output["undo"] = f"destroyed the clone {name!r}"
+                output["removed_directory"] = directory
             elif action == "vm.snapshot":
                 snapshot = result.output.get("snapshot")
                 vm = self._vm(ctx, str(result.output.get("vm")))
@@ -1713,6 +2195,8 @@ class EsxiExecutor(Executor):
                     "a virtual disk cannot be shrunk; the extend stands and the guest "
                     "filesystem has to be reviewed by hand"
                 )
+            elif action in POWER_ACTIONS:
+                output.update(self._undo_power(ctx, result, transport))
             else:
                 output.update(self._revert_to_pre_snapshot(ctx, result, transport))
         except Exception as exc:  # noqa: BLE001 - a failed rollback pages the owner
@@ -1725,6 +2209,65 @@ class EsxiExecutor(Executor):
             started_at=started,
             finished_at=datetime.now(UTC),
         )
+
+    def _undo_power(
+        self, ctx: ExecutionContext, result: StepResult, transport: EsxiTransport
+    ) -> dict[str, Any]:
+        """Undo a power step with the *inverse power operation*, not a revert.
+
+        The pre-change snapshot of a running VM is crash-consistent. Reverting
+        to it to undo a clean shutdown boots the guest from a crash image —
+        journal replay, database recovery — and reverting to undo a power-on
+        throws away everything the guest wrote since it booted. The honest
+        inverse of "powered it on" is "shut it down", and of "shut it down" is
+        "power it on". The snapshot stays as evidence, and the revert is only
+        the fallback for when the inverse operation itself fails.
+        """
+        step = result.step
+        wanted = (result.output.get("before") or {}).get("power_state")
+        vm = self._vm(ctx, str(result.output.get("vm")))
+        undo: dict[str, Any] = {"snapshot": result.output.get("pre_snapshot")}
+        try:
+            if wanted == POWERED_ON:
+                if transport.power_state(ctx, vm) != POWERED_ON:
+                    transport.power_on(ctx, vm)
+                undo["undo"] = "powered the VM back on, which is where it was"
+            elif wanted == POWERED_OFF:
+                timeout = float(step.params.get("timeout_seconds", DEFAULT_SHUTDOWN_TIMEOUT))
+                undo.update(self._power_off_for_rollback(ctx, vm, transport, timeout))
+            else:
+                raise EsxiError(f"no power state was recorded to go back to (was {wanted!r})")
+        except EsxiError as exc:
+            # The inverse failed; the snapshot is what is left.
+            undo["inverse_failed"] = short_error(exc)
+            undo.update(self._revert_to_pre_snapshot(ctx, result, transport))
+            return undo
+        undo["power_state"] = transport.power_state(ctx, vm)
+        undo["snapshot_left_in_place"] = bool(result.output.get("pre_snapshot"))
+        return undo
+
+    def _power_off_for_rollback(
+        self,
+        ctx: ExecutionContext,
+        vm: dict[str, Any],
+        transport: EsxiTransport,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """Put a VM that had been off back to off: guest shutdown, then hard."""
+        if transport.power_state(ctx, vm) != POWERED_ON:
+            return {"undo": "the VM was already off, which is where it was"}
+        if vm.get("tools_running"):
+            transport.shutdown_guest(ctx, vm)
+            deadline = self.monotonic() + timeout
+            while self.monotonic() < deadline:
+                if transport.power_state(ctx, vm) == POWERED_OFF:
+                    return {"undo": "shut the guest down, which is where it was"}
+                self.sleep(SHUTDOWN_POLL_SECONDS)
+        transport.power_off(ctx, vm)
+        return {
+            "undo": "powered the VM off, which is where it was",
+            "hard": "the guest did not stop in time, or has no running Tools",
+        }
 
     def _revert_to_pre_snapshot(
         self, ctx: ExecutionContext, result: StepResult, transport: EsxiTransport

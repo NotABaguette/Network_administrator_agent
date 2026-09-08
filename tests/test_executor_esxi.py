@@ -12,6 +12,7 @@ Three layers:
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -196,6 +197,10 @@ class FakeEsxi:
         #: whether a guest shutdown actually powers the VM off
         self.guest_shutdown_works = True
         self._next_snapshot_id = 1
+        #: datastore directories that already exist, so a clone can collide
+        self.dirs: set[str] = {f"[datastore1] {name}" for name in self.vms}
+        self.sessions = 0
+        self.open_sessions = 0
 
     # -- bookkeeping ------------------------------------------------------
     def _record(self, what: str) -> None:
@@ -205,14 +210,30 @@ class FakeEsxi:
             raise error
 
     def writes(self) -> list[str]:
-        reads = ("vm", "datastores", "host_setting_get")
+        reads = ("vm", "power_state", "datastores", "host_setting_get")
         return [c for c in self.calls if not c.startswith(reads)]
+
+    @contextmanager
+    def connection(self):
+        self.sessions += 1
+        self.open_sessions += 1
+        try:
+            yield
+        finally:
+            self.open_sessions -= 1
 
     # -- reads ------------------------------------------------------------
     def vm(self, ctx, name):
         self._record(f"vm:{name}")
         row = self.vms.get(ex.safe_name(name, "VM name"))
         return json.loads(json.dumps(row)) if row else None
+
+    def power_state(self, ctx, vm):
+        self._record(f"power_state:{vm['name']}")
+        live = self.vms.get(vm["name"])
+        if live is None:
+            raise ex.EsxiError(f"{vm['name']} is not registered on this host")
+        return live["power_state"]
 
     def datastores(self, ctx):
         self._record("datastores")
@@ -301,16 +322,31 @@ class FakeEsxi:
                 live_disk["size_gb"] = size_gb
         return {"disk": disk["label"], "size_gb": size_gb}
 
-    def clone_from_template(self, ctx, template, name, datastore):
+    def clone_from_template(self, ctx, template, name, datastore, record=None):
         self._record(f"clone:{template['name']}->{name}")
-        clone = _vm(name, datastore=datastore or template.get("datastore"))
+        store = datastore or template.get("datastore")
+        directory = f"[{store}] {name}"
+        if directory in self.dirs:
+            raise ex.EsxiError(f"{directory} already exists")
+        self.dirs.add(directory)
+        if record is not None:
+            record({"dir": directory})
+        if self.fail.get("clone_after_mkdir"):
+            raise self.fail["clone_after_mkdir"]
+        clone = _vm(name, datastore=store)
         self.vms[name] = clone
-        return {"name": name, "from": template["name"]}
+        return {"name": name, "from": template["name"], "dir": directory}
 
     def destroy_vm(self, ctx, vm):
-        self._record(f"destroy:{vm.get('name')}")
+        self._record(f"destroy:{vm.get('name')}:{vm.get('dir')}")
+        directory = vm.get("dir")
+        if not directory:
+            raise ex.EsxiError("no directory recorded for this clone")
+        if directory not in self.dirs:
+            raise ex.EsxiError(f"{directory} is not a directory this host knows about")
+        self.dirs.discard(directory)
         self.vms.pop(vm.get("name"), None)
-        return {"destroyed": vm.get("name")}
+        return {"destroyed": vm.get("name"), "dir": directory}
 
     def backup_host_config(self, ctx):
         self._record("backup_host_config")
@@ -899,10 +935,22 @@ def test_ssh_writes_the_documented_commands(ssh, ctx, session):
     assert session.commands == [
         "esxcli system syslog config set --loghost=udp://10.10.0.20:514",
         "esxcli system syslog reload",
+        # without the ruleset the loghost is set and nothing ever arrives
+        "esxcli network firewall ruleset set -r syslog -e true",
         "esxcli system ntp set --server=10.10.0.9 --server=10.10.0.10",
         "esxcli system ntp set --enabled=1",
         "esxcli network vswitch standard set -v vSwitch0 --cdp-status=both",
         "esxcli system settings advanced set -o /UserVars/SuppressShellWarning -i 1",
+    ]
+
+
+def test_ssh_resets_ntp_rather_than_running_a_set_with_no_servers(ssh, ctx, session):
+    """Rolling back to a host that had no NTP configured used to fail."""
+    applied = ssh.host_setting_set(ctx, "ntp.servers", [], {})
+    assert applied["via"] == "reset"
+    assert session.commands == [
+        "esxcli system ntp set --reset",
+        "esxcli system ntp set --enabled=0",
     ]
 
 
@@ -931,16 +979,28 @@ def test_ssh_refuses_a_snapshot_name_it_cannot_resolve(ssh, ctx):
 
 
 def test_ssh_reconfigure_rewrites_the_vmx_and_reloads(ssh, ctx, session):
-    vm = ssh.vm(ctx, "web-01")
+    vm = ssh.vm(ctx, "tpl-ubuntu")  # powered off, which the .vmx rewrite needs
     session.commands.clear()
     ssh.reconfigure(ctx, vm, cpu=4, memory_mb=8192)
+    prefix = "/vmfs/volumes/datastore1/tpl-ubuntu/tpl-ubuntu.vmx"
     assert session.commands == [
-        "sed -i '/^numvcpus[[:space:]]*=/d' /vmfs/volumes/datastore1/web-01/web-01.vmx",
-        "echo 'numvcpus = \"4\"' >> /vmfs/volumes/datastore1/web-01/web-01.vmx",
-        "sed -i '/^memSize[[:space:]]*=/d' /vmfs/volumes/datastore1/web-01/web-01.vmx",
-        "echo 'memSize = \"8192\"' >> /vmfs/volumes/datastore1/web-01/web-01.vmx",
-        "vim-cmd vmsvc/reload 1",
+        f"sed -i '/^numvcpus[[:space:]]*=/d' {prefix}",
+        f"echo 'numvcpus = \"4\"' >> {prefix}",
+        f"sed -i '/^memSize[[:space:]]*=/d' {prefix}",
+        f"echo 'memSize = \"8192\"' >> {prefix}",
+        "vim-cmd vmsvc/reload 2",
     ]
+
+
+def test_ssh_refuses_to_rewrite_the_vmx_of_a_running_vm(ssh, ctx, session):
+    """A .vmx rewrite needs the VM off, and `vmsvc/reload` does not hot-add."""
+    vm = ssh.vm(ctx, "web-01")
+    assert vm["power_state"] == ex.POWERED_ON and vm["hot_add_memory"] is True
+    session.commands.clear()
+    with pytest.raises(ex.EsxiError) as caught:
+        ssh.reconfigure(ctx, vm, cpu=None, memory_mb=8192)
+    assert "powered off" in str(caught.value)
+    assert session.commands == []
 
 
 def test_ssh_disk_extend_uses_vmkfstools(ssh, ctx, session):
@@ -967,12 +1027,60 @@ def test_ssh_clone_copies_registers_and_retitles(ssh, ctx, session):
     template = ssh.vm(ctx, "tpl-ubuntu")
     session.commands.clear()
     session.outputs["vim-cmd solo/registervm /vmfs/volumes/datastore1/web-02/web-02.vmx"] = "12\n"
-    created = ssh.clone_from_template(ctx, template, "web-02", "datastore1")
+    recorded: list[dict[str, Any]] = []
+    created = ssh.clone_from_template(ctx, template, "web-02", "datastore1", recorded.append)
     assert created["vmid"] == "12"
     assert created["vmx"] == "[datastore1] web-02/web-02.vmx"
-    assert session.commands[0] == "mkdir -p /vmfs/volumes/datastore1/web-02"
-    assert session.commands[1].startswith("vmkfstools -i /vmfs/volumes/datastore1/tpl-ubuntu")
-    assert session.commands[-1].startswith("vim-cmd solo/registervm")
+    assert created["dir"] == "/vmfs/volumes/datastore1/web-02"
+    # the directory is recorded the moment it exists, before any byte is copied
+    assert recorded == [{"dir": "/vmfs/volumes/datastore1/web-02"}]
+    assert session.commands[0] == "cat /vmfs/volumes/datastore1/tpl-ubuntu/tpl-ubuntu.vmx"
+    # a plain mkdir, so an existing directory aborts before the copy
+    assert session.commands[1] == "mkdir /vmfs/volumes/datastore1/web-02"
+    assert session.commands[2].startswith("vmkfstools -i /vmfs/volumes/datastore1/tpl-ubuntu")
+    assert session.commands[-1] == (
+        "vim-cmd solo/registervm /vmfs/volumes/datastore1/web-02/web-02.vmx"
+    )
+    written = next(c for c in session.commands if c.startswith("cat > "))
+    assert written.startswith(
+        f"cat > /vmfs/volumes/datastore1/web-02/web-02.vmx <<'{ex.VMX_HEREDOC}'\n"
+    )
+    assert 'displayName = "web-02"' in written
+    assert 'displayName = "tpl-ubuntu"' not in written
+    assert 'scsi0:0.fileName = "web-02.vmdk"' in written
+    assert "vc.uuid" not in written and "uuid.bios" not in written
+
+
+def test_ssh_clone_stops_at_an_existing_directory_before_copying_anything(ssh, ctx, ssh_outputs):
+    """`mkdir` without -p is the guard: a name collision must not overwrite a .vmx."""
+    session = FakeSession(
+        ssh_outputs, fail={"mkdir /vmfs/volumes/datastore1/web-02": "File exists"}
+    )
+    transport = ex.SshTransport(open_session=lambda device, cred: session)
+    template = transport.vm(ctx, "tpl-ubuntu")
+    session.commands.clear()
+    recorded: list[dict[str, Any]] = []
+    with pytest.raises(ex.EsxiError):
+        transport.clone_from_template(ctx, template, "web-02", "datastore1", recorded.append)
+    assert recorded == []
+    assert not any(c.startswith(("vmkfstools", "cat > ")) for c in session.commands)
+
+
+def test_the_vmx_patch_is_not_a_sed_script(ssh_outputs):
+    """A disk basename is data; `.` in it would be a regex metacharacter in sed."""
+    text = ssh_outputs["cat /vmfs/volumes/datastore1/tpl-ubuntu/tpl-ubuntu.vmx"]
+    patched = ex.patch_vmx(text, "web-02", "tpl-ubuntu.vmdk", "web-02.vmdk")
+    lines = patched.splitlines()
+    assert 'scsi0:0.fileName = "web-02.vmdk"' in lines
+    assert lines[-2:] == ['displayName = "web-02"', 'uuid.action = "create"']
+    assert not [line for line in lines if line.startswith(("uuid.bios", "vc.uuid"))]
+    # unrelated lines survive untouched
+    assert 'ethernet0.networkName = "VM Network"' in lines
+
+
+def test_a_vmx_carrying_the_heredoc_marker_is_refused():
+    with pytest.raises(ex.EsxiError):
+        ex.patch_vmx(f'annotation = "{ex.VMX_HEREDOC}"', "web-02", "a.vmdk", "b.vmdk")
 
 
 def test_ssh_destroy_refuses_a_path_outside_a_datastore(ssh, ctx):
@@ -982,13 +1090,29 @@ def test_ssh_destroy_refuses_a_path_outside_a_datastore(ssh, ctx):
         ssh.destroy_vm(ctx, {"name": "x", "vmid": "1", "dir": "/vmfs/volumes"})
 
 
+def test_ssh_destroy_refuses_a_vm_whose_directory_was_never_recorded(ssh, ctx, session):
+    """Falling back to the .vmx directory of a VM found by name deletes strangers."""
+    with pytest.raises(ex.EsxiError) as caught:
+        ssh.destroy_vm(
+            ctx, {"name": "web-01", "vmid": "1", "vmx": "[datastore1] web-01/web-01.vmx"}
+        )
+    assert "no directory was recorded" in str(caught.value)
+    assert session.commands == []
+
+
 def test_ssh_destroy_unregisters_then_removes_the_directory(ssh, ctx, session):
-    ssh.destroy_vm(ctx, {"name": "web-02", "vmid": "12", "vmx": "[datastore1] web-02/web-02.vmx"})
+    ssh.destroy_vm(ctx, {"name": "web-02", "vmid": "12", "dir": "/vmfs/volumes/datastore1/web-02"})
     assert session.commands == [
         "vim-cmd vmsvc/power.off 12 || true",
         "vim-cmd vmsvc/unregister 12",
         "rm -rf /vmfs/volumes/datastore1/web-02",
     ]
+
+
+def test_ssh_destroy_of_an_unregistered_clone_only_removes_its_directory(ssh, ctx, session):
+    """A clone that failed before registervm has a directory but no vmid."""
+    ssh.destroy_vm(ctx, {"name": "web-02", "dir": "/vmfs/volumes/datastore1/web-02"})
+    assert session.commands == ["rm -rf /vmfs/volumes/datastore1/web-02"]
 
 
 def test_ssh_backup_and_log_bundle_report_their_paths(ssh, ctx):
@@ -1044,15 +1168,20 @@ class Task:
 
 
 class FakeVim:
-    """Just the spec constructors the transport builds."""
+    """Just the spec constructors the transport builds.
+
+    `vim.host.VirtualSwitch.Specification` is deliberately absent: hostd's
+    `UpdateVirtualSwitch` replaces the switch spec, so building a fresh one is
+    a bug (`numPorts` and the bridge's `nicDevice` are required fields and an
+    empty `nicDevice` strips vSwitch0's uplinks). The transport must read the
+    live spec instead, and this fake makes constructing one an AttributeError.
+    """
 
     class option:
         OptionValue = Bag
 
     class vm:
         ConfigSpec = Bag
-        CloneSpec = Bag
-        RelocateSpec = Bag
 
         class device:
             VirtualDeviceSpec = Bag
@@ -1061,10 +1190,6 @@ class FakeVim:
         DateTimeConfig = Bag
         NtpConfig = Bag
         LinkDiscoveryProtocolConfig = Bag
-
-        class VirtualSwitch:
-            Specification = Bag
-            BondBridge = Bag
 
 
 class FakeVm:
@@ -1119,13 +1244,21 @@ class FakeVm:
         return self._task("reconfigure", spec)
 
     def CloneVM_Task(self, folder, name, spec):
-        return self._task("clone", {"folder": folder, "name": name, "spec": spec})
+        # What a standalone host actually answers: there is no vCenter here.
+        self.calls.append(("clone", name))
+        raise ex.EsxiError("The operation is not supported on the object.")
 
     def Destroy_Task(self):
-        return self._task("destroy")
+        # Destroy deletes every file the VM references, including a template
+        # disk a half-finished clone still points at.
+        self.calls.append(("destroy", None))
+        raise ex.EsxiError("Destroy_Task must not be used to undo a clone")
+
+    def UnregisterVM(self):
+        self.calls.append(("unregister", self.name))
 
 
-def fake_host(vms: list[FakeVm]) -> Bag:
+def fake_host(vms: list[FakeVm], vswitch: Bag | None = None) -> Bag:
     advanced = Bag(
         setting=[Bag(key="Syslog.global.logHost", value="udp://10.10.0.9:514")],
         updates=[],
@@ -1138,6 +1271,8 @@ def fake_host(vms: list[FakeVm]) -> Bag:
         (vswitchName, spec)
     )
     firmware = Bag(BackupFirmwareConfiguration=lambda: "http://*/downloads/x/configBundle.tgz")
+    firewall = Bag(enabled=[])
+    firewall.EnableRuleset = lambda id: firewall.enabled.append(id)  # noqa: A002
     return Bag(
         vm=vms,
         datastore=[
@@ -1148,30 +1283,93 @@ def fake_host(vms: list[FakeVm]) -> Bag:
             dateTimeSystem=date_time,
             networkSystem=network,
             firmwareSystem=firmware,
+            firewallSystem=firewall,
         ),
         config=Bag(
             dateTimeInfo=Bag(ntpConfig=Bag(server=["10.10.0.9"])),
-            network=Bag(
-                vswitch=[
-                    Bag(
-                        name="vSwitch0",
-                        spec=Bag(
-                            bridge=Bag(
-                                linkDiscoveryProtocolConfig=Bag(protocol="cdp", operation="listen")
-                            )
-                        ),
-                    )
-                ]
+            network=Bag(vswitch=[vswitch or fake_vswitch()]),
+        ),
+    )
+
+
+def fake_vswitch(name: str = "vSwitch0", operation: str = "listen") -> Bag:
+    """A vSwitch whose spec carries the required fields a real one has."""
+    return Bag(
+        name=name,
+        spec=Bag(
+            numPorts=128,
+            bridge=Bag(
+                nicDevice=["vmnic0", "vmnic1"],
+                linkDiscoveryProtocolConfig=Bag(protocol="cdp", operation=operation),
             ),
         ),
     )
 
 
-def fake_content(host: Bag) -> Bag:
-    compute = Bag(host=[host])
-    datacenter = Bag(hostFolder=Bag(childEntity=[compute]))
+class FakeFileManager:
+    """`fileManager` and `virtualDiskManager` on a standalone host."""
+
+    def __init__(self) -> None:
+        self.dirs: set[str] = {"[datastore1] web-01"}
+        self.files: set[str] = {"[datastore1] web-01/web-01.vmx", "[datastore1] web-01/web-01.vmdk"}
+        self.calls: list[tuple[str, Any]] = []
+
+    def MakeDirectory(self, name, datacenter, createParentDirectories):  # noqa: N802
+        self.calls.append(("mkdir", name))
+        if name in self.dirs:
+            raise ex.EsxiError(f"File {name} already exists")
+        self.dirs.add(name)
+
+    def CopyDatastoreFile_Task(  # noqa: N802
+        self, sourceName, sourceDatacenter, destinationName, destinationDatacenter, force
+    ):
+        self.calls.append(("copy-file", destinationName))
+        if force is not False:
+            raise ex.EsxiError("a clone must never overwrite an existing file")
+        if destinationName in self.files:
+            raise ex.EsxiError(f"File {destinationName} already exists")
+        self.files.add(destinationName)
+        return Task()
+
+    def DeleteDatastoreFile_Task(self, name, datacenter):  # noqa: N802
+        self.calls.append(("delete", name))
+        if name not in self.dirs:
+            raise ex.EsxiError(f"{name} is not a directory this host knows about")
+        self.dirs.discard(name)
+        self.files = {f for f in self.files if not f.startswith(f"{name}/")}
+        return Task()
+
+    def CopyVirtualDisk_Task(  # noqa: N802
+        self, sourceName, sourceDatacenter, destName, destDatacenter, force
+    ):
+        self.calls.append(("copy-disk", destName))
+        if destName in self.files:
+            raise ex.EsxiError(f"File {destName} already exists")
+        self.files.add(destName)
+        return Task()
+
+
+def fake_content(host: Bag, files: FakeFileManager | None = None) -> Bag:
+    files = files or FakeFileManager()
+    compute = Bag(host=[host], resourcePool=Bag(name="Resources"))
+    host.parent = compute
+    registered: list[Any] = []
+
+    def register_vm(path, name, asTemplate, pool, host):  # noqa: N803
+        vm = FakeVm(name)
+        vm.config.files = Bag(vmPathName=path)
+        registered.append(vm)
+        host.vm.append(vm)
+        return Task(result=vm)
+
+    datacenter = Bag(
+        hostFolder=Bag(childEntity=[compute]),
+        vmFolder=Bag(RegisterVM_Task=register_vm, registered=registered),
+    )
     return Bag(
         rootFolder=Bag(childEntity=[datacenter]),
+        fileManager=files,
+        virtualDiskManager=files,
         diagnosticManager=Bag(
             GenerateLogBundles_Task=lambda includeDefault: Task(
                 result=[Bag(url="http://*/downloads/bundle.tgz")]
@@ -1186,14 +1384,25 @@ def api_vm() -> FakeVm:
 
 
 @pytest.fixture
-def api(api_vm: FakeVm) -> ex.PyvmomiTransport:
+def api(api_vm: FakeVm, api_files: FakeFileManager, connects: list[int]) -> ex.PyvmomiTransport:
     host = fake_host([api_vm])
-    content = fake_content(host)
-    return ex.PyvmomiTransport(
-        connect=lambda device, cred: Bag(RetrieveContent=lambda: content),
-        vim=FakeVim,
-        sleep=lambda _s: None,
-    )
+    content = fake_content(host, api_files)
+
+    def connect(device, cred):
+        connects.append(1)
+        return Bag(RetrieveContent=lambda: content)
+
+    return ex.PyvmomiTransport(connect=connect, vim=FakeVim, sleep=lambda _s: None)
+
+
+@pytest.fixture
+def api_files() -> FakeFileManager:
+    return FakeFileManager()
+
+
+@pytest.fixture
+def connects() -> list[int]:
+    return []
 
 
 @pytest.fixture
@@ -1300,13 +1509,88 @@ def test_the_licensed_path_end_to_end_resizes_and_rolls_back(api, api_ctx, api_v
     assert [c[0] for c in api_vm.calls][-1] == "snapshot.revert"
 
 
-def test_the_licensed_path_destroys_a_clone_on_rollback(api, api_ctx, api_vm):
+def test_the_licensed_clone_never_calls_clonevm(api, api_ctx, api_vm, api_files):
+    """hostd answers `CloneVM_Task` with "not supported": there is no vCenter."""
     executor = ex.EsxiExecutor(licensed=api, sleep=lambda _s: None)
     result = executor.apply(
         api_ctx, step("vm.create_from_template", template="web-01", name="web-02")
     )
     assert result.ok, result.error
-    assert [c[0] for c in api_vm.calls] == ["clone"]
+    assert "clone" not in [c[0] for c in api_vm.calls]
+    assert [c[0] for c in api_files.calls] == ["mkdir", "copy-disk", "copy-file"]
+    assert api_files.dirs == {"[datastore1] web-01", "[datastore1] web-02"}
+    assert result.output["created"]["dir"] == "[datastore1] web-02"
+    assert result.output["created"]["via"].startswith("MakeDirectory")
+
+    clone = next(v for v in api.host(api_ctx).vm if v.name == "web-02")
+    what, spec = clone.calls[-1]
+    assert what == "reconfigure"
+    # the clone is retitled, pre-answers the copied-uuid question and points at
+    # its own disk rather than the template's
+    assert spec.name == "web-02"
+    assert [(o.key, o.value) for o in spec.extraConfig] == [("uuid.action", "create")]
+    assert spec.deviceChange[0].device.backing.fileName == "[datastore1] web-02/web-02.vmdk"
+
+
+def test_the_licensed_clone_rollback_unregisters_and_deletes_only_its_directory(
+    api, api_ctx, api_vm, api_files
+):
+    executor = ex.EsxiExecutor(licensed=api, sleep=lambda _s: None)
+    result = executor.apply(
+        api_ctx, step("vm.create_from_template", template="web-01", name="web-02")
+    )
+    clone = next(v for v in api.host(api_ctx).vm if v.name == "web-02")
+
+    (undone,) = executor.rollback(api_ctx, [result])
+    assert undone.ok, undone.error
+    assert undone.output["removed_directory"] == "[datastore1] web-02"
+    assert ("unregister", "web-02") in clone.calls
+    # never Destroy_Task: it deletes every file the VM references
+    assert "destroy" not in [c[0] for c in clone.calls]
+    assert api_files.dirs == {"[datastore1] web-01"}
+    assert api_files.files == {
+        "[datastore1] web-01/web-01.vmx",
+        "[datastore1] web-01/web-01.vmdk",
+    }
+
+
+def test_the_licensed_clone_refuses_a_directory_that_is_already_there(api, api_ctx, api_files):
+    """MakeDirectory is the guard, and it fires before a byte is copied."""
+    api_files.dirs.add("[datastore1] web-02")
+    template = api.vm(api_ctx, "web-01")
+    recorded: list[dict[str, Any]] = []
+    with pytest.raises(ex.EsxiError):
+        api.clone_from_template(api_ctx, template, "web-02", "datastore1", recorded.append)
+    assert recorded == []
+    assert [c[0] for c in api_files.calls] == ["mkdir"]
+
+
+def test_the_licensed_transport_logs_in_once_per_executor_call(api, api_ctx, connects):
+    """hostd caps concurrent sessions and an idle one lingers for half an hour."""
+    executor = ex.EsxiExecutor(licensed=api, sleep=lambda _s: None)
+    executor.dry_run(api_ctx, [step("vm.resize", vm="web-01", memory_mb=8192)])
+    assert connects == [1]
+    connects.clear()
+
+    executor.pre_check(api_ctx, ["vm web-01 powered off", "datastore datastore1 free >= 10"])
+    assert connects == [1]
+    connects.clear()
+
+    result = executor.apply(api_ctx, step("vm.resize", vm="web-01", memory_mb=8192))
+    assert result.ok, result.error
+    assert connects == [1]
+    connects.clear()
+
+    executor.rollback(api_ctx, [result])
+    assert connects == [1]
+
+
+def test_the_licensed_transport_reuses_nothing_between_calls(api, api_ctx, connects):
+    """The session is disconnected on the way out, not held open forever."""
+    executor = ex.EsxiExecutor(licensed=api, sleep=lambda _s: None)
+    executor.pre_check(api_ctx, ["vm web-01 powered off"])
+    executor.pre_check(api_ctx, ["vm web-01 powered off"])
+    assert connects == [1, 1]
 
 
 def test_a_step_that_failed_after_its_pre_snapshot_is_still_rolled_back(executor, ctx, host):
@@ -1328,3 +1612,311 @@ def test_a_step_that_failed_before_touching_anything_is_skipped(executor, ctx, h
     assert result.ok is False
     assert executor.partially_applied(result) is False
     assert executor.rollback(ctx, [result]) == []
+
+
+# ---------------------------------------------------------------------------
+# audit fixes: CDP, clone safety, free-licence resize, power rollback, auth
+# ---------------------------------------------------------------------------
+def test_cdp_apply_and_rollback_on_the_in_memory_host(executor, ctx, host):
+    """`host_setting_get` answers per host; the mode for one vSwitch is a scalar."""
+    result = executor.apply(ctx, step("esxi.host_setting", key="cdp.mode", value="both"))
+    assert result.ok, result.error
+    assert result.output["previous"] == "listen"
+    assert result.output["previous_all"] == {"vSwitch0": "listen"}
+    assert host.settings[ex.CDP_KEY] == "both"
+
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert undone.output["restored"] == "listen"
+    assert host.settings[ex.CDP_KEY] == "listen"
+
+
+def test_cdp_apply_and_rollback_over_ssh(ssh_outputs, ctx):
+    session = FakeSession(ssh_outputs)
+    executor = ex.EsxiExecutor(
+        free=ex.SshTransport(open_session=lambda device, cred: session), sleep=lambda _s: None
+    )
+    result = executor.apply(ctx, step("esxi.host_setting", key="cdp.mode", value="both"))
+    assert result.ok, result.error
+    assert result.output["previous"] == "listen"
+    assert "esxcli network vswitch standard set -v vSwitch0 --cdp-status=both" in session.commands
+
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert "esxcli network vswitch standard set -v vSwitch0 --cdp-status=listen" in session.commands
+
+
+def test_cdp_apply_and_rollback_over_the_api(api, api_ctx):
+    executor = ex.EsxiExecutor(licensed=api, sleep=lambda _s: None)
+    switches = api.host(api_ctx).configManager.networkSystem.switches
+    result = executor.apply(api_ctx, step("esxi.host_setting", key="cdp.mode", value="both"))
+    assert result.ok, result.error
+    assert result.output["previous"] == "listen"
+    name, spec = switches[-1]
+    assert name == "vSwitch0"
+    assert spec.bridge.linkDiscoveryProtocolConfig.operation == "both"
+
+    (undone,) = executor.rollback(api_ctx, [result])
+    assert undone.ok, undone.error
+    assert switches[-1][1].bridge.linkDiscoveryProtocolConfig.operation == "listen"
+
+
+def test_the_cdp_write_keeps_the_vswitch_uplinks_and_port_count(api, api_ctx):
+    """`UpdateVirtualSwitch` REPLACES the spec; a fresh one isolates the host."""
+    api.host_setting_set(api_ctx, "cdp.mode", "both", {"vswitch": "vSwitch0"})
+    _name, spec = api.host(api_ctx).configManager.networkSystem.switches[-1]
+    assert spec.numPorts == 128
+    assert spec.bridge.nicDevice == ["vmnic0", "vmnic1"]
+    assert spec.bridge.linkDiscoveryProtocolConfig.protocol == "cdp"
+
+
+def test_the_cdp_write_submits_a_spec_pyvmomi_can_actually_serialise(api_vm, api_ctx):
+    """The live spec is a real one, so the submitted object has to serialise."""
+    vim = pytest.importorskip("pyVmomi").vim
+    serialize = pytest.importorskip("pyVmomi.SoapAdapter").Serialize
+    live = vim.host.VirtualSwitch.Specification(numPorts=128)
+    live.bridge = vim.host.VirtualSwitch.BondBridge(nicDevice=["vmnic0"])
+    host = fake_host([api_vm], vswitch=Bag(name="vSwitch0", spec=live))
+    content = fake_content(host)
+    transport = ex.PyvmomiTransport(
+        connect=lambda device, cred: Bag(RetrieveContent=lambda: content),
+        vim=vim,
+        sleep=lambda _s: None,
+    )
+    transport.host_setting_set(api_ctx, "cdp.mode", "both", {"vswitch": "vSwitch0"})
+    _name, spec = host.configManager.networkSystem.switches[-1]
+    body = serialize(spec)  # a fresh Specification raises "nicDevice not optional" here
+    assert b"<numPorts>128</numPorts>" in body
+    assert b"<nicDevice>vmnic0</nicDevice>" in body
+    assert spec.bridge.linkDiscoveryProtocolConfig.operation == "both"
+
+
+def test_a_cdp_change_on_a_vswitch_the_host_does_not_have_is_blocked(executor, ctx):
+    dry = executor.dry_run(
+        ctx, [step("esxi.host_setting", key="cdp.mode", value="both", vswitch="vSwitch9")]
+    )
+    assert dry.ok is False
+    assert any("no vSwitch named" in b for b in dry.blockers)
+
+
+def test_the_api_syslog_change_opens_the_syslog_ruleset(api, api_ctx):
+    applied = api.host_setting_set(api_ctx, "syslog", "udp://10.10.0.20:514", {})
+    assert applied["firewall_ruleset"] == "syslog enabled"
+    assert api.host(api_ctx).configManager.firewallSystem.enabled == ["syslog"]
+
+
+def test_applying_a_clone_over_an_existing_vm_is_refused(host, ctx):
+    """The preview's refusal, repeated at apply: they are separate moments."""
+    host.vms["tpl-ubuntu"] = _vm("tpl-ubuntu")
+    executor = ex.EsxiExecutor(free=host, sleep=lambda _s: None)
+    result = executor.apply(
+        ctx, step("vm.create_from_template", template="tpl-ubuntu", name="web-01")
+    )
+    assert result.ok is False
+    assert "already exists" in result.error
+    assert not any(c.startswith("clone") for c in host.calls)
+    assert executor.partially_applied(result) is False
+
+
+def test_a_clone_that_failed_after_making_its_directory_is_still_cleaned_up(host, ctx):
+    """`vmkfstools -i` can copy tens of GB before the register fails."""
+    host.vms["tpl-ubuntu"] = _vm("tpl-ubuntu")
+    host.fail["clone_after_mkdir"] = ex.EsxiError("registervm failed")
+    executor = ex.EsxiExecutor(free=host, sleep=lambda _s: None)
+    result = executor.apply(
+        ctx, step("vm.create_from_template", template="tpl-ubuntu", name="web-02")
+    )
+    assert result.ok is False
+    assert result.output["created"]["dir"] == "[datastore1] web-02"
+    assert executor.partially_applied(result) is True
+    assert "[datastore1] web-02" in host.dirs
+
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert "[datastore1] web-02" not in host.dirs
+
+
+def test_a_clone_rollback_never_deletes_a_directory_the_step_did_not_create(host, ctx):
+    host.vms["tpl-ubuntu"] = _vm("tpl-ubuntu")
+    executor = ex.EsxiExecutor(free=host, sleep=lambda _s: None)
+    result = executor.apply(
+        ctx, step("vm.create_from_template", template="tpl-ubuntu", name="web-02")
+    )
+    assert result.ok, result.error
+    # a plan replayed from a store that lost the recorded directory
+    result.output["created"].pop("dir")
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok is False
+    assert "no directory was recorded" in undone.error
+    assert host.dirs == {"[datastore1] web-01", "[datastore1] web-02"}
+
+
+def test_the_free_licence_refuses_to_resize_a_running_vm_even_with_hot_add(ssh_outputs, ctx):
+    """web-01 is powered on with memory hot-add, which the .vmx path cannot use."""
+    session = FakeSession(ssh_outputs)
+    executor = ex.EsxiExecutor(
+        free=ex.SshTransport(open_session=lambda device, cred: session), sleep=lambda _s: None
+    )
+    dry = executor.dry_run(ctx, [step("vm.resize", vm="web-01", memory_mb=8192)])
+    assert dry.ok is False
+    assert any("no reconfigure API" in b for b in dry.blockers)
+
+    result = executor.apply(ctx, step("vm.resize", vm="web-01", memory_mb=8192))
+    assert result.ok is False
+    assert "no reconfigure API" in result.error
+    assert not any(c.startswith("vim-cmd vmsvc/snapshot.create") for c in session.commands)
+
+
+def test_the_licensed_path_still_allows_a_hot_add_resize(api, api_ctx, api_vm):
+    api_vm.runtime.powerState = ex.POWERED_ON
+    executor = ex.EsxiExecutor(licensed=api, sleep=lambda _s: None)
+    dry = executor.dry_run(api_ctx, [step("vm.resize", vm="web-01", memory_mb=8192)])
+    assert dry.ok, dry.blockers
+
+
+def test_power_on_rolls_back_by_powering_off_not_by_reverting(executor, ctx, host):
+    """A revert would throw away everything the guest wrote since it booted."""
+    result = executor.apply(ctx, step("vm.power_on", vm="web-01"))
+    assert result.ok, result.error
+    host.calls.clear()
+
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert host.vms["web-01"]["power_state"] == ex.POWERED_OFF
+    assert not any(c.startswith("snapshot_revert") for c in host.calls)
+    assert "power_off:web-01" in host.calls
+    # the pre-change snapshot stays as evidence
+    assert [s["name"] for s in host.vms["web-01"]["snapshots"]] == ["infra-plan-9f"]
+    assert undone.output["snapshot_left_in_place"] is True
+
+
+def test_graceful_power_off_rolls_back_by_powering_on_not_by_reverting(executor, ctx, host):
+    """Reverting would boot the guest from a crash-consistent image."""
+    host.vms["web-01"].update(power_state=ex.POWERED_ON, tools_running=True, cpu=8)
+    result = executor.apply(ctx, step("vm.power_off_graceful", vm="web-01"))
+    assert result.ok, result.error
+    host.calls.clear()
+
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert host.vms["web-01"]["power_state"] == ex.POWERED_ON
+    assert not any(c.startswith("snapshot_revert") for c in host.calls)
+    assert host.vms["web-01"]["cpu"] == 8  # nothing was rolled back to an old shape
+
+
+def test_a_power_rollback_falls_back_to_the_snapshot_when_the_inverse_fails(executor, ctx, host):
+    result = executor.apply(ctx, step("vm.power_on", vm="web-01"))
+    host.fail["power_off"] = ex.EsxiError("hostd refused the power off")
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert "hostd refused" in undone.output["inverse_failed"]
+    assert undone.output["undo"] == "reverted to 'infra-plan-9f'"
+
+
+def test_a_resize_still_rolls_back_by_reverting(executor, ctx, host):
+    """The snapshot is the only thing that restores the old CPU/memory."""
+    result = executor.apply(ctx, step("vm.resize", vm="web-01", cpu=4))
+    host.calls.clear()
+    (undone,) = executor.rollback(ctx, [result])
+    assert undone.ok, undone.error
+    assert any(c.startswith("snapshot_revert") for c in host.calls)
+    assert host.vms["web-01"]["cpu"] == 2
+
+
+def test_a_graceful_shutdown_polls_the_power_state_not_the_whole_vm(host, ctx):
+    host.vms["web-01"].update(power_state=ex.POWERED_ON, tools_running=True)
+    host.guest_shutdown_works = False
+    executor = ex.EsxiExecutor(free=host, sleep=lambda _s: None, monotonic=Clock(stride=20.0))
+    executor.apply(ctx, step("vm.power_off_graceful", vm="web-01", timeout_seconds=200, force=True))
+    polls = [c for c in host.calls if c.startswith("power_state")]
+    reads = [c for c in host.calls if c.startswith("vm:web-01")]
+    assert len(polls) >= 5
+    assert len(reads) <= 3  # the VM itself is read a handful of times, not per poll
+
+
+def test_the_ssh_transport_opens_one_session_per_executor_call(ssh_outputs, ctx):
+    opened: list[FakeSession] = []
+
+    def open_session(device, cred):
+        session = FakeSession(ssh_outputs)
+        opened.append(session)
+        return session
+
+    executor = ex.EsxiExecutor(
+        free=ex.SshTransport(open_session=open_session), sleep=lambda _s: None
+    )
+    executor.pre_check(ctx, ["vm web-01 powered on", "datastore datastore1 free >= 10"])
+    assert len(opened) == 1
+    assert opened[0].closed == 1
+
+    executor.dry_run(ctx, [step("vm.snapshot", vm="web-01")])
+    assert len(opened) == 2
+    assert opened[1].closed == 1
+
+
+class FakeParamiko:
+    """Enough of paramiko to see what `connect` is offered."""
+
+    class SSHClient:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        def load_host_keys(self, path: Any) -> None:
+            pass
+
+        def set_missing_host_key_policy(self, policy: Any) -> None:
+            pass
+
+        def connect(self, **kwargs: Any) -> None:
+            self.kwargs.update(kwargs)
+            FakeParamiko.last = kwargs
+
+    class RejectPolicy:
+        pass
+
+    class AutoAddPolicy:
+        pass
+
+    last: dict[str, Any] = {}
+
+
+@pytest.mark.parametrize(
+    ("cred", "expected"),
+    [
+        (
+            Credential(username="root", password="host-password-value"),
+            {"password": "host-password-value"},
+        ),
+        (
+            Credential(username="root", ssh_key_path="/keys/esxi-rw.pem"),
+            {"key_filename": "/keys/esxi-rw.pem"},
+        ),
+        (
+            Credential(
+                username="root", password="host-password-value", ssh_key_path="/keys/esxi-rw.pem"
+            ),
+            {"key_filename": "/keys/esxi-rw.pem", "passphrase": "host-password-value"},
+        ),
+    ],
+)
+def test_the_ssh_session_authenticates_the_way_the_credential_allows(monkeypatch, cred, expected):
+    """A password-only rw credential is the shape onboarding produces today."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "paramiko", FakeParamiko)
+    ex.ParamikoSession(FREE_HOST, cred)
+    for key, value in expected.items():
+        assert FakeParamiko.last[key] == value
+    if "password" in expected:
+        assert "key_filename" not in FakeParamiko.last
+    else:
+        assert "password" not in FakeParamiko.last
+
+
+def test_a_credential_with_neither_a_key_nor_a_password_says_so(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "paramiko", FakeParamiko)
+    with pytest.raises(LookupError) as caught:
+        ex.ParamikoSession(FREE_HOST, Credential(username="root"))
+    assert "ssh_key_path" in str(caught.value)

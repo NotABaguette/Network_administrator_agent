@@ -87,6 +87,32 @@ class FakeGuest:
         return gu.CommandResult(command=command, rc=rc, stdout=out, stderr=err)
 
 
+def unit(active: str, load: str = "loaded") -> str:
+    """What `systemctl show -p LoadState -p ActiveState` prints for one unit."""
+    return f"LoadState={load}\nActiveState={active}\n"
+
+
+#: systemd reports a unit that does not exist as inactive+not-found, which is
+#: the only way to tell a typo from a stopped service.
+MISSING_UNIT = unit("inactive", "not-found")
+
+BOOTED_UPTIME = 123456.78
+FRESH_UPTIME = 42.5
+
+
+class Clock:
+    """A monotonic clock that advances a fixed amount per reading."""
+
+    def __init__(self, stride: float = 30.0) -> None:
+        self.now = 0.0
+        self.stride = stride
+
+    def __call__(self) -> float:
+        value = self.now
+        self.now += self.stride
+        return value
+
+
 def step(action: str, **params: Any) -> ChangeStep:
     return ChangeStep(description=action, platform="guest", action=action, params=params)
 
@@ -98,11 +124,27 @@ def strings(obj: Any) -> str:
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------
+def _rebooting_uptime(shell: FakeGuest, reboot_command: str, render: Any) -> Any:
+    """Uptime that drops once the reboot command has been issued.
+
+    The executor waits for a *smaller* uptime than the one it recorded, which
+    is the only evidence over SSH or WinRM that the guest actually came back.
+    """
+
+    def answer() -> tuple[int, str, str]:
+        rebooted = reboot_command in shell.commands
+        return (0, render(FRESH_UPTIME if rebooted else BOOTED_UPTIME), "")
+
+    return answer
+
+
 @pytest.fixture
 def linux_shell() -> FakeGuest:
     shell = FakeGuest("ssh")
-    shell.set("systemctl show -p ActiveState --value -- nginx", "active\n")
-    shell.set("cat /proc/uptime", "123456.78 987654.32\n")
+    shell.set("systemctl show -p LoadState -p ActiveState -- nginx", unit("active"))
+    shell.script["cat /proc/uptime"] = _rebooting_uptime(
+        shell, "shutdown -r +1", lambda seconds: f"{seconds} 987654.32\n"
+    )
     shell.set(
         "ss -H -ltn",
         "LISTEN 0      4096         0.0.0.0:22        0.0.0.0:*\n"
@@ -119,12 +161,17 @@ def windows_shell() -> FakeGuest:
         "if ($s) { $s.Status.ToString() } else { 'missing' }",
         "Running\n",
     )
+    shell.script[gu.WindowsDialect().uptime()] = _rebooting_uptime(
+        shell, "Restart-Computer -Force", lambda seconds: f"{int(seconds)}\n"
+    )
     return shell
 
 
 @pytest.fixture
 def executor(linux_shell: FakeGuest, windows_shell: FakeGuest) -> gu.GuestExecutor:
-    return gu.GuestExecutor(linux=linux_shell, windows=windows_shell, sleep=lambda _s: None)
+    return gu.GuestExecutor(
+        linux=linux_shell, windows=windows_shell, sleep=lambda _s: None, monotonic=Clock()
+    )
 
 
 @pytest.fixture
@@ -228,9 +275,9 @@ def test_service_restart_captures_the_previous_state_and_verifies(executor, ctx,
 
 
 def test_a_service_that_does_not_come_back_fails_the_step(executor, ctx, linux_shell):
-    states = iter(["active\n", "failed\n"])
-    linux_shell.set("systemctl show -p ActiveState --value -- nginx", "")
-    linux_shell.script["systemctl show -p ActiveState --value -- nginx"] = lambda: (
+    states = iter([unit("active"), unit("failed")])
+    linux_shell.set("systemctl show -p LoadState -p ActiveState -- nginx", "")
+    linux_shell.script["systemctl show -p LoadState -p ActiveState -- nginx"] = lambda: (
         0,
         next(states),
         "",
@@ -241,7 +288,7 @@ def test_a_service_that_does_not_come_back_fails_the_step(executor, ctx, linux_s
 
 
 def test_restarting_a_missing_service_is_refused(executor, ctx, linux_shell):
-    linux_shell.set("systemctl show -p ActiveState --value -- ghost", "missing\n")
+    linux_shell.set("systemctl show -p LoadState -p ActiveState -- ghost", MISSING_UNIT)
     result = executor.apply(ctx, step("guest.service_restart", service="ghost"))
     assert result.ok is False
     assert "no service named" in result.error
@@ -258,12 +305,12 @@ def test_service_restart_rollback_starts_a_service_that_had_been_running(
 
 
 def test_service_restart_rollback_stops_a_service_that_had_been_stopped(executor, ctx, linux_shell):
-    linux_shell.set("systemctl show -p ActiveState --value -- worker", "inactive\n")
+    linux_shell.set("systemctl show -p LoadState -p ActiveState -- worker", unit("inactive"))
     result = executor.apply(ctx, step("guest.service_restart", service="worker"))
     assert result.ok is False  # a restart of an inactive unit must end active
-    linux_shell.script["systemctl show -p ActiveState --value -- worker"] = iter
-    states = iter(["inactive\n", "active\n"])
-    linux_shell.script["systemctl show -p ActiveState --value -- worker"] = lambda: (
+    linux_shell.script["systemctl show -p LoadState -p ActiveState -- worker"] = iter
+    states = iter([unit("inactive"), unit("active")])
+    linux_shell.script["systemctl show -p LoadState -p ActiveState -- worker"] = lambda: (
         0,
         next(states),
         "",
@@ -277,8 +324,8 @@ def test_service_restart_rollback_stops_a_service_that_had_been_stopped(executor
 
 
 def test_service_stop_and_its_rollback(executor, ctx, linux_shell):
-    states = iter(["active\n", "inactive\n"])
-    linux_shell.script["systemctl show -p ActiveState --value -- nginx"] = lambda: (
+    states = iter([unit("active"), unit("inactive")])
+    linux_shell.script["systemctl show -p LoadState -p ActiveState -- nginx"] = lambda: (
         0,
         next(states),
         "",
@@ -293,8 +340,8 @@ def test_service_stop_and_its_rollback(executor, ctx, linux_shell):
 
 
 def test_service_start_and_its_rollback(executor, ctx, linux_shell):
-    states = iter(["inactive\n", "active\n"])
-    linux_shell.script["systemctl show -p ActiveState --value -- nginx"] = lambda: (
+    states = iter([unit("inactive"), unit("active")])
+    linux_shell.script["systemctl show -p LoadState -p ActiveState -- nginx"] = lambda: (
         0,
         next(states),
         "",
@@ -440,18 +487,72 @@ def test_reboot_without_a_confirmed_window_is_refused(executor, ctx, linux_shell
     assert any("Tier 2" in b for b in dry.blockers)
 
 
-def test_reboot_with_a_confirmed_window_runs(executor, ctx, linux_shell):
+def test_reboot_with_a_confirmed_window_runs_and_waits_for_the_guest(executor, ctx, linux_shell):
     result = executor.apply(ctx, step("guest.reboot", window_confirmed=True))
     assert result.ok, result.error
-    assert linux_shell.commands[-1] == "shutdown -r +1"
-    assert result.output["previous_uptime_seconds"] == pytest.approx(123456.78)
+    assert "shutdown -r +1" in linux_shell.commands
+    assert result.output["previous_uptime_seconds"] == pytest.approx(BOOTED_UPTIME)
+    # the step is only done once the guest reports a *smaller* uptime, which is
+    # what makes the documented `uptime < 10m` post-check able to pass at all
+    assert result.output["reboot"] == "completed"
+    assert result.output["new_uptime_seconds"] == pytest.approx(FRESH_UPTIME)
+    assert linux_shell.commands[-1] == "cat /proc/uptime"
+    (check,) = executor.post_check(ctx, ["uptime < 10m"])
+    assert check.ok, check.detail
+
+
+def test_a_guest_that_never_comes_back_fails_the_reboot_step(ctx, linux_shell, windows_shell):
+    """No flip to a fresh uptime: the box is gone, and that is a real failure."""
+    linux_shell.script["cat /proc/uptime"] = lambda: (0, f"{BOOTED_UPTIME} 9.0\n", "")
+    executor = gu.GuestExecutor(
+        linux=linux_shell, windows=windows_shell, sleep=lambda _s: None, monotonic=Clock()
+    )
+    result = executor.apply(
+        ctx, step("guest.reboot", window_confirmed=True, reboot_timeout_seconds=120)
+    )
+    assert result.ok is False
+    assert "did not come back within 120s" in result.error
+    assert result.output["reboot_polls"] >= 1
+    # nothing to undo: the reboot was issued, so the rollback still refuses
+    assert executor.partially_applied(result) is False
+
+
+def test_the_wait_tolerates_the_guest_being_unreachable_on_its_way_down(
+    ctx, linux_shell, windows_shell
+):
+    answers = [ConnectionResetError("closed"), ConnectionRefusedError("no route")]
+
+    def uptime() -> Any:
+        if "shutdown -r +1" not in linux_shell.commands:
+            return (0, f"{BOOTED_UPTIME} 9.0\n", "")
+        if answers:
+            raise answers.pop(0)
+        return (0, f"{FRESH_UPTIME} 9.0\n", "")
+
+    linux_shell.script["cat /proc/uptime"] = uptime
+    executor = gu.GuestExecutor(
+        linux=linux_shell, windows=windows_shell, sleep=lambda _s: None, monotonic=Clock()
+    )
+    result = executor.apply(ctx, step("guest.reboot", window_confirmed=True))
+    assert result.ok, result.error
+    assert result.output["reboot_polls"] == 3
+
+
+def test_the_dry_run_says_it_will_wait_for_the_guest(executor, ctx):
+    dry = executor.dry_run(ctx, [step("guest.reboot", window_confirmed=True)])
+    assert dry.ok, dry.blockers
+    entry = dry.diff["steps"][0]
+    assert entry["commands"] == ["shutdown -r +1"]
+    assert "poll cat /proc/uptime" in entry["then"]
+    assert "600s" in entry["then"]
 
 
 def test_a_dropped_session_after_the_reboot_command_is_not_a_failure(executor, ctx, linux_shell):
     linux_shell.script["shutdown -r +1"] = ConnectionResetError("Socket is closed")
     result = executor.apply(ctx, step("guest.reboot", window_confirmed=True))
     assert result.ok, result.error
-    assert "session dropped" in result.output["reboot"]
+    assert "session dropped" in result.output["request"]
+    assert result.output["reboot"] == "completed"
 
 
 def test_a_permission_error_on_reboot_is_still_a_failure(executor, ctx, linux_shell):
@@ -468,10 +569,13 @@ def test_a_reboot_cannot_be_undone(executor, ctx):
     assert "cannot be undone" in undone.error
 
 
-def test_windows_reboot_uses_restart_computer(executor, win_ctx, windows_shell):
+def test_windows_reboot_uses_restart_computer_and_waits(executor, win_ctx, windows_shell):
     result = executor.apply(win_ctx, step("guest.reboot", window_confirmed=True))
     assert result.ok, result.error
-    assert windows_shell.commands[-1] == "Restart-Computer -Force"
+    assert "Restart-Computer -Force" in windows_shell.commands
+    assert result.output["reboot"] == "completed"
+    # the Windows dialect reports whole seconds
+    assert result.output["new_uptime_seconds"] == pytest.approx(int(FRESH_UPTIME))
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +652,7 @@ def test_dry_run_reports_the_intended_commands(executor, ctx, linux_shell):
 
 
 def test_dry_run_blocks_a_missing_service(executor, ctx, linux_shell):
-    linux_shell.set("systemctl show -p ActiveState --value -- ghost", "missing\n")
+    linux_shell.set("systemctl show -p LoadState -p ActiveState -- ghost", MISSING_UNIT)
     result = executor.dry_run(ctx, [step("guest.service_restart", service="ghost")])
     assert result.ok is False
     assert any("no service named" in b for b in result.blockers)
@@ -576,9 +680,9 @@ def test_apply_refuses_a_dry_run_context(executor, linux_shell):
 
 def test_rollback_runs_in_reverse_and_skips_failed_steps(executor, ctx, linux_shell):
     first = executor.apply(ctx, step("guest.service_restart", service="nginx"))
-    linux_shell.set("systemctl show -p ActiveState --value -- ghost", "missing\n")
+    linux_shell.set("systemctl show -p LoadState -p ActiveState -- ghost", MISSING_UNIT)
     failed = executor.apply(ctx, step("guest.service_restart", service="ghost"))
-    linux_shell.set("systemctl show -p ActiveState --value -- redis", "active\n")
+    linux_shell.set("systemctl show -p LoadState -p ActiveState -- redis", unit("active"))
     second = executor.apply(ctx, step("guest.service_restart", service="redis"))
     undone = executor.rollback(ctx, [first, failed, second])
     assert [u.output["service"] for u in undone] == ["redis", "nginx"]
@@ -643,8 +747,8 @@ def test_a_command_result_reports_the_failing_command_without_its_arguments():
 
 def test_a_restart_that_left_the_unit_failed_is_still_rolled_back(executor, ctx, linux_shell):
     """The unit was restarted; that it ended up 'failed' does not undo the restart."""
-    states = iter(["active\n", "failed\n"])
-    linux_shell.script["systemctl show -p ActiveState --value -- nginx"] = lambda: (
+    states = iter([unit("active"), unit("failed")])
+    linux_shell.script["systemctl show -p LoadState -p ActiveState -- nginx"] = lambda: (
         0,
         next(states),
         "",
@@ -660,8 +764,89 @@ def test_a_restart_that_left_the_unit_failed_is_still_rolled_back(executor, ctx,
 
 
 def test_a_step_that_never_reached_the_service_is_skipped(executor, ctx, linux_shell):
-    linux_shell.set("systemctl show -p ActiveState --value -- ghost", "missing\n")
+    linux_shell.set("systemctl show -p LoadState -p ActiveState -- ghost", MISSING_UNIT)
     result = executor.apply(ctx, step("guest.service_restart", service="ghost"))
     assert result.ok is False
     assert executor.partially_applied(result) is False
     assert executor.rollback(ctx, [result]) == []
+
+
+# ---------------------------------------------------------------------------
+# audit fixes: LoadState, WinRM timeouts
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (unit("active"), "active"),
+        (unit("failed"), "failed"),
+        # systemd answers `inactive` for a unit that does not exist, so only
+        # LoadState tells a typo from a stopped service
+        (unit("inactive", "not-found"), "missing"),
+        ("ActiveState=inactive\nLoadState=not-found\n", "missing"),
+        ("active\n", "active"),  # an older `--value` style answer still parses
+        ("", "unknown"),
+    ],
+)
+def test_the_linux_dialect_reads_loadstate_as_well_as_activestate(output, expected):
+    assert gu.LinuxDialect().parse_service_state(output) == expected
+
+
+def test_the_linux_service_state_command_asks_for_both_properties():
+    assert gu.LinuxDialect().service_state("nginx") == (
+        "systemctl show -p LoadState -p ActiveState -- nginx"
+    )
+
+
+def test_a_linux_unit_that_does_not_exist_is_refused_before_anything_runs(
+    executor, ctx, linux_shell
+):
+    """A typo used to reach `systemctl restart` and fail its rollback too."""
+    linux_shell.set("systemctl show -p LoadState -p ActiveState -- typo", MISSING_UNIT)
+    dry = executor.dry_run(ctx, [step("guest.service_restart", service="typo")])
+    assert dry.ok is False
+    assert any("no service named" in b for b in dry.blockers)
+
+    result = executor.apply(ctx, step("guest.service_restart", service="typo"))
+    assert result.ok is False
+    assert "no service named" in result.error
+    assert "systemctl restart -- typo" not in linux_shell.commands
+    assert executor.partially_applied(result) is False
+    assert executor.rollback(ctx, [result]) == []
+
+
+class FakeWinrmModule:
+    """Just enough of `winrm` to see what the transport asks the library for."""
+
+    def __init__(self) -> None:
+        self.sessions: list[dict[str, Any]] = []
+
+    def Session(self, target: str, auth: tuple[str, str], **kwargs: Any) -> Any:  # noqa: N802
+        self.sessions.append({"target": target, "auth": auth, **kwargs})
+        module = self
+
+        class _Session:
+            def run_ps(self, command: str) -> Any:
+                module.sessions[-1]["command"] = command
+                return type("R", (), {"status_code": 0, "std_out": b"ok\n", "std_err": b""})()
+
+        return _Session()
+
+
+@pytest.mark.parametrize(
+    ("timeout", "operation"),
+    [(1.0, gu.MIN_WINRM_TIMEOUT), (30.0, 30), (gu.PACKAGE_TIMEOUT, gu.MAX_WINRM_TIMEOUT)],
+)
+def test_the_winrm_transport_bounds_every_command_with_a_timeout(
+    monkeypatch, win_ctx, timeout, operation
+):
+    """pywinrm loops on its own operation timeout, so an unbounded call hangs."""
+    module = FakeWinrmModule()
+    monkeypatch.setitem(__import__("sys").modules, "winrm", module)
+    transport = gu.WinRmGuestTransport()
+    result = transport.run(win_ctx, "Get-Service", timeout)
+    assert result.rc == 0 and result.stdout.strip() == "ok"
+    (session,) = module.sessions
+    assert session["operation_timeout_sec"] == operation
+    assert session["read_timeout_sec"] == operation + gu.WINRM_READ_MARGIN
+    assert session["read_timeout_sec"] > session["operation_timeout_sec"]
+    assert "guest-password-value" not in strings({k: v for k, v in session.items() if k != "auth"})

@@ -53,6 +53,14 @@ DEFAULT_TIMEOUT = 60.0
 #: A distribution upgrade is slow; a service restart is not.
 PACKAGE_TIMEOUT = 900.0
 SERVICE_SETTLE_SECONDS = 2.0
+#: WinRM's own operation timeout has to stay well under the HTTP read timeout,
+#: and a very long one is refused by the listener; these bound it either way.
+MIN_WINRM_TIMEOUT = 5
+MAX_WINRM_TIMEOUT = 60
+WINRM_READ_MARGIN = 10
+#: How long a rebooted guest gets to come back before the step is a failure.
+DEFAULT_REBOOT_TIMEOUT = 600.0
+REBOOT_POLL_SECONDS = 10.0
 
 ACTIONS = frozenset(
     {
@@ -84,6 +92,15 @@ class GuestError(RuntimeError):
 
 def short_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {str(exc).strip()[:200]}"
+
+
+def _seconds(value: Any, default: float) -> float:
+    """A positive number of seconds from a step parameter, or the default."""
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return seconds if seconds > 0 else default
 
 
 @dataclass
@@ -171,10 +188,24 @@ class LinuxDialect:
     inactive_value: str = INACTIVE
 
     def service_state(self, service: str) -> str:
-        return f"systemctl show -p ActiveState --value -- {sh_quote(service)}"
+        # LoadState as well as ActiveState: systemd answers `inactive` for a
+        # unit that does not exist at all, so ActiveState alone can never tell
+        # a stopped service from a typo. `LoadState=not-found` can.
+        return f"systemctl show -p LoadState -p ActiveState -- {sh_quote(service)}"
 
     def parse_service_state(self, out: str) -> str:
-        return (out or "").strip().splitlines()[0].strip() if (out or "").strip() else "unknown"
+        fields: dict[str, str] = {}
+        for line in (out or "").splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                fields[key.strip()] = value.strip()
+        if fields.get("LoadState") == "not-found":
+            return "missing"
+        state = fields.get("ActiveState")
+        if state:
+            return state
+        text = (out or "").strip()
+        return text.splitlines()[0].strip() if text else "unknown"
 
     def service_restart(self, service: str) -> str:
         return f"systemctl restart -- {sh_quote(service)}"
@@ -444,21 +475,27 @@ class WinRmGuestTransport:
     def __init__(self, session: Callable[[SeedDevice, Any], Any] | None = None) -> None:
         self._session = session
 
-    def session(self, ctx: ExecutionContext) -> Any:
+    def session(self, ctx: ExecutionContext, timeout: float = DEFAULT_TIMEOUT) -> Any:
         if self._session is not None:
             return self._session(ctx.device, ctx.credential)
         import winrm  # lazy: optional dependency
 
         cred = ctx.credential
+        # pywinrm's defaults are 20 s operation / 30 s read and it *loops* on an
+        # operation timeout, so a hung `winget upgrade --all` would never come
+        # back. The per-command timeout is what bounds it.
+        operation = max(MIN_WINRM_TIMEOUT, min(int(timeout), MAX_WINRM_TIMEOUT))
         return winrm.Session(
             f"https://{ctx.device.mgmt_ip}:{ctx.device.port or 5986}/wsman",
             auth=(cred.username or "", cred.password.get_secret_value() if cred.password else ""),
             transport="ntlm",
             server_cert_validation="ignore",  # pinned in Phase 1, as the rest is
+            operation_timeout_sec=operation,
+            read_timeout_sec=operation + WINRM_READ_MARGIN,
         )
 
     def run(self, ctx: ExecutionContext, command: str, timeout: float) -> CommandResult:
-        response = self.session(ctx).run_ps(command)
+        response = self.session(ctx, timeout).run_ps(command)
         return CommandResult(
             command=command,
             rc=int(getattr(response, "status_code", 0)),
@@ -518,10 +555,12 @@ class GuestExecutor(Executor):
         linux: GuestTransport | None = None,
         windows: GuestTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._linux = linux
         self._windows = windows
         self.sleep = sleep
+        self.monotonic = monotonic
 
     # -- contract ---------------------------------------------------------
     def supported_actions(self) -> set[str]:
@@ -666,14 +705,17 @@ class GuestExecutor(Executor):
                 return entry, warnings, blockers
 
             # guest.reboot
-            uptime = dialect.parse_uptime(
-                self.transport(ctx.device).run(ctx, dialect.uptime(), DEFAULT_TIMEOUT).stdout
-            )
+            uptime = self._uptime(ctx, dialect)
+            timeout = _seconds(step.params.get("reboot_timeout_seconds"), DEFAULT_REBOOT_TIMEOUT)
             entry.update(
                 {
                     "operation": "reboot",
                     "before": {"uptime_seconds": uptime},
                     "commands": [dialect.reboot()],
+                    "then": (
+                        f"poll {dialect.uptime()} on a fresh connection for up to "
+                        f"{timeout:g}s until the guest reports a smaller uptime"
+                    ),
                 }
             )
             if not step.params.get("window_confirmed"):
@@ -827,19 +869,67 @@ class GuestExecutor(Executor):
             raise GuestError(
                 "guest.reboot is a Tier 2 action: it runs only with params.window_confirmed"
             )
-        output["previous_uptime_seconds"] = dialect.parse_uptime(
-            self.transport(ctx.device).run(ctx, dialect.uptime(), DEFAULT_TIMEOUT).stdout
-        )
+        previous = self._uptime(ctx, dialect)
+        output["previous_uptime_seconds"] = previous
         try:
             self._run(ctx, dialect.reboot(), ran=ran)
-            output["reboot"] = "requested"
+            output["request"] = "issued"
         except Exception as exc:  # noqa: BLE001 - a dropped session is the expected outcome
             if _REFUSAL_HINT.search(str(exc)):
                 raise
             ran.commands.append(dialect.reboot())
-            output["reboot"] = "requested; the session dropped, which a reboot is expected to do"
+            output["request"] = "issued; the session dropped, which a reboot is expected to do"
             output["session_note"] = short_error(exc)
+        # The step is not done when the command returns: `shutdown -r +1` waits
+        # a minute and `Restart-Computer` drops the session on its way down. A
+        # post-check like `uptime < 10m` can only mean anything once the guest
+        # is back, so this is where the waiting happens rather than in the
+        # engine's post-check loop.
+        timeout = _seconds(step.params.get("reboot_timeout_seconds"), DEFAULT_REBOOT_TIMEOUT)
+        output["reboot_timeout_seconds"] = timeout
+        output["reboot"] = "requested"
+        came_back = self._wait_for_reboot(ctx, dialect, previous, timeout, output)
+        if not came_back:
+            raise GuestError(
+                f"{ctx.device.name} did not come back within {timeout:g}s of the reboot"
+            )
+        output["reboot"] = "completed"
         output["rollback"] = "none: a reboot cannot be undone"
+
+    def _uptime(self, ctx: ExecutionContext, dialect: Dialect) -> float | None:
+        result = self.transport(ctx.device).run(ctx, dialect.uptime(), DEFAULT_TIMEOUT)
+        return dialect.parse_uptime(result.stdout)
+
+    def _wait_for_reboot(
+        self,
+        ctx: ExecutionContext,
+        dialect: Dialect,
+        previous: float | None,
+        timeout: float,
+        output: dict[str, Any],
+    ) -> bool:
+        """Poll a fresh connection until the guest reports a *smaller* uptime.
+
+        Every transport error along the way is the guest being down, which is
+        the whole point; only the deadline ends the wait unsuccessfully.
+        """
+        deadline = self.monotonic() + timeout
+        attempts = 0
+        while self.monotonic() < deadline:
+            self.sleep(REBOOT_POLL_SECONDS)
+            attempts += 1
+            try:
+                uptime = self._uptime(ctx, dialect)
+            except Exception:  # noqa: BLE001 - the guest is on its way down
+                continue
+            if uptime is None:
+                continue
+            if previous is None or uptime < previous:
+                output["new_uptime_seconds"] = uptime
+                output["reboot_polls"] = attempts
+                return True
+        output["reboot_polls"] = attempts
+        return False
 
     def _versions(
         self,
@@ -919,7 +1009,11 @@ class GuestExecutor(Executor):
                     )
             else:  # guest.reboot
                 output["previous_uptime_seconds"] = result.output.get("previous_uptime_seconds")
-                raise GuestError("a reboot cannot be undone")
+                output["new_uptime_seconds"] = result.output.get("new_uptime_seconds")
+                raise GuestError(
+                    "a reboot cannot be undone; the guest is back up and its services "
+                    "have to be checked by hand"
+                )
         except Exception as exc:  # noqa: BLE001 - a failed rollback pages the owner
             error = short_error(exc)
         output["commands"] = ran.commands

@@ -6,14 +6,17 @@ path, so this executor is deliberately narrow:
 * Only the five CMDB object families the change engine proposes are reachable:
   addresses, services, policies, static routes and VIPs. Everything else is a
   refusal, not a generic passthrough.
-* `_request` refuses any path that smells of a revision, a configuration
+* `_request` refuses any *endpoint* that smells of a revision, a configuration
   backup or restore, a reboot or an `execute`-style side effect
-  (`FORBIDDEN_PATH`). Revision restore is the documented trap here: it reboots
-  the 60F, and an API-token session does not create a revision to go back to,
-  so rollback is always an inverse object operation built from the body the
-  apply step captured (`docs/architecture.md`).
+  (`forbidden_endpoint`). The guard is applied to the collection path and never
+  to the object key appended to it, so an address named `backup-nas` stays
+  manageable. Revision restore is the documented trap here: it reboots the 60F,
+  and an API-token session does not create a revision to go back to, so
+  rollback is always an inverse object operation built from the body the apply
+  step captured (`docs/architecture.md`).
 * Every captured body is scrubbed of `password` / `passwd` / `psk` / `secret` /
-  `key` fields and of FortiOS `ENC ...` blobs before it is stored in
+  `key` fields — matched as whole tokens, so `q_origin_key` is not one — and of
+  FortiOS `ENC ...` blobs before it is stored in
   `StepResult.output`, which is a structure the engine persists and shows. A
   field that was changed but could not be captured makes the *rollback* fail
   loudly (`unrestorable_fields`) rather than silently writing a wrong value.
@@ -53,19 +56,65 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 20.0
 
-#: Paths this executor must never touch. Revision restore reboots the 60F,
-#: `execute`/`backup`/`restore` are side effects with no inverse operation, and
-#: the admin tree holds credentials.
-FORBIDDEN_PATH = re.compile(
-    r"(revision|backup|restore|reboot|shutdown|factory|reset|upgrade|format|execute"
-    r"|system/admin|system/api-user|vpn\.ipsec|user/local)",
+#: Words that make a path segment one this executor must never call. Revision
+#: restore reboots the 60F; `execute` / `backup` / `restore` are side effects
+#: with no inverse operation. The guard is applied to the endpoint (the
+#: collection path), never to the object key appended to it: an address
+#: legitimately named `backup-nas` or `factory-floor` has to stay manageable.
+FORBIDDEN_WORD = re.compile(
+    r"^(revision|revisions|backup|restore|reboot|shutdown|factory|reset|upgrade|format"
+    r"|execute)$",
     re.IGNORECASE,
 )
+#: Whole segments that are refused on their own.
+FORBIDDEN_SEGMENT = re.compile(r"^vpn\.ipsec$", re.IGNORECASE)
+#: Whole endpoints that are refused because they hold credentials.
+FORBIDDEN_ENDPOINT = re.compile(
+    r"^(cmdb/system/admin|cmdb/system/api-user|cmdb/user/local)(/|$)", re.IGNORECASE
+)
 
-#: Object fields that may hold key material. Dropped from anything stored.
-SECRET_FIELD = re.compile(r"(password|passwd|psk|secret|key)", re.IGNORECASE)
+
+def forbidden_endpoint(endpoint: str) -> str | None:
+    """The reason `endpoint` is refused, or None when it may be called.
+
+    Only the endpoint is inspected — the collection path, without the object
+    key. `config-revision` and `config/backup` are refused because a *segment*
+    of the path says so; an address named `backup-nas` is not an endpoint and
+    never reaches this function.
+    """
+    trimmed = str(endpoint or "").strip("/")
+    for segment in trimmed.split("/"):
+        if FORBIDDEN_SEGMENT.match(segment):
+            return segment
+        if any(FORBIDDEN_WORD.match(word) for word in re.split(r"[-_.]", segment)):
+            return segment
+    if FORBIDDEN_ENDPOINT.match(trimmed):
+        return trimmed
+    return None
+
+
+#: Field-name tokens that may hold key material. Matched as whole tokens
+#: (`-`, `_` and `.` are the separators FortiOS uses) so that `q_origin_key`,
+#: which rides along on every nested table, and `ssl-client-rekey-count` are
+#: not mistaken for secrets — flagging those made every step report redacted
+#: fields and turned a harmless VIP update into an unrestorable one.
+SECRET_TOKEN = re.compile(
+    r"(?:^|[-_.])(password|passwd|passphrase|psk|psksecret|secret|key|keys|privatekey)(?:$|[-_.])",
+    re.IGNORECASE,
+)
+#: Benign FortiOS fields whose name happens to contain a secret-shaped token.
+SECRET_ALLOW = frozenset({"q_origin_key", "qoriginkey"})
 #: FortiOS returns encrypted values as `ENC <base64>`; a value-side backstop.
 ENC_VALUE = re.compile(r"^ENC\s+\S", re.IGNORECASE)
+
+
+def is_secret_field(name: str) -> bool:
+    """Whether a field name is one whose value must never be stored."""
+    text = str(name)
+    if text.lower() in SECRET_ALLOW:
+        return False
+    return bool(SECRET_TOKEN.search(text))
+
 
 #: Interfaces that make a policy a Tier 2 change. `role` is the authoritative
 #: FortiOS field; the name pattern is the last-resort hint for a 60F whose
@@ -129,7 +178,7 @@ def scrub(value: Any, dropped: list[str] | None = None, prefix: str = "") -> Any
         out: dict[str, Any] = {}
         for key, item in value.items():
             name = f"{prefix}{key}"
-            if SECRET_FIELD.search(str(key)):
+            if is_secret_field(key):
                 if dropped is not None and name not in dropped:
                     dropped.append(name)
                 continue
@@ -300,14 +349,42 @@ class FortiGateExecutor(Executor):
         *,
         params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
+        endpoint: str | None = None,
     ) -> Any:
-        """One REST call, with the forbidden-endpoint guard in front of it."""
-        if FORBIDDEN_PATH.search(path):
-            raise PermissionError(f"{path!r} is not an endpoint this executor may call")
+        """One REST call, with the forbidden-endpoint guard in front of it.
+
+        `endpoint` is the collection path the guard is applied to. It defaults
+        to `path`, and callers that append a percent-encoded object key pass
+        the collection explicitly so that an object *named* `backup-nas` is not
+        mistaken for the configuration-backup endpoint.
+        """
+        reason = forbidden_endpoint(endpoint if endpoint is not None else path)
+        if reason is not None:
+            raise PermissionError(f"{reason!r} is not an endpoint this executor may call")
         if method.upper() != "GET" and ctx.dry_run:
             raise RuntimeError(f"{method} {path} attempted during a dry run")
         return self.transport.request(
             ctx.device, ctx.credential, method, path, params=params, body=body
+        )
+
+    def _object_request(
+        self,
+        ctx: ExecutionContext,
+        method: str,
+        spec: ObjectSpec,
+        mkey: Any,
+        *,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> Any:
+        """One REST call against a single object, guarded on its collection."""
+        return self._request(
+            ctx,
+            method,
+            self._object_path(spec, mkey),
+            params=params,
+            body=body,
+            endpoint=spec.path,
         )
 
     def _object_path(self, spec: ObjectSpec, mkey: Any) -> str:
@@ -318,7 +395,7 @@ class FortiGateExecutor(Executor):
     ) -> dict[str, Any] | None:
         """The object's full body, or None when it does not exist."""
         try:
-            rows = _rows(self._request(ctx, "GET", self._object_path(spec, mkey)))
+            rows = _rows(self._object_request(ctx, "GET", spec, mkey))
         except PermissionError:
             raise
         except Exception as exc:  # noqa: BLE001 - "missing" and "unreachable" look alike
@@ -697,6 +774,33 @@ class FortiGateExecutor(Executor):
             return {"position": "before", "target": order[1]}
         return None
 
+    def _move(self, ctx: ExecutionContext, spec: ObjectSpec, mkey: Any, position: Any) -> None:
+        """`PUT ?action=move&<before|after>=<target>`, refusing a vanished neighbour."""
+        if not isinstance(position, dict):
+            raise ValueError("no captured position to move the policy back to")
+        target = str(position.get("target", ""))
+        where = str(position.get("position", ""))
+        if where not in ("before", "after") or not target:
+            raise ValueError("the captured position is not a move this executor can issue")
+        if target not in self._policy_order(ctx):
+            raise ValueError(
+                f"policy {target} is no longer in the table, so the original position "
+                "cannot be restored; the rule is back but its order has to be checked by hand"
+            )
+        self._object_request(ctx, "PUT", spec, mkey, params={"action": "move", where: target})
+
+    def _restore_position(
+        self, ctx: ExecutionContext, spec: ObjectSpec, mkey: Any, result: StepResult
+    ) -> dict[str, Any]:
+        """Put a recreated policy back where it was. Raises if it cannot."""
+        if spec.action != "fortigate.policy":
+            return {}
+        position = result.output.get("previous_position")
+        if not position:
+            return {"position_restored": "the policy was the only one; nothing to move back"}
+        self._move(ctx, spec, mkey, position)
+        return {"position_restored": f"{position['position']} {position['target']}"}
+
     def apply(self, ctx: ExecutionContext, step: ChangeStep) -> StepResult:
         started = datetime.now(UTC)
         try:
@@ -761,7 +865,12 @@ class FortiGateExecutor(Executor):
             raise ValueError(f"{spec.label} {mkey} does not exist")
 
         if op == DELETE:
-            self._request(ctx, "DELETE", self._object_path(spec, mkey))
+            if spec.action == "fortigate.policy":
+                # Policy evaluation is first-match, so recreating the rule at
+                # the bottom of the table is not the same firewall. Where it
+                # sat is captured before it goes.
+                output["previous_position"] = self._previous_position(ctx, mkey)
+            self._object_request(ctx, "DELETE", spec, mkey)
             output["rollback"] = CREATE
             if dropped:
                 output["restore_incomplete"] = dropped
@@ -773,11 +882,8 @@ class FortiGateExecutor(Executor):
             if position not in ("before", "after") or target in (None, ""):
                 raise ValueError("a move needs params.position (before|after) and params.target")
             output["previous_position"] = self._previous_position(ctx, mkey)
-            self._request(
-                ctx,
-                "PUT",
-                self._object_path(spec, mkey),
-                params={"action": "move", position: str(target)},
+            self._object_request(
+                ctx, "PUT", spec, mkey, params={"action": "move", position: str(target)}
             )
             output["moved"] = {"position": position, "target": str(target)}
             output["rollback"] = MOVE
@@ -793,7 +899,7 @@ class FortiGateExecutor(Executor):
         if unrestorable:
             output["restore_incomplete"] = sorted(set(unrestorable))
         output["changed_fields"] = sorted(k for k in payload if previous.get(k) != payload.get(k))
-        self._request(ctx, "PUT", self._object_path(spec, mkey), body=payload)
+        self._object_request(ctx, "PUT", spec, mkey, body=payload)
         output["rollback"] = UPDATE
         return output
 
@@ -826,24 +932,20 @@ class FortiGateExecutor(Executor):
                 output["unrestorable_fields"] = sorted(incomplete)
 
             if op == CREATE:
-                self._request(ctx, "DELETE", self._object_path(spec, mkey))
+                self._object_request(ctx, "DELETE", spec, mkey)
                 output["undo"] = "deleted the object that was created"
             elif op == DELETE:
                 if not isinstance(previous, dict) or not previous:
                     raise ValueError("no captured body to recreate the object from")
                 self._request(ctx, "POST", spec.path, body=previous)
                 output["undo"] = "recreated the deleted object from its captured body"
+                output.update(self._restore_position(ctx, spec, mkey, result))
             elif op == MOVE:
                 position = result.output.get("previous_position")
                 if not position:
                     output["undo"] = "the policy was already first and last; nothing to move back"
                 else:
-                    self._request(
-                        ctx,
-                        "PUT",
-                        self._object_path(spec, mkey),
-                        params={"action": "move", position["position"]: str(position["target"])},
-                    )
+                    self._move(ctx, spec, mkey, position)
                     output["undo"] = f"moved back {position['position']} {position['target']}"
             elif op in (UPDATE, ENABLE, DISABLE):
                 restore = result.output.get("restore")
@@ -856,7 +958,7 @@ class FortiGateExecutor(Executor):
                         raise ValueError("no captured previous values to restore")
                     output["undo"] = "nothing restorable was captured for this step"
                 else:
-                    self._request(ctx, "PUT", self._object_path(spec, mkey), body=restore)
+                    self._object_request(ctx, "PUT", spec, mkey, body=restore)
                     output["undo"] = f"restored {', '.join(sorted(restore))}"
             else:
                 raise ValueError(f"nothing to undo for op {op!r}")
