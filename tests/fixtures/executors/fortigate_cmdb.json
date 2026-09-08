@@ -1,0 +1,59 @@
+{
+  "cmdb/firewall/address": [
+    {"name": "srv-web-01", "type": "ipmask", "subnet": "10.20.0.10 255.255.255.255", "comment": "web"},
+    {"name": "srv-db-01", "type": "ipmask", "subnet": "10.20.0.20 255.255.255.255", "comment": "db"},
+    {"name": "lab-host", "type": "ipmask", "subnet": "10.99.0.5 255.255.255.255", "comment": "lab"}
+  ],
+  "cmdb/firewall/addrgrp": [
+    {"name": "servers", "member": [{"name": "srv-web-01"}, {"name": "srv-db-01"}]}
+  ],
+  "cmdb/firewall.service/custom": [
+    {"name": "HTTPS", "protocol": "TCP/UDP/SCTP", "tcp-portrange": "443"},
+    {"name": "PGSQL", "protocol": "TCP/UDP/SCTP", "tcp-portrange": "5432"}
+  ],
+  "cmdb/firewall.service/group": [
+    {"name": "web-stack", "member": [{"name": "HTTPS"}]}
+  ],
+  "cmdb/system/interface": [
+    {"name": "wan1", "role": "wan", "ip": "203.0.113.2 255.255.255.0", "status": "up"},
+    {"name": "internal", "role": "lan", "ip": "10.20.0.1 255.255.255.0", "status": "up"},
+    {"name": "mgmt", "role": "lan", "ip": "10.10.0.1 255.255.255.0", "status": "up"},
+    {"name": "lab", "role": "lan", "ip": "10.99.0.1 255.255.255.0", "status": "up"}
+  ],
+  "cmdb/system/zone": [
+    {"name": "trusted", "interface": [{"interface-name": "internal"}, {"interface-name": "mgmt"}]}
+  ],
+  "cmdb/firewall/policy": [
+    {"policyid": 1, "name": "lan-to-wan", "status": "enable", "action": "accept",
+     "srcintf": [{"name": "internal"}], "dstintf": [{"name": "wan1"}],
+     "srcaddr": [{"name": "servers"}], "dstaddr": [{"name": "all"}],
+     "service": [{"name": "HTTPS"}], "schedule": "always", "nat": "enable"},
+    {"policyid": 2, "name": "web-to-db", "status": "enable", "action": "accept",
+     "srcintf": [{"name": "internal"}], "dstintf": [{"name": "internal"}],
+     "srcaddr": [{"name": "srv-web-01"}], "dstaddr": [{"name": "srv-db-01"}],
+     "service": [{"name": "PGSQL"}], "schedule": "always", "nat": "disable"},
+    {"policyid": 3, "name": "lab-out", "status": "disable", "action": "accept",
+     "srcintf": [{"name": "lab"}], "dstintf": [{"name": "internal"}],
+     "srcaddr": [{"name": "lab-host"}], "dstaddr": [{"name": "all"}],
+     "service": [{"name": "HTTPS"}], "schedule": "always", "nat": "disable"}
+  ],
+  "cmdb/firewall/vip": [
+    {"name": "vip-web", "extip": "203.0.113.10", "extintf": "wan1",
+     "mappedip": [{"range": "10.20.0.10"}], "portforward": "enable",
+     "extport": "443", "mappedport": "443",
+     "ssl-certificate": "Fortinet_Factory",
+     "ssl-server-cipher-suites": []}
+  ],
+  "cmdb/router/static": [
+    {"seq-num": 1, "dst": "0.0.0.0 0.0.0.0", "gateway": "203.0.113.1", "device": "wan1",
+     "distance": 10, "priority": 0, "status": "enable"}
+  ],
+  "monitor/router/ipv4": [
+    {"ip_mask": "0.0.0.0/0", "gateway": "203.0.113.1", "interface": "wan1", "type": "static"},
+    {"ip_mask": "10.20.0.0/24", "gateway": "0.0.0.0", "interface": "internal", "type": "connected"}
+  ],
+  "monitor/firewall/policy": [
+    {"policyid": 1, "active_sessions": 42, "bytes": 12345},
+    {"policyid": 2, "active_sessions": 0, "bytes": 0}
+  ]
+}
