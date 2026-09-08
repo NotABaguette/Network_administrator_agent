@@ -86,6 +86,29 @@ class ExecutionRecord(BaseModel):
         return self.model_dump(mode="json")
 
 
+class PlanProvenance(BaseModel):
+    """What the *platform* (never the model) knows about how a plan got here.
+
+    A `ChangePlan` body is content the language model may author, so nothing in
+    it can be taken as evidence that the plan was validated or approved. This
+    row is written only by `ChangeEngine` and `PlanStore` and answers three
+    questions `ChangeEngine.execute` asks before it touches a device:
+
+    * did *this* engine dry-run the plan (`fingerprint`, over the steps and
+      targets that were rendered), and is the plan still the one it dry-ran?
+    * what risk tier did the human actually approve (`approved_tier`)?
+    * for a Tier 0 plan, did `ChangeEngine.run_tier0` release it after
+      `Tier0Guard.allow()` said yes (`tier0_released_at`)?
+    """
+
+    plan_id: str
+    fingerprint: str
+    dry_run_tier: int
+    dry_run_at: datetime
+    approved_tier: int | None = None
+    tier0_released_at: datetime | None = None
+
+
 class UnapprovedConfigChange(BaseModel):
     """A config-git commit that matched no ChangePlan executed on that device."""
 
@@ -106,6 +129,12 @@ class UnapprovedConfigChange(BaseModel):
 
     def llm_view(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
+
+
+#: A stand-in used only to read `approved_tier` off a missing provenance row.
+_NO_PROVENANCE = PlanProvenance(
+    plan_id="", fingerprint="", dry_run_tier=int(Tier.APPROVAL), dry_run_at=datetime.now(UTC)
+)
 
 
 class PlanStore:
@@ -134,6 +163,13 @@ class PlanStore:
                 "CREATE TABLE IF NOT EXISTS unapproved_changes (id TEXT PRIMARY KEY,"
                 " device TEXT NOT NULL, commit_sha TEXT NOT NULL, at TEXT NOT NULL,"
                 " body TEXT NOT NULL)"
+            )
+            # Phase 4, additive: platform-written provenance for a plan. The
+            # plan body is model-authorable; this table is not.
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS plan_provenance (plan_id TEXT PRIMARY KEY,"
+                " fingerprint TEXT NOT NULL, dry_run_tier INTEGER NOT NULL,"
+                " dry_run_at TEXT NOT NULL, approved_tier INTEGER, tier0_released_at TEXT)"
             )
 
     @contextmanager
@@ -193,6 +229,9 @@ class PlanStore:
                 " VALUES (?,?,?)",
                 (plan.id, _hash(token), datetime.now(UTC).isoformat()),
             )
+            # A new approval cycle: whatever tier an earlier one was granted for
+            # says nothing about this one.
+            c.execute("UPDATE plan_provenance SET approved_tier=NULL WHERE plan_id=?", (plan.id,))
         self.save(plan)
         return token
 
@@ -223,6 +262,13 @@ class PlanStore:
         plan.transition(ChangeState.approved, f"approved by {approver} via {channel}")
         with self._conn() as c:
             c.execute("DELETE FROM approvals WHERE plan_id=?", (plan_id,))
+            # The tier the human was shown when they typed the token. The engine
+            # recomputes the tier before it executes and refuses anything that
+            # has grown past this, so an escalation cannot ride an old approval.
+            c.execute(
+                "UPDATE plan_provenance SET approved_tier=? WHERE plan_id=?",
+                (int(plan.tier), plan_id),
+            )
         self.save(plan)
         return plan
 
@@ -239,6 +285,75 @@ class PlanStore:
 
     def dump_json(self, plan: ChangePlan) -> str:
         return json.dumps(plan.llm_view())
+
+    # -- provenance (Phase 4, additive) --------------------------------------
+    def record_dry_run(self, plan_id: str, fingerprint: str, tier: Tier | int) -> PlanProvenance:
+        """Remember that *this* platform dry-ran this exact plan.
+
+        Written only by `ChangeEngine.dry_run`. The Tier 0 release is cleared: a
+        plan that is dry-run again has to be released again. An approval is kept
+        across a re-validation only while the plan is still the one that was
+        approved - re-validating an *edited* plan drops it, because what the
+        human said yes to is no longer what would be sent.
+        """
+        previous = self.provenance(plan_id)
+        approved = (
+            previous.approved_tier if previous and previous.fingerprint == fingerprint else None
+        )
+        row = PlanProvenance(
+            plan_id=plan_id,
+            fingerprint=fingerprint,
+            dry_run_tier=int(tier),
+            dry_run_at=datetime.now(UTC),
+            approved_tier=approved,
+        )
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO plan_provenance"
+                " (plan_id, fingerprint, dry_run_tier, dry_run_at, approved_tier,"
+                " tier0_released_at) VALUES (?,?,?,?,?,NULL)",
+                (
+                    row.plan_id,
+                    row.fingerprint,
+                    row.dry_run_tier,
+                    _iso(row.dry_run_at),
+                    row.approved_tier,
+                ),
+            )
+        return row
+
+    def release_tier0(self, plan_id: str) -> None:
+        """`ChangeEngine.run_tier0` says the guard allowed this plan, just now.
+
+        Nothing else may write this: it is what tells `execute` that an
+        `approved` Tier 0 plan reached that state through a live guard decision
+        rather than through a plan body that claimed it.
+        """
+        with self._conn() as c:
+            updated = c.execute(
+                "UPDATE plan_provenance SET tier0_released_at=? WHERE plan_id=?",
+                (datetime.now(UTC).isoformat(), plan_id),
+            ).rowcount
+        if not updated:
+            raise ApprovalError(f"{plan_id} has no dry run to release")
+
+    def provenance(self, plan_id: str) -> PlanProvenance | None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT plan_id, fingerprint, dry_run_tier, dry_run_at, approved_tier,"
+                " tier0_released_at FROM plan_provenance WHERE plan_id=?",
+                (plan_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return PlanProvenance(
+            plan_id=row[0],
+            fingerprint=row[1],
+            dry_run_tier=row[2],
+            dry_run_at=datetime.fromisoformat(row[3]),
+            approved_tier=row[4],
+            tier0_released_at=datetime.fromisoformat(row[5]) if row[5] else None,
+        )
 
     # -- execution records (Phase 4, additive) -------------------------------
     def record_execution(self, record: ExecutionRecord) -> ExecutionRecord:

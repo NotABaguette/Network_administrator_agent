@@ -106,8 +106,11 @@ def change_dry_run(
         console.print(f"[red]unknown plan[/]: {plan_id}")
         raise typer.Exit(code=1) from None
     console.print_json(data=plan.llm_view())
-    if plan.state is not ChangeState.dry_run:
-        console.print("[red]blocked[/]: the plan stays proposed; see the blockers above")
+    blockers = plan.diff.get("blockers") if isinstance(plan.diff, dict) else None
+    if blockers or (plan.state is ChangeState.proposed):
+        # A plan past `proposed` is being re-validated, so its state does not
+        # move; what says whether the dry run was clean is the blocker list.
+        console.print(f"[red]blocked[/]: {plan.state.value}; see the blockers above")
         raise typer.Exit(code=1)
     console.print(f"tier [bold]{plan.tier.name}[/]: " + "; ".join(plan.tier_reasons))
     if not request_approval:
@@ -185,6 +188,8 @@ def change_show(plan_id: str) -> None:
     """A plan, its history and every execution recorded against it."""
     from rich.table import Table
 
+    from infra_agent.change.plan import ChangeState, Tier
+
     engine = _change_engine()
     try:
         plan = engine.plans.get(plan_id)
@@ -192,6 +197,25 @@ def change_show(plan_id: str) -> None:
         console.print(f"[red]unknown plan[/]: {plan_id}")
         raise typer.Exit(code=1) from None
     console.print_json(data=plan.llm_view())
+    provenance = engine.plans.provenance(plan_id)
+    if provenance is None:
+        console.print(
+            "[yellow]not dry-run by this platform[/]: run `infra change dry-run "
+            f"{plan_id}` before executing it"
+        )
+    if (
+        plan.tier is Tier.WINDOW
+        and plan.confirmation_phrase
+        and plan.state
+        in (
+            ChangeState.awaiting_approval,
+            ChangeState.approved,
+        )
+    ):
+        # This terminal is a human channel, the same one `infra change dry-run
+        # --request-approval` prints the token to. The phrase is never logged,
+        # never returned to a tool and never in `llm_view`.
+        console.print(f"tier 2 confirmation phrase: [bold]{plan.confirmation_phrase}[/]")
     records = engine.plans.executions(plan_id)
     if not records:
         console.print("[yellow]no execution recorded[/]")

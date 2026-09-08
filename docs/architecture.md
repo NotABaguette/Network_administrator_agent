@@ -107,8 +107,14 @@ through the CLI or Telegram buttons, with a token minted for the human channel.
 Every change is a `ChangePlan`: targets, intended diff, pre-checks, execution
 steps, post-checks, rollback steps, computed tier. Rollback strategies:
 
-- **Cisco:** `configure terminal revert timer N` with `configure confirm`
-  from the post-check. Never `reload in`.
+- **Cisco:** `configure terminal revert timer N`, then `configure confirm` in a
+  commit phase the engine runs only once *every* device of the plan has passed
+  its post-checks (confirming one switch before another is checked cannot be
+  undone). Never `reload in`. A rollback is verified by re-reading the object;
+  a change that was already confirmed is undone by the inverse configuration
+  built from the state the step captured. VLAN changes are refused unless the
+  switch is VTP transparent or off, because a VLAN in vlan.dat is not in the
+  archived running-config the revert timer restores.
 - **FortiOS:** inverse object operations over REST. Never revision restore
   (it reboots the 60F, and API-token sessions do not create revisions).
 - **ESXi:** host-config backup before host changes; VM snapshot before VM

@@ -22,6 +22,7 @@ Done once, by hand or via the exact commands `infra onboard accounts` prints.
 - [ ] Local user `infra-rw` privilege 15 for the change engine.
 - [ ] SSH v2 only; on old 2960s note the legacy KEX/ciphers in the seed inventory.
 - [ ] `archive` configured (path to flash or mgmt-01 SCP) so `configure revert timer` works.
+- [ ] `vtp mode transparent` (or `off`) on any switch whose VLANs the platform may change: in server or client mode VLANs live in vlan.dat, which the archive does not restore, and `no vlan N` on a server propagates across the domain. The executor refuses VLAN changes otherwise.
 - [ ] CDP and LLDP enabled on ports facing hosts and the firewall.
 - [ ] SNMPv3 user (auth+priv) for mgmt-01.
 

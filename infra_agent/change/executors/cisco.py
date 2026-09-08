@@ -6,23 +6,38 @@ The rollback strategy is fixed by `docs/architecture.md` and by
     configure terminal revert timer <N>     # arms an automatic rollback
     ... the action's configuration ...
     end
-    <post-checks run here>
-    configure confirm                       # keeps the change
+    <post-checks run here, on every device of the plan>
+    configure confirm                       # keeps the change (commit phase)
     configure revert now                    # or throws it away
 
 Never `reload in`: a reload takes the whole switch down, and the point of the
 revert timer is that a change that cuts the session off undoes itself while
 everything else keeps running. `configure revert now` restores the archived
 configuration taken when the timer was armed, so it also undoes the later steps
-of a multi-step plan.
+of a multi-step plan - which is why the timer is armed once, by the first step,
+and never re-armed.
 
-Three properties this module enforces rather than assumes:
+Six properties this module enforces rather than assumes:
 
 * **The revert timer needs the archive feature.** Without `archive` + `path`,
   `configure terminal revert timer` has nothing to roll back to and the safety
   net is imaginary. `dry_run` runs `show archive` and blocks with the exact
   remediation when it is not configured; `apply` re-checks, because a plan may
   sit approved for hours.
+* **A VLAN needs somewhere to roll back to.** On a VTP server or client a
+  normal-range VLAN lives in vlan.dat, not in the running-config, so the
+  archive cannot restore it - and `no vlan 20` on a server deletes it across the
+  whole domain. `dry_run` reads `show vtp status` and refuses VLAN work unless
+  the switch is transparent or off; `apply` re-checks.
+* **Confirming is a phase, not a side effect of checking.** `post_check` only
+  verifies. The engine calls `commit` once *every* device of the plan has
+  passed, so a two-switch plan cannot end with switch A confirmed and switch B
+  reverted.
+* **A rollback is verified, never assumed.** After `configure revert now` (or,
+  for a change already confirmed, the inverse configuration built from the
+  state each step captured) the object is read back and compared. Silence from
+  the switch is not evidence, and a plan whose timer was never armed is told
+  there was nothing to undo instead of being sent a revert.
 * **Only the action's own commands are ever sent.** Every line is rendered from
   a template in `_config_lines`, every parameter is validated (VLAN ids, an
   interface-name charset, a description charset), and `_assert_safe` refuses
@@ -44,7 +59,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -78,6 +93,32 @@ ARCHIVE_REMEDIATION = (
     "   maximum 10\n"
     "   write-memory\n"
     "(use `path bootflash:archive` on IOS-XE), then dry-run this plan again."
+)
+
+#: Why a VLAN change is refused on a switch that is not VTP transparent (or
+#: off), and what to do about it. Two separate reasons, both fatal:
+#:
+#: * in server or client mode a normal-range VLAN lives in `vlan.dat`, not in
+#:   the running-config, so `configure revert now` cannot bring a deleted VLAN
+#:   back - the rollback would report success while every access port in that
+#:   VLAN stayed inactive;
+#: * on a VTP server `no vlan 20` is not a local change at all: it propagates to
+#:   every switch in the domain.
+VTP_REMEDIATION = (
+    "VLAN changes are refused on this switch: VTP is in {mode} mode (domain {domain}). "
+    "Normal-range VLANs then live in vlan.dat rather than in the running-config, so the "
+    "`configure terminal revert timer` rollback cannot restore a deleted VLAN, and on a "
+    "server `no vlan N` deletes it across the whole VTP domain. Either set `vtp mode "
+    "transparent` (or `vtp mode off`) on this switch, or make the VLAN change deliberately "
+    "on the VTP server, then dry-run this plan again."
+)
+
+#: `show vtp status` did not say. VLAN changes stop here too: the rollback story
+#: for a VLAN depends entirely on the answer.
+VTP_UNKNOWN = (
+    "VLAN changes are refused: this switch did not answer `show vtp status`, so whether a "
+    "VLAN lives in the running-config (VTP transparent/off, where the revert timer can roll "
+    "it back) or in vlan.dat (VTP server/client, where it cannot) is unknown."
 )
 
 #: A line the executor must never send, whatever a template says. `configure
@@ -151,6 +192,28 @@ _INTERFACE_ABBREVIATIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: What a rollback says when the switch did not come back to where it was.
+_NOT_BACK = "the switch did not return to the state this step captured ({keys})"
+
+#: IOS answering `configure revert now` with "there is nothing pending".
+#: `ScrapliSession` already raises on a `%` line; this catches the wordings that
+#: come back as ordinary output so silence is never read as success.
+_REVERT_REFUSED = re.compile(
+    r"(no rollback|not running|rollback.*not (?:configured|in progress)"
+    r"|nothing to (?:revert|roll))",
+    re.IGNORECASE,
+)
+
+
+def _revert_refusal(output: str) -> str | None:
+    """The line where IOS said it had nothing to revert, if it said so."""
+    for raw in (output or "").splitlines():
+        line = raw.strip()
+        if _REVERT_REFUSED.search(line) or (line.startswith("%") and not SYSLOG_LINE.match(line)):
+            return line[:160]
+    return None
+
+
 class CiscoError(RuntimeError):
     """A command failed on the switch, or was refused before it was sent."""
 
@@ -215,8 +278,40 @@ def _vlan_list(value: Any, field: str) -> list[int]:
     return vlans
 
 
-def _vlan_range(vlans: Sequence[int]) -> str:
-    return ",".join(str(v) for v in vlans)
+#: Every VLAN a trunk can carry. `switchport trunk allowed vlan` missing from an
+#: interface means all of them, which is not the same thing as none of them.
+ALL_VLANS = frozenset(range(1, 4095))
+
+#: How a trunk that allows everything is written in a diff, rather than as 4094
+#: numbers.
+ALL = "all"
+
+
+def _vlan_range(vlans: Iterable[int]) -> str:
+    """`[10, 20, 30, 31, 32]` -> `10,20,30-32`, the way IOS reads and prints it.
+
+    One id per VLAN is not merely verbose: `switchport trunk allowed vlan add
+    100,101,...,200` is a 700-character line, and the `all` case would be 20 kB
+    that IOS rejects outright.
+    """
+    ordered = sorted(set(int(v) for v in vlans))
+    if not ordered:
+        return ""
+    parts: list[str] = []
+    start = previous = ordered[0]
+    for vlan in ordered[1:]:
+        if vlan == previous + 1:
+            previous = vlan
+            continue
+        parts.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = vlan
+    parts.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(parts)
+
+
+def _allowed_display(vlans: Sequence[int] | None) -> str:
+    """What the approver is shown for a trunk's allowed list: `all`, or a range."""
+    return ALL if vlans is None else _vlan_range(vlans)
 
 
 # -- the session ------------------------------------------------------------
@@ -233,6 +328,29 @@ class CiscoSession(Protocol):
 ConnectFactory = Callable[[SeedDevice, Credential], Any]
 
 
+#: A syslog message, which is not a rejected command. A vty with `terminal
+#: monitor` (or `logging monitor` left on) prints `%LINK-3-UPDOWN: ...` and
+#: `%SYS-5-CONFIG_I: ...` straight into the middle of a `show`, and reading one
+#: of those as a rejection would fail a post-check and roll a good change back.
+#: `terminal no monitor` is sent when the session opens; this is the second line
+#: of defence, and it is why not every `%` line is an error.
+SYSLOG_LINE = re.compile(r"^%[A-Za-z][\w-]*-\d-[A-Za-z0-9_]+\s*:")
+
+
+def error_line(output: str) -> str | None:
+    """The first line of `output` that is IOS refusing the command, if any.
+
+    IOS answers a bad command with `% Invalid input detected at '^' marker`,
+    `% Incomplete command`, `%Archive feature not enabled` and friends: a `%` at
+    the start of a line, followed by prose rather than by a syslog facility.
+    """
+    for raw in (output or "").splitlines():
+        line = raw.strip()
+        if line.startswith("%") and not SYSLOG_LINE.match(line):
+            return line
+    return None
+
+
 class ScrapliSession:
     """A `CiscoSession` over an open scrapli driver.
 
@@ -243,9 +361,6 @@ class ScrapliSession:
     to the prompt works in every mode this executor uses.
     """
 
-    #: How IOS reports a rejected command.
-    _ERROR = re.compile(r"^%\s*\S", re.MULTILINE)
-
     def __init__(self, connection: Any) -> None:
         self.connection = connection
 
@@ -253,8 +368,9 @@ class ScrapliSession:
         line = _assert_safe(command)
         raw = self.connection.channel.send_input(line)
         output = _as_text(raw)
-        if self._ERROR.search(output):
-            raise CiscoError(f"{line!r} was rejected: {output.strip().splitlines()[0][:160]}")
+        rejected = error_line(output)
+        if rejected:
+            raise CiscoError(f"{line!r} was rejected: {rejected[:160]}")
         return output
 
 
@@ -302,20 +418,72 @@ def scrapli_session(device: SeedDevice, credential: Credential) -> Iterator[Cisc
         kwargs["ssh_config_file"] = True
     driver = IOSXEDriver(**kwargs)
     with driver as connection:
-        yield ScrapliSession(connection)
+        session = ScrapliSession(connection)
+        # Log messages on the vty would land in the middle of a `show` and be
+        # read as command rejections. Best effort: a switch that refuses the
+        # command still works, `error_line` just has more to do.
+        for line in ("terminal length 0", "terminal no monitor"):
+            try:
+                session.send(line)
+            except Exception:
+                log.debug("%s: `%s` was not accepted", device.name, line)
+        yield session
 
 
 # -- parsers (classic IOS and IOS-XE) ---------------------------------------
 def parse_archive(output: str) -> bool:
     """True when the archive feature has a path, on either platform.
 
-    Both print `The next archive file will be named ...` once `archive path` is
-    set; without it IOS says `%Archive feature not enabled` and IOS-XE prints
-    the header alone.
+    Both print `The next archive file will be named flash:/archive/config-3`
+    once `archive path` is set; without it IOS says `%Archive feature not
+    enabled` and IOS-XE prints the header alone. The name has to be a real
+    filesystem path (`flash:`, `bootflash:`, `disk0:`, a URL): a switch with
+    `archive` but no `path` answers with the sentence and nothing usable after
+    it, and a checkpoint that does not exist is exactly the safety net this
+    check is here to refuse to imagine.
     """
-    if re.search(r"^%", output or "", re.MULTILINE):
+    if error_line(output or ""):
         return False
-    return "the next archive file will be named" in (output or "").lower()
+    match = re.search(r"the next archive file will be named\s+(\S+)", output or "", re.IGNORECASE)
+    if not match:
+        return False
+    name = match.group(1)
+    return bool(re.match(r"^[A-Za-z][\w.-]*:", name))
+
+
+def parse_vtp_status(output: str) -> dict[str, str]:
+    """`show vtp status` -> {mode, domain}, on classic IOS and on VTPv3.
+
+    VTPv3 prints a mode per feature under `Feature VLAN:`, and calls the server
+    role `Primary Server` / `Secondary Server`; classic IOS prints one
+    `VTP Operating Mode`. The VLAN feature's mode is the one that decides
+    whether `vlan 20` is a line of running-config or a row in vlan.dat.
+    """
+    text = output or ""
+    modes = [
+        m.group(1).strip().lower() for m in re.finditer(r"VTP Operating Mode\s*:\s*(.+)", text)
+    ]
+    feature = re.split(r"Feature VLAN\s*:", text, maxsplit=1)
+    if len(feature) > 1:
+        after = [
+            m.group(1).strip().lower()
+            for m in re.finditer(r"VTP Operating Mode\s*:\s*(.+)", feature[1])
+        ]
+        modes = after or modes
+    mode = ""
+    for candidate in modes:
+        if "server" in candidate:
+            mode = "server"
+        elif "client" in candidate:
+            mode = "client"
+        elif "transparent" in candidate:
+            mode = "transparent"
+        elif candidate.startswith("off"):
+            mode = "off"
+        if mode:
+            break
+    domain = re.search(r"VTP Domain Name\s*:\s*(.*)", text)
+    return {"mode": mode, "domain": (domain.group(1).strip() if domain else "")}
 
 
 def parse_vlan_brief(output: str) -> dict[int, dict[str, Any]]:
@@ -594,6 +762,81 @@ def _trunk_port_lines(params: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _inverse_lines(step: ChangeStep, before: dict[str, Any]) -> list[str]:
+    """The configuration that puts `before` back, for a change already committed.
+
+    `configure revert now` is the rollback while the revert timer is armed. Once
+    `configure confirm` has run there is no checkpoint left, and for a VLAN
+    there may never have been one: on a VTP server or client the VLAN lives in
+    vlan.dat, which the archive does not carry (which is why `dry_run` refuses
+    VLAN work on those switches in the first place). So the undo is written out
+    of the state the step captured before it ran, and verified afterwards.
+
+    An empty list means there is nothing to undo, not that the undo is unknown:
+    `switch.clear_errdisable` shuts and unshuts a port without changing a line
+    of configuration.
+    """
+    params = step.params
+    if step.action in ("vlan.add", "vlan.remove"):
+        vlan = _vlan_id(params.get("vlan"))
+        if not before.get("exists"):
+            return [f"no vlan {vlan}"]
+        lines = [f"vlan {vlan}"]
+        name = str(before.get("name") or "").strip()
+        if name and VLAN_NAME_CHARSET.match(name):
+            lines.append(f"name {name}")
+        lines.append("exit")
+        return lines
+    if step.action == "switch.clear_errdisable":
+        return []
+    interface = _interface(params.get("interface"))
+    lines = [f"interface {interface}"]
+    if step.action == "switch.access_port_config":
+        if params.get("description") is not None:
+            description = str(before.get("description") or "").strip()
+            lines.append(f"description {description}" if description else "no description")
+        if params.get("access_vlan") is not None:
+            previous = before.get("access_vlan")
+            lines.append(
+                f"switchport access vlan {int(previous)}"
+                if previous
+                else "no switchport access vlan"
+            )
+            mode = before.get("mode")
+            lines.append(f"switchport mode {mode}" if mode else "no switchport mode")
+        if params.get("portfast") is not None:
+            lines.append(
+                "spanning-tree portfast" if before.get("portfast") else "no spanning-tree portfast"
+            )
+        if params.get("shutdown") is not None:
+            lines.append("shutdown" if before.get("shutdown") else "no shutdown")
+    elif step.action == "switch.trunk_port_config":
+        added, removed = _trunk_deltas(params)
+        allowed = before.get("trunk_allowed_vlans")
+        if allowed is None:
+            # The trunk allowed everything before, so only a removal changed it.
+            if removed:
+                lines.append("switchport trunk allowed vlan add " + _vlan_range(removed))
+        else:
+            back = sorted(removed & set(allowed))
+            undo = sorted(added - set(allowed))
+            if back:
+                lines.append("switchport trunk allowed vlan add " + _vlan_range(back))
+            if undo:
+                lines.append("switchport trunk allowed vlan remove " + _vlan_range(undo))
+        if params.get("native_vlan") is not None:
+            native = before.get("native_vlan")
+            lines.append(
+                f"switchport trunk native vlan {int(native)}"
+                if native
+                else "no switchport trunk native vlan"
+            )
+    if len(lines) == 1:
+        return []
+    lines.append("exit")
+    return lines
+
+
 def _predict(step: ChangeStep, before: dict[str, Any]) -> dict[str, Any]:
     """What the switch would look like afterwards, from the parsed before-state."""
     after = dict(before)
@@ -609,13 +852,15 @@ def _predict(step: ChangeStep, before: dict[str, Any]) -> dict[str, Any]:
         if params.get("shutdown") is not None:
             after["shutdown"] = bool(params["shutdown"])
     elif step.action == "switch.trunk_port_config":
-        allowed = set(before.get("trunk_allowed_vlans") or [])
-        allowed |= (
-            set(_vlan_list(params["add_vlans"], "add_vlans")) if params.get("add_vlans") else set()
-        )
-        if params.get("remove_vlans"):
-            allowed -= set(_vlan_list(params["remove_vlans"], "remove_vlans"))
-        after["trunk_allowed_vlans"] = sorted(allowed)
+        added, removed = _trunk_deltas(params)
+        before_allowed = before.get("trunk_allowed_vlans")
+        if before_allowed is None:
+            # No `switchport trunk allowed vlan` line at all: the trunk carries
+            # every VLAN. Adding to that changes nothing; removing narrows it
+            # for the first time, which is the whole trunk being rewritten.
+            after["trunk_allowed_vlans"] = None if not removed else sorted(ALL_VLANS - removed)
+        else:
+            after["trunk_allowed_vlans"] = sorted((set(before_allowed) | added) - removed)
         if params.get("native_vlan") is not None:
             after["native_vlan"] = _vlan_id(params["native_vlan"], "native_vlan")
     elif step.action == "switch.clear_errdisable":
@@ -623,8 +868,41 @@ def _predict(step: ChangeStep, before: dict[str, Any]) -> dict[str, Any]:
     return after
 
 
+def _trunk_deltas(params: dict[str, Any]) -> tuple[set[int], set[int]]:
+    """The VLANs a trunk step adds and the ones it removes."""
+    added = set(_vlan_list(params["add_vlans"], "add_vlans")) if params.get("add_vlans") else set()
+    removed = (
+        set(_vlan_list(params["remove_vlans"], "remove_vlans"))
+        if params.get("remove_vlans")
+        else set()
+    )
+    return added, removed
+
+
 def _changed_keys(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     return sorted(k for k in after if before.get(k) != after.get(k))
+
+
+def _display(state: dict[str, Any]) -> dict[str, Any]:
+    """One parsed state, as the approver should read it.
+
+    The only translation is the trunk's allowed list: internally `None` means
+    "every VLAN" and a list means exactly those, which reads as `[]` versus
+    `[20]` in a diff and says the opposite of the truth. In the diff it is
+    `all`, or an IOS range.
+    """
+    if "trunk_allowed_vlans" not in state:
+        return dict(state)
+    shown = dict(state)
+    shown["trunk_allowed_vlans"] = _allowed_display(state.get("trunk_allowed_vlans"))
+    return shown
+
+
+def _state_differences(before: Any, after: Any) -> list[str]:
+    """Which keys of a captured state did not come back to where they were."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return ["state"]
+    return sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key))
 
 
 # -- the executor ------------------------------------------------------------
@@ -661,7 +939,36 @@ class CiscoExecutor(Executor):
             return False
 
     @staticmethod
-    def _revert_timer(steps: Sequence[ChangeStep]) -> int:
+    def _vtp_blocker(session: CiscoSession, steps: Sequence[ChangeStep]) -> str | None:
+        """Refuse VLAN work on a switch where the rollback would be imaginary.
+
+        Only asked when the plan actually touches a VLAN: an access-port move is
+        a running-config change on any VTP mode, and does not care.
+        """
+        if not any(step.action.startswith("vlan.") for step in steps):
+            return None
+        try:
+            status = parse_vtp_status(session.send("show vtp status"))
+        except CiscoError:
+            return VTP_UNKNOWN
+        mode = status.get("mode") or ""
+        if mode in ("server", "client"):
+            return VTP_REMEDIATION.format(mode=mode, domain=status.get("domain") or "(unset)")
+        if not mode:
+            return VTP_UNKNOWN
+        return None
+
+    @staticmethod
+    def _timer_minutes(steps: Sequence[ChangeStep], ctx: ExecutionContext | None = None) -> int:
+        """How long the switch waits for `configure confirm`.
+
+        A plan's steps are applied device by device and the change is confirmed
+        only once *every* device has passed its post-checks, so the timer armed
+        on the first switch has to outlive the whole plan - each extra device is
+        another SSH session for its steps and another for its checks, and the
+        2960s in this estate are not quick to log into. A step may still name
+        its own `revert_timer_minutes`.
+        """
         for step in steps:
             value = step.params.get("revert_timer_minutes")
             if value is not None:
@@ -671,7 +978,10 @@ class CiscoExecutor(Executor):
                     continue
                 if 1 <= minutes <= 120:
                     return minutes
-        return DEFAULT_REVERT_TIMER_MINUTES
+        extra = ctx.extra if ctx is not None else {}
+        devices = max(1, int(extra.get("plan_devices") or 1))
+        total_steps = max(1, int(extra.get("plan_steps") or len(steps) or 1))
+        return min(120, DEFAULT_REVERT_TIMER_MINUTES + 2 * (devices - 1) + (total_steps - 1))
 
     # -- dry run ---------------------------------------------------------
     def dry_run(self, ctx: ExecutionContext, steps: list[ChangeStep]) -> DryRunResult:
@@ -680,11 +990,14 @@ class CiscoExecutor(Executor):
         warnings: list[str] = []
         changes: list[dict[str, Any]] = []
         commands: list[str] = []
-        timer = self._revert_timer(steps)
+        timer = self._timer_minutes(steps, ctx)
         try:
             with self._session(ctx) as session:
                 if not self._archive_ready(session):
                     blockers.append(ARCHIVE_REMEDIATION)
+                vtp = self._vtp_blocker(session, steps)
+                if vtp:
+                    blockers.append(vtp)
                 vlans = parse_vlan_brief(session.send("show vlan brief"))
                 for step in steps:
                     try:
@@ -741,8 +1054,8 @@ class CiscoExecutor(Executor):
             return (
                 {
                     "object": f"vlan {vlan}",
-                    "before": before,
-                    "after": after,
+                    "before": _display(before),
+                    "after": _display(after),
                     "changed": _changed_keys(before, after),
                 },
                 warnings,
@@ -766,8 +1079,8 @@ class CiscoExecutor(Executor):
         return (
             {
                 "object": f"interface {interface}",
-                "before": before,
-                "after": after,
+                "before": _display(before),
+                "after": _display(after),
                 "changed": _changed_keys(before, after),
             },
             warnings,
@@ -779,12 +1092,19 @@ class CiscoExecutor(Executor):
         started = datetime.now(UTC)
         sent: list[str] = []
         key = (ctx.plan_id, ctx.device.name)
+        before: dict[str, Any] | None = None
         try:
             lines = _config_lines(step)
-            timer = self._revert_timer([step])
+            timer = self._timer_minutes([step], ctx)
             with self._session(ctx) as session:
                 if not self._archive_ready(session):
                     raise CiscoError(ARCHIVE_REMEDIATION)
+                # Re-checked here and not only in the dry run: a plan can sit
+                # approved for hours, and a switch that changed VTP mode in
+                # between is a switch whose VLAN rollback no longer exists.
+                vtp = self._vtp_blocker(session, [step])
+                if vtp:
+                    raise CiscoError(vtp)
                 before = self._capture(session, step)
                 sent.append(self._enter_config(session, timer, armed=key in self._armed))
                 self._armed.add(key)
@@ -795,10 +1115,15 @@ class CiscoExecutor(Executor):
                 sent.append("end")
                 after = self._capture(session, step)
         except Exception as exc:
+            output: dict[str, Any] = {"commands": sent, "revert_armed": key in self._armed}
+            if before is not None:
+                # What the port or VLAN looked like before this step: the only
+                # thing a rollback can verify itself against.
+                output["before"] = before
             return StepResult(
                 step=step,
                 ok=False,
-                output={"commands": sent, "revert_armed": key in self._armed},
+                output=output,
                 error=f"{type(exc).__name__}: {exc}",
                 started_at=started,
                 finished_at=datetime.now(UTC),
@@ -820,23 +1145,22 @@ class CiscoExecutor(Executor):
 
     @staticmethod
     def _enter_config(session: CiscoSession, timer: int, *, armed: bool) -> str:
-        """`configure terminal revert timer N`, or plain config mode on a re-entry.
+        """Enter configuration mode, arming the revert timer exactly once.
 
-        A second step of the same plan re-arms the timer; some IOS releases
-        refuse that while a rollback is already pending, and a plain `configure
-        terminal` is then correct: `configure revert now` still restores the
-        checkpoint taken when the timer was first armed, so the later steps are
-        undone too.
+        The timer is armed by the first step of a plan on a device and never
+        again: `configure terminal revert timer N` takes a fresh checkpoint of
+        the running-config, and a second one - taken when step 1 is already in
+        place - would leave `configure revert now` undoing only the later steps.
+        Whether a release resets or refuses a pending timer differs across the
+        2960/3560/3750/3650 mix, so the executor does not find out. Later steps
+        enter plain configuration mode and are covered by the first checkpoint.
         """
-        line = f"configure terminal revert timer {timer}"
-        try:
-            session.send(line)
-            return line
-        except CiscoError:
-            if not armed:
-                raise
+        if armed:
             session.send("configure terminal")
             return "configure terminal"
+        line = f"configure terminal revert timer {timer}"
+        session.send(line)
+        return line
 
     @staticmethod
     def _capture(session: CiscoSession, step: ChangeStep) -> dict[str, Any]:
@@ -856,27 +1180,37 @@ class CiscoExecutor(Executor):
             return [self._evaluate(session, check) for check in checks]
 
     def post_check(self, ctx: ExecutionContext, checks: list[str]) -> list[CheckResult]:
-        """Evaluate the post-checks and then commit - or leave the timer to run out.
+        """Verify, and only verify. Committing is a separate phase.
 
-        The engine calls this even when the plan declares no post-checks,
-        because `configure confirm` lives here: without the call the armed
-        revert timer would undo a change that worked.
+        Nothing here cancels the revert timer: the engine confirms every device
+        of a plan only once all of them have passed their post-checks (see
+        `commit`). Verifying and committing device A before device B is even
+        looked at is what leaves A changed and confirmed when B fails - and on
+        IOS a `configure confirm` cannot be taken back.
+        """
+        if not checks:
+            return []
+        with self._session(ctx) as session:
+            return [self._evaluate(session, check) for check in checks]
+
+    def commit(self, ctx: ExecutionContext) -> list[CheckResult]:
+        """`configure confirm`, and `write memory` when the plan persists.
+
+        Called by the change engine after every device's post-checks passed. Up
+        to here the change is still holding its own undo: if this is never
+        reached, the revert timer expires and the switch puts itself back.
         """
         results: list[CheckResult] = []
         with self._session(ctx) as session:
-            results = [self._evaluate(session, check) for check in checks]
-            if not all(r.ok for r in results):
-                return results  # the engine rolls back, which issues `configure revert now`
             try:
                 session.send("configure confirm")
             except Exception as exc:
                 return [
-                    *results,
                     CheckResult(
                         check="configure confirm",
                         ok=False,
                         detail=f"the change could not be committed: {type(exc).__name__}: {exc}",
-                    ),
+                    )
                 ]
             self._armed.discard((ctx.plan_id, ctx.device.name))
             results.append(
@@ -910,32 +1244,221 @@ class CiscoExecutor(Executor):
 
     # -- rollback --------------------------------------------------------
     def rollback(self, ctx: ExecutionContext, applied: list[StepResult]) -> list[StepResult]:
-        """`configure revert now`: back to the checkpoint the revert timer took.
+        """Put the switch back, and prove it - or say that it is not back.
 
         `applied` arrives in the order the steps were applied; the results come
-        back in reverse, which is the order they were undone in. One revert
-        undoes all of them, because they share the plan's checkpoint.
+        back in reverse, the order they were undone in. Which undo is used
+        depends on what state the change is actually in:
+
+        * **nothing was armed** - the first step never got its revert timer, so
+          no configuration was sent. Nothing is sent now either: a
+          `configure revert now` here either errors or silently reverts someone
+          else's pending change.
+        * **armed, not committed** - `configure revert now` restores the
+          checkpoint the timer took, undoing every step of the plan at once.
+        * **committed** - `configure confirm` has already thrown the checkpoint
+          away, so each step is undone by the inverse configuration built from
+          the state it captured, inside a revert timer of its own.
+
+        In both undo paths the state is captured again afterwards and compared
+        with what the step recorded before it ran. Silence from the switch is
+        not evidence: `ok` means the port or the VLAN is measurably back.
         """
-        detail: dict[str, Any] = {"commands": ["configure revert now"]}
-        error: str | None = None
+        key = (ctx.plan_id, ctx.device.name)
+        if not any(r.output.get("revert_armed") for r in applied):
+            self._armed.discard(key)
+            return [
+                StepResult(
+                    step=result.step,
+                    ok=True,
+                    output={
+                        "commands": [],
+                        "reverted": False,
+                        "reason": "no revert timer was armed, so no configuration was sent "
+                        "and there is nothing to undo",
+                    },
+                    finished_at=datetime.now(UTC),
+                )
+                for result in reversed(applied)
+            ]
         try:
             with self._session(ctx) as session:
-                session.send("configure revert now")
-            ok = True
+                if ctx.extra.get("committed"):
+                    results = self._rollback_inverse(session, ctx, applied)
+                else:
+                    results = self._rollback_timer(session, applied)
         except Exception as exc:
-            ok = False
             error = f"{type(exc).__name__}: {exc}"
-        self._armed.discard((ctx.plan_id, ctx.device.name))
+            results = [
+                StepResult(
+                    step=result.step,
+                    ok=False,
+                    output={"reverted": False},
+                    error=error,
+                    finished_at=datetime.now(UTC),
+                )
+                for result in reversed(applied)
+            ]
+        self._armed.discard(key)
+        return results
+
+    def _rollback_timer(self, session: CiscoSession, applied: list[StepResult]) -> list[StepResult]:
+        """One `configure revert now` for the whole plan, then verify each step."""
+        commands = ["configure revert now"]
+        try:
+            output = session.send("configure revert now")
+        except Exception as exc:
+            return [
+                StepResult(
+                    step=result.step,
+                    ok=False,
+                    output={"commands": commands, "reverted": False},
+                    error=f"the rollback was refused: {type(exc).__name__}: {exc}",
+                    finished_at=datetime.now(UTC),
+                )
+                for result in reversed(applied)
+            ]
+        refusal = _revert_refusal(output)
         return [
-            StepResult(
-                step=result.step,
-                ok=ok,
-                output={**detail, "reverted": ok},
-                error=error,
+            self._verify_undo(session, result, commands, refusal) for result in reversed(applied)
+        ]
+
+    def _rollback_inverse(
+        self, session: CiscoSession, ctx: ExecutionContext, applied: list[StepResult]
+    ) -> list[StepResult]:
+        """Undo a committed change step by step, from the state each step captured."""
+        results: list[StepResult] = []
+        for result in reversed(applied):
+            before = result.output.get("before")
+            if not isinstance(before, dict):
+                results.append(
+                    StepResult(
+                        step=result.step,
+                        ok=False,
+                        output={"commands": [], "reverted": False},
+                        error="this step captured no state, so a committed change cannot be "
+                        "undone from it; check the device by hand",
+                        finished_at=datetime.now(UTC),
+                    )
+                )
+                continue
+            results.append(self._undo_step(session, ctx, result.step, before))
+        restored = [r for r in results if r.output.get("reverted")]
+        if restored and all(r.ok for r in results) and ctx.extra.get("persist", True):
+            # Advisory, as it is after a change: the restored configuration is
+            # live either way, this is so it survives the next reload.
+            self._persist(session)
+        return results
+
+    def _undo_step(
+        self,
+        session: CiscoSession,
+        ctx: ExecutionContext,
+        step: ChangeStep,
+        before: dict[str, Any],
+    ) -> StepResult:
+        commands: list[str] = []
+        try:
+            lines = _inverse_lines(step, before)
+            if not lines:
+                return StepResult(
+                    step=step,
+                    ok=True,
+                    output={
+                        "commands": [],
+                        "reverted": False,
+                        "reason": f"{step.action} changes no configuration, so a committed "
+                        "change has nothing to undo",
+                    },
+                    finished_at=datetime.now(UTC),
+                )
+            timer = self._timer_minutes([step], ctx)
+            commands.append(self._enter_config(session, timer, armed=False))
+            for line in lines:
+                session.send(line)
+                commands.append(line)
+            session.send("end")
+            commands.append("end")
+            after = self._capture(session, step)
+            differs = _state_differences(before, after)
+            commands.append("configure revert now" if differs else "configure confirm")
+            session.send(commands[-1])
+        except Exception as exc:
+            return StepResult(
+                step=step,
+                ok=False,
+                output={"commands": commands, "reverted": False, "before": before},
+                error=f"{type(exc).__name__}: {exc}",
                 finished_at=datetime.now(UTC),
             )
-            for result in reversed(applied)
-        ]
+        return StepResult(
+            step=step,
+            ok=not differs,
+            output={
+                "commands": commands,
+                "reverted": not differs,
+                "before": before,
+                "after": after,
+                "differs": differs,
+            },
+            error=None if not differs else _NOT_BACK.format(keys=", ".join(differs)),
+            finished_at=datetime.now(UTC),
+        )
+
+    def _verify_undo(
+        self,
+        session: CiscoSession,
+        result: StepResult,
+        commands: list[str],
+        refusal: str | None,
+    ) -> StepResult:
+        """Is this step's object back to the state the step captured before it ran?"""
+        before = result.output.get("before")
+        if refusal:
+            return StepResult(
+                step=result.step,
+                ok=False,
+                output={"commands": commands, "reverted": False},
+                error=f"the rollback was refused: {refusal}",
+                finished_at=datetime.now(UTC),
+            )
+        if not isinstance(before, dict):
+            # The step failed before it captured anything, which means it also
+            # configured nothing: there is no claim to make about it.
+            return StepResult(
+                step=result.step,
+                ok=True,
+                output={
+                    "commands": commands,
+                    "reverted": False,
+                    "reason": "this step captured no state and changed nothing",
+                },
+                finished_at=datetime.now(UTC),
+            )
+        try:
+            after = self._capture(session, result.step)
+        except Exception as exc:
+            return StepResult(
+                step=result.step,
+                ok=False,
+                output={"commands": commands, "reverted": False, "before": before},
+                error=f"the rollback could not be verified: {type(exc).__name__}: {exc}",
+                finished_at=datetime.now(UTC),
+            )
+        differs = _state_differences(before, after)
+        return StepResult(
+            step=result.step,
+            ok=not differs,
+            output={
+                "commands": commands,
+                "reverted": not differs,
+                "before": before,
+                "after": after,
+                "differs": differs,
+            },
+            error=None if not differs else _NOT_BACK.format(keys=", ".join(differs)),
+            finished_at=datetime.now(UTC),
+        )
 
     # -- the check language ----------------------------------------------
     def _evaluate(self, session: CiscoSession, check: str) -> CheckResult:

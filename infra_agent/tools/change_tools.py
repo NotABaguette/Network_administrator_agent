@@ -1,11 +1,20 @@
 """Change tools.
 
 `change.approve`, `change.execute` and `change.rollback` are NOT callable by the
-language model: they are registered with `llm_callable=False`, the agent runner
-refuses them a second time by name, and nothing here ever returns an approval
-token or a Tier 2 confirmation phrase. The model may propose a plan, ask for a
-dry run and read a plan's state; a human approves and a human (or the Tier 0
-guard, through `ChangeEngine.run_tier0`) executes.
+language model: they are registered with `llm_callable=False`, so the runner
+never builds a tool definition for them, and nothing here ever returns an
+approval token or a Tier 2 confirmation phrase. The model may propose a plan,
+ask for a dry run and read a plan's state; a human approves and a human (or the
+Tier 0 guard, through `ChangeEngine.run_tier0`) executes.
+
+`infra_agent/agent/runner.py` refuses `change.approve` and `change.execute` a
+second time by name (`FORBIDDEN_TOOLS`); `change.rollback` belongs in that set
+too and is currently held back by `llm_callable=False` alone.
+
+A proposal is content, never state: `propose` keeps the fields a plan is
+*written* from and drops everything the platform owns, so a plan cannot arrive
+pre-approved, pre-dry-run or pre-tiered. `ChangeEngine.execute` does not take
+the plan's word for any of it either - it checks the store's own provenance.
 """
 
 from __future__ import annotations
@@ -42,25 +51,67 @@ def configure(engine_: ChangeEngine | None) -> None:
     _engine = engine_
 
 
+#: The only fields of a ChangePlan a proposal may carry. Everything else is
+#: platform state: the state machine, the computed tier and its reasons, the
+#: rendered diff, the history, the approval record and the Tier 2 confirmation
+#: phrase are written by the engine, the store and the human channel. A plan
+#: that could arrive carrying `state: approved` and an approval record would be
+#: a plan the model approves for itself, so a proposal is stripped to its
+#: content before it is validated - and `ChangeEngine.execute` believes the
+#: store's own provenance rather than any of this anyway.
+PLAN_CONTENT_FIELDS = frozenset(
+    {
+        "title",
+        "action",
+        "targets",
+        "summary",
+        "pre_checks",
+        "steps",
+        "post_checks",
+        "rollback",
+        "window",
+    }
+)
+
+
 @tool("change", tier=Tier.APPROVAL, parallel_safe=False)
 def propose(plan: dict[str, Any]) -> dict[str, Any]:
-    """Propose a ChangePlan. Returns the plan as the model may see it (no approval material)."""
-    cp = ChangePlan.model_validate(plan)
+    """Propose a ChangePlan. Returns the plan as the model may see it (no approval material).
+
+    Only the content of the plan is taken: title, action, targets, summary,
+    steps, pre/post checks, rollback steps and a maintenance window. The plan is
+    always recorded as `proposed`, with no approval, no history and no tier: the
+    tier is computed by `change.dry_run` from impact analysis, and approval is a
+    human's to give.
+
+    Args:
+        plan: The ChangePlan content.
+    """
+    if not isinstance(plan, dict):
+        raise TypeError("a ChangePlan proposal must be an object")
+    content = {key: value for key, value in plan.items() if key in PLAN_CONTENT_FIELDS}
+    ignored = sorted(set(plan) - PLAN_CONTENT_FIELDS)
+    cp = ChangePlan.model_validate({**content, "proposed_by": "agent"})
     store().save(cp)
-    return cp.llm_view()
+    view = cp.llm_view()
+    if ignored:
+        view["ignored_fields"] = ignored
+    return view
 
 
 @tool("change", parallel_safe=False)
 def dry_run(plan_id: str) -> dict[str, Any]:
-    """Dry-run a proposed ChangePlan: render its diff and compute its risk tier.
+    """Dry-run a ChangePlan: render its diff and compute its risk tier.
 
     Nothing is changed on any device. The plan comes back with a structured
     before/after diff, the tier impact analysis computed for it and the reasons
-    behind that tier. If anything blocks it the plan stays `proposed` and the
+    behind that tier. The tier is computed from every action the plan sends and
+    every port and VLAN its steps touch, so it may come back higher than the
+    plan asked for. If anything blocks it, the state does not move and the
     blockers are in the diff and in the plan's history.
 
     Args:
-        plan_id: Id of a ChangePlan in state `proposed`.
+        plan_id: Id of a ChangePlan that has not run yet.
     """
     return engine().dry_run(plan_id).llm_view()
 
