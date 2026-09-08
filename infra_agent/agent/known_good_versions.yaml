@@ -49,3 +49,23 @@ ilo:
   notes: >-
     iLO4 is 2.x, iLO5 is 3.x. iLO4 is session-limited and slow; update it
     outside collector polling windows.
+
+guest_linux:
+  known_good:
+    - "Ubuntu 22.04"
+    - "Ubuntu 24.04"
+    - "Debian 12"
+  minimum: "Ubuntu 22.04"
+  notes: >-
+    Guest operating systems are compared on their os-release PRETTY_NAME
+    prefix. Anything not listed is reported as unmanaged rather than out of
+    date; patch level is tracked by the guest collector, not here.
+
+guest_windows:
+  known_good:
+    - "Windows Server 2019"
+    - "Windows Server 2022"
+  minimum: "Windows Server 2019"
+  notes: >-
+    Compared on the product name. End-of-support editions are reported as out
+    of date so the weekly report keeps nagging until they are migrated.
