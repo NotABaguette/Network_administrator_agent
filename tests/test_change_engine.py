@@ -734,6 +734,28 @@ def test_a_rollback_that_fails_pages_harder(settings, store):
     assert any("half-changed" in m for m in notifier.critical)
 
 
+def test_a_rollback_that_reports_nothing_is_not_taken_as_success(settings, store):
+    """Silence is not an undo: without a result there is nothing saying the
+    device was put back, and the owner has to hear that."""
+
+    class SilentExecutor(FakeExecutor):
+        def rollback(self, ctx: ExecutionContext, applied: list[StepResult]) -> list[StepResult]:
+            self.calls.append(("rollback", [r.step.action for r in applied]))
+            return []
+
+    engine, _, notifier = build_engine(settings, store, SilentExecutor(fail_post=True))
+    plan = vlan_plan()
+    store.save(plan)
+    engine.dry_run(plan.id)
+    approve(store, store.get(plan.id))
+
+    record = engine.execute(plan.id)
+
+    assert record.outcome == "rollback_failed"
+    assert any("undo is unconfirmed" in n for n in record.notes)
+    assert any("half-changed" in m for m in notifier.critical)
+
+
 def test_an_advisory_check_pages_but_keeps_the_change(settings, store):
     engine, _, notifier = build_engine(settings, store, FakeExecutor(advisory_fails=True))
     plan = vlan_plan()

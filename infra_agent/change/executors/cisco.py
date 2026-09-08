@@ -727,7 +727,7 @@ class CiscoExecutor(Executor):
             if step.action == "vlan.add":
                 after = {"exists": True, "name": params.get("name") or before["name"]}
                 if exists:
-                    warnings.append(f"vlan {vlan} already exists on {step.params.get('device')}")
+                    warnings.append(f"vlan {vlan} already exists, so adding it is a no-op")
             else:
                 after = {"exists": False, "name": None}
                 members = vlans.get(vlan, {}).get("ports") or []

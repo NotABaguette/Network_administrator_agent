@@ -676,7 +676,7 @@ class ChangeEngine:
 
         failures = self._run_checks(resolution, contexts, "pre", record)
         if failures:
-            return self._fail(plan, record, started, failures, [], resolution)
+            return self._fail(plan, record, started, failures, [], resolution, contexts)
 
         applied: list[StepResult] = []
         for step in plan.steps:
@@ -689,6 +689,7 @@ class ChangeEngine:
                     [f"step {step.action} was not assigned to a device"],
                     applied,
                     resolution,
+                    contexts,
                 )
             try:
                 result = work.executor.apply(contexts[work.device.name], step)
@@ -709,6 +710,7 @@ class ChangeEngine:
                     [f"step {step.action} on {work.device.name} failed: {result.error}"],
                     applied,
                     resolution,
+                    contexts,
                 )
 
         plan.transition(ChangeState.verifying, "applied; verifying")
@@ -718,7 +720,7 @@ class ChangeEngine:
         # call would let the revert timer expire and undo a good change.
         failures = self._run_checks(resolution, contexts, "post", record)
         if failures:
-            return self._fail(plan, record, started, failures, applied, resolution)
+            return self._fail(plan, record, started, failures, applied, resolution, contexts)
 
         record.outcome = "done"
         self._finish(record, started)
@@ -811,6 +813,7 @@ class ChangeEngine:
         failures: list[str],
         applied: list[StepResult],
         resolution: Resolution,
+        contexts: Mapping[str, ExecutionContext],
     ) -> ExecutionRecord:
         """A pre-check, a step or a post-check failed: roll back and page."""
         record.notes.extend(self._clean(f) for f in failures)
@@ -825,12 +828,18 @@ class ChangeEngine:
                 try:
                     # Handed over in application order: every executor's
                     # `rollback` contract is to undo them in reverse itself.
-                    rolled.extend(work.executor.rollback(work.context(plan.id), mine))
+                    rolled.extend(work.executor.rollback(contexts[work.device.name], mine))
                 except Exception as exc:
                     rollback_errors.append(
                         f"{work.device.name}: rollback raised {type(exc).__name__}: {exc}"
                     )
-            rolled_ok = bool(rolled) and all(r.ok for r in rolled) and not rollback_errors
+            if not rolled and not rollback_errors:
+                # Silence is not success: without a result there is nothing to
+                # say the device was put back, so the owner is told that.
+                rollback_errors.append(
+                    "the executor reported no rollback result, so the undo is unconfirmed"
+                )
+            rolled_ok = all(r.ok for r in rolled) and not rollback_errors
         else:
             rolled_ok = True  # nothing was applied, so nothing needed undoing
         record.rollback_steps = rolled
@@ -914,15 +923,17 @@ class ChangeEngine:
                 continue
             metrics.CHANGE_ROLLBACKS.labels(platform=work.device.platform).inc()
             try:
-                rolled.extend(work.executor.rollback(work.context(plan.id), mine))
+                rolled.extend(
+                    work.executor.rollback(work.context(plan.id, persist=_persist(plan)), mine)
+                )
             except Exception as exc:
                 errors.append(f"{work.device.name}: rollback raised {type(exc).__name__}: {exc}")
+        if not rolled and not errors:
+            errors.append("the executor reported no rollback result, so the undo is unconfirmed")
         record.rollback_steps = rolled
         record.notes.extend(self._clean(e) for e in errors)
         record.outcome = (
-            "rolled_back"
-            if rolled and all(r.ok for r in rolled) and not errors
-            else "rollback_failed"
+            "rolled_back" if all(r.ok for r in rolled) and not errors else "rollback_failed"
         )
         self._finish(record, started)
         if plan.can_transition(ChangeState.rolled_back):
