@@ -368,8 +368,14 @@ def build_bundle(
             excluded=exclusion_rows(),
         )
         (stage / MANIFEST_NAME).write_text(manifest.model_dump_json(indent=1))
+        # Only tighten a directory we created. An operator's existing target -
+        # an NFS export shared with a backup group, say - is theirs to set, and
+        # silently reducing it to 0700 every night is a surprise nobody asked
+        # for. deploy/standby/README.md says to create the inbox 0700.
+        fresh = not dest_dir.exists()
         dest_dir.mkdir(parents=True, exist_ok=True)
-        _restrict(dest_dir, BUNDLE_DIR_MODE)
+        if fresh:
+            _restrict(dest_dir, BUNDLE_DIR_MODE)
         bundle = archive.create(stage, dest_dir / name)
 
     _restrict(bundle, BUNDLE_MODE)

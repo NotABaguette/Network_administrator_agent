@@ -273,6 +273,17 @@ Install it when you build the standby, not when you need it: at failback time
 the primary is a machine somebody has just rebuilt and you will not want to be
 copying keys around by hand. `INFRA_PRIMARY_SSH_USER` selects the account.
 
+## What this directory is not
+
+This is the platform's own disaster recovery. **The VMs' backups are a separate
+thing** the platform only watches: ghettoVCB on the ESXi hosts, or an agent
+inside a guest. Their layout, the cron line that produces it, and the timezone
+the collector reads timestamps in are Appendix A of
+[`docs/runbooks/dr-mgmt-01.md`](../../docs/runbooks/dr-mgmt-01.md); the
+collector is `infra_agent/collectors/backups.py` and the alerts are
+`BackupMissing` and `BackupJobMissing`. A DR bundle does not contain a single
+VM disk, and restoring one restores the administrator, not the estate.
+
 ## Rehearsal
 
 Twice a year, and after any change to this directory. Full procedure in
